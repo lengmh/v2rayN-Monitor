@@ -8,6 +8,7 @@ permissions:
 jobs:
   validate:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -35,6 +36,8 @@ jobs:
         working-directory: web
       - run: python scripts/check_plan.py
       - run: dotnet build V2rayNMonitor.sln -c Release
+      - if: runner.os == 'Linux'
+        run: python scripts/smoke_demo.py
       - run: dotnet test tests/Core.Tests/Core.Tests.csproj -c Release --no-build --logger trx
       - run: dotnet test tests/Server.Tests/Server.Tests.csproj -c Release --no-build --logger trx
       - if: runner.os == 'Windows'

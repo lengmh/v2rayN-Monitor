@@ -18,7 +18,7 @@ public sealed class ProviderImports : IDisposable
     private sealed record Row(string Name, decimal Rate, long Raw, long Billed, string Display, DateTimeOffset At);
     public ProviderImports(string path)
     {
-        db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path }.ToString());
+        db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
         db.Open();
         using var cmd = db.CreateCommand();
         cmd.CommandText = """

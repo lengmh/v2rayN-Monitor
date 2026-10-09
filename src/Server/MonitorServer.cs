@@ -28,6 +28,7 @@ public sealed class MonitorServer : IAsyncDisposable
     private readonly ProviderImports imports;
     public Ledger Ledger { get; }
     public string Address { get; private set; } = "";
+    public CancellationToken Stopping => app.Lifetime.ApplicationStopping;
     public AppSettings Settings { get { lock (settingsGate) return settings; } }
     public void SetStatus(CollectorStatus value) => Volatile.Write(ref status, value);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
