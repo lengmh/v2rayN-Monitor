@@ -30,7 +30,7 @@
 | NuGet 安全审计 | 已升级旧 SQLite 依赖；最终构建未禁用审计 |
 | `python scripts/check_plan.py` / `git diff --check` | 通过 |
 | `dotnet publish ... -r win-x64 --self-contained true` | 交叉发布成功，真实 Windows 启动仍未运行 |
-| Chromium 视觉/CSP/移动端回归 | 本地运行环境受限，7 项已加入 Linux CI，不能称本地通过 |
+| Chromium 视觉/CSP/移动端回归 | 本地受限；首提交 Linux CI 的 7 项已通过，最终提交需重新核对 |
 | 一次有界主路径审查 | 未发现额外可复现 P0/P1；不代替运行验收 |
 
 本地验证中已修复的关键问题：
@@ -38,6 +38,9 @@
 1. 目标 7.25.1 使用 flat Xray settings，早期传统 vnext/servers 假设不适用。改为固定版本真实结构，并对所有普通协议补回归；旧形状明确拒绝。
 2. 原生 SQLite 旧传递依赖触发高危审计。升级 Microsoft.Data.Sqlite 10.0.12 与 SQLitePCLRaw 3.0.5，不通过关闭审计掩盖。
 3. Kestrel StopAsync 内部可能捕获 WinForms 同步上下文，单靠外层 ConfigureAwait(false) 仍会在同步退出时等待 UI。以不运行消息泵的线程重现，再将服务器生命周期入口隔离到线程池，保留回归测试。
+
+4. 首轮 Windows CI 暴露服务商 SQLite 连接池在 Dispose 后保留文件句柄。该服务本身使用长连接，无需额外连接池；关闭 pooling，并复核主账本/发现连接也已关闭 pooling。现有 6 项导入测试的销毁步骤在 Windows 复现该问题，修复后重新运行 CI。
+5. 合成 Demo 的 HTTP 烟测发现 SIGTERM 已停止宿主，但 CLI 仍等待独立取消源。将等待绑定到宿主停止令牌，并加入生产资源/API/退出的可重放烟测。
 
 ## 确切提交 CI
 
