@@ -1,0 +1,6 @@
+node_name,rate,origin_traffic,origin_x_rate,traffic,log_time
+Synthetic-A,1,1048576,1048576,1 MiB,2026-01-01 10:00:00
+Synthetic-B,0,2097152,0,0 B,2026-01-01 10:01:00
+Synthetic-C,2,1024,2048,2 KiB,2026-01-01 10:02:00
+Synthetic-A,1,4096,4096,4 KiB,2026-01-01 10:03:00
+Synthetic-A,1,4096,4096,4 KiB,2026-01-01 10:03:00

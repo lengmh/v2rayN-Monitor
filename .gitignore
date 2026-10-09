@@ -1,0 +1,35 @@
+# Build outputs
+**/bin/
+**/obj/
+node_modules/
+dist/
+.vs/
+__pycache__/
+*.pyc
+
+# User data and credentials: never publish
+.env
+.env.*
+!*.example
+/data/
+/imports/
+/logs/
+/runtime/
+/local/
+/artifacts/
+bootstrap-result.json
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.log
+*.csv
+!tests/fixtures/provider-synthetic.csv
+*.s2p
+*.s4p
+*.key
+*.pem
+guiConfigs/
+guiNConfig.json
+guiNDB.db
