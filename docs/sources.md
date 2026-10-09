@@ -53,3 +53,15 @@
 ## 用户格式约束（不公开真实附件）
 
 本轮只读本地附件的 CSV 表头，确认六字段：`node_name, rate, origin_traffic, origin_x_rate, traffic, log_time`。公开仓库仅含人为合成的 fixtures，没有真实节点名称、流量记录、IP 或设备信息。此前聊天中出现的记录数或日汇总不作为开发验收真值。
+
+## 初版实现补充核对（2026-10-09）
+
+用户目标版本为 v2rayN 7.25.1，其固定提交为 `77c462ec7b5adb8d0ad65c0a3b6452cd3c6cb70a`。本次只核读源码，未读取真实用户配置。
+
+- [统计设置和 metrics 生成](https://github.com/2dust/v2rayN/blob/7.25.1/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayStatisticService.cs)：统计或速度显示开启后生成动态回环 metrics。
+- [Xray 原始读取路径](https://github.com/2dust/v2rayN/blob/7.25.1/v2rayN/ServiceLib/Services/Statistics/StatisticsXrayService.cs)：`/debug/vars`，Monitor 不照搬界面的 1024 缩放。
+- [核心启动顺序和命令行](https://github.com/2dust/v2rayN/blob/7.25.1/v2rayN/ServiceLib/Manager/CoreManager.cs)：配置生成可能先于旧核心停止；标准 Xray 命令为 `run -c config.json`。
+- [数据根目录与文件路径](https://github.com/2dust/v2rayN/blob/7.25.1/v2rayN/ServiceLib/Common/Utils.cs)：GUI 配置、SQLite 和 binConfigs；环境变量可改变数据根目录。
+- [SQLite 数据库路径](https://github.com/2dust/v2rayN/blob/7.25.1/v2rayN/ServiceLib/Helper/SqliteHelper.cs) · [ProfileItem 字段](https://github.com/2dust/v2rayN/blob/7.25.1/v2rayN/ServiceLib/Models/Entities/ProfileItem.cs)：以 IndexId 定位；Password/Username 为当前字段，不能使用旧版 Id/Security 假设。
+- [.NET 10 下载与支持](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)：本地验证 SDK 10.0.401。
+- [原生 SQLite 旧依赖漏洞](https://github.com/advisories/GHSA-2m69-gcr7-jv3q)：初始依赖审计发现旧本地库受影响，改用 Microsoft.Data.Sqlite 10.0.12 与 SQLitePCLRaw.bundle_e_sqlite3 3.0.5（SQLite 3.53.4），不关闭最终构建的安全审计。
