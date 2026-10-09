@@ -1,52 +1,64 @@
 # v2rayN Monitor
 
-以 **v2rayN 本机流量**为主要数据来源的 Windows 节点流量历史统计工具。
+以 **v2rayN 本机流量**为主来源的 Windows 托盘统计工具。关闭浏览器后仍持续采集；历史独立保存在本机 SQLite，支持按节点查看日、周、月、年趋势。
 
-独立系统托盘负责常驻采集，HTML 页面用于查看各节点的上传、下载、合计，以及日、周、月、年趋势。服务商 CSV 仅作为偶尔导入的辅助账本；TrafficMonitor 插件作为可选显示入口。
+> **初版预览代码。** 目标环境是 Windows x64、v2rayN **7.25.1 + Xray 普通单节点**。源码核对、合成测试、跨平台构建与 Windows 实机验收是不同证据；当前还没有真实 Windows/v2rayN 会话的验收记录。未发布正式 Release，不能当作计费凭证。
 
-> 当前处于计划阶段。本仓库初始化资料不包含可运行采集器或应用 Release，也没有已经通过的 Windows 兼容性声明。
+## 已实现的主流程
 
-## 产品原则
+- WinForms 托盘常驻、单数据目录单实例、系统浏览器本地页面；便携包无需 WebView2
+- 只读发现 Xray 进程与动态 metrics 端口，以进程代次、有效配置和节点身份核对归属
+- 原始整数字节记账；第一条只建基线，切换/重启/未知边界留缺口，读取失败不写成零
+- SQLite 原子游标与分钟历史，节点改名保留历史，日/周/月/年汇总、排行、分页、CSV 导出
+- 回环监听、一次性打开链接、短期会话、Host/Origin 校验；无云端、无遥测、无 CDN
+- 可选六列服务商 CSV 预览与事务导入，独立账本、同文件防重；不影响本机采集
+- 完全合成的演示数据与针对性回归测试
 
-不导入任何服务商数据，也应能自动完成核心统计。只读访问 v2rayN 配置和内核统计，不接管代理连接、不重置内核计数。历史独立保存在本地；身份不明和采集缺口如实标注。
+不支持 sing-box、TUN、策略组、多跳链、自定义核心配置或多个 v2rayN 实例的精确统计。复杂或不确定配置会显示原因并暂停归属，不猜测出口。没有签名、安装器或自动更新器。
 
-本机与服务商使用不同账本，不叠加、不覆盖。没有设备/IP/上下行数据的导入记录仍可保存，但不猜测归属。不设置服务商每两天导入的日常要求。
+## 使用
 
-## 规划功能
+[快速开始、统计设置与故障排查](docs/QUICKSTART.md) · [支持边界](docs/compatibility.md) · [当前验证状态](docs/STATUS.md)
 
-| 主线 | 后续可选 |
-|---|---|
-| 自动发现或手动选择 v2rayN 实例 | 第二内核兼容扩展 |
-| 原始字节采集、节点归属、历史持久化 | 服务商 CSV 手动导入与对照 |
-| HTML 日/周/月/年统计与节点排行 | TrafficMonitor 薄插件 |
-| 托盘常驻、分页记录与导出 | 需要时增加嵌入式窗口 |
+CI 成功后可在对应 Actions 运行的 `windows-x64-preview` artifact 下载便携预览包。解压到可写目录，运行 `V2rayN-Monitor.exe`，选择包含 `guiConfigs` 和 `binConfigs` 的 v2rayN **数据根目录**。不需要导入 CSV。
 
-计划采用 .NET 10、SQLite、HTML + TypeScript；首版在系统浏览器打开本地页面，无需让浏览器一直运行。具体支持的内核版本与模式必须经过 S0 和 Windows 实机验收后写入兼容矩阵。
+默认数据位于 `%LOCALAPPDATA%\V2rayN-Monitor\data`。`--demo` 使用独立演示目录，不连接真实核心；`--data-dir "D:\MonitorData"` 可显式选择 Monitor 历史目录。托盘菜单可手动启用当前用户登录时启动。
 
-## 开发资料
+## 开发与测试
 
-- [分阶段开发计划：8 个阶段、33 个任务节点](docs/development-plan.md)
-- [架构与计量契约](docs/architecture.md)
-- [支持矩阵](docs/compatibility.md) · [当前状态](docs/STATUS.md)
-- [开发执行约定](AGENTS.md) · [源码与官方依据](docs/sources.md)
-
-## 仓库与计划校验
-
-公开仓库已建立：[lengmh/v2rayN-Monitor](https://github.com/lengmh/v2rayN-Monitor)。当前发布的是计划、初始化工具与合成样本，应用开发尚未开始；最新进度见 [当前状态](docs/STATUS.md)。
-
-检查计划与公开文件白名单，不做网络写入：
+需要 .NET 10 SDK、Node.js 24 和 Python 3：
 
 ```powershell
+cd web
+npm ci
+npm test
+npm run build
+cd ..
 python scripts/check_plan.py
-python scripts/bootstrap_github.py --dry-run
+dotnet build V2rayNMonitor.sln -c Release
+dotnet test tests/Core.Tests/Core.Tests.csproj -c Release
+dotnet test tests/Server.Tests/Server.Tests.csproj -c Release
+dotnet publish src/Host/Host.csproj -c Release -r win-x64 --self-contained true -o artifacts/win-x64
 ```
 
-这些是计划/初始化检查，不是应用功能测试。
+Linux/macOS 可验证核心记账与本地 API，并运行合成演示（不能采集 Windows v2rayN）：
 
-原始 [初始化脚本](scripts/bootstrap_github.py) 保留供参考。创建模式只适用于尚不存在的目标仓库，不应对本仓库重复执行。可选的 `--backlog-only` 模式可在已登录 GitHub CLI 的环境中生成 8 个 Milestone 和 33 个任务 Issue；本次仅发布文件，任务清单保存在 `docs/backlog.json`，尚未创建这些 GitHub 条目。
+```sh
+dotnet run --project src/Demo -- /tmp/v2rayn-monitor-demo
+```
 
-## 隐私与许可证
+控制台提供两分钟有效、一次性演示链接，不要分享。真实应用从托盘打开，无需复制令牌。
 
-运行数据默认仅保存在本机。公开测试数据必须完全合成；不得提交真实订阅地址、密钥、节点明细、服务商导出或数据库。详见 [SECURITY.md](SECURITY.md)。
+## 数据口径与限制
 
-项目原创资料和后续原创代码默认采用 MIT 许可证。项目并非 v2rayN、Xray、sing-box 或 TrafficMonitor 官方组件，也不在初始化包中复制它们的源码；引入第三方实现前须分别核对许可证。
+本机上传/下载来自 Xray `proxy` outbound 的原始累计值，不与 direct/inbound 相加，也不等同于网卡线速或服务商扣费。身份采用实例与 IndexId，不按名字合并。
+
+长期保存 UTC 分钟记录，短采样按时间比例守恒分配；分钟内分布是近似。查询边界精度为分钟，日界线按设置的时区、周从周一开始。连续会话长缺口恢复的总量单列“未分时”，不填入日期图表。缺口和未观察时段不能当作已证实的零流量。
+
+服务商数值列须为非负整数字节；保留原始量和计费量，零倍率仍可能有原始量。相同文件重复导入不增加记录，文件内合法重复保留。无稳定记录 ID 的不同重叠文件在初版明确拒绝，不做猜测去重。仅展示最近 200 批导入记录，无批次撤销或本机节点自动匹配。
+
+## 项目资料与隐私
+
+[8 阶段/33 节点计划](docs/development-plan.md) · [架构](docs/architecture.md) · [固定源码依据](docs/sources.md) · [开发约定](AGENTS.md) · [安全边界](SECURITY.md)
+
+只提交原创实现和完全合成测试。真实配置、订阅、密码、节点明细、数据库、CSV 和运行日志不得上传仓库。运行不修改 v2rayN 配置、不重启核心、不调用 reset 统计操作。原创资料与代码采用 [MIT](LICENSE)。本项目并非 v2rayN、Xray、sing-box 或 TrafficMonitor 官方组件。

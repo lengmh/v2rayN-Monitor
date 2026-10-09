@@ -1,0 +1,57 @@
+name: Build and regression tests
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: npm ci
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+        working-directory: web
+      - if: runner.os == 'Linux'
+        run: npm run test:ui
+        working-directory: web
+      - run: python scripts/check_plan.py
+      - run: dotnet build V2rayNMonitor.sln -c Release
+      - run: dotnet test tests/Core.Tests/Core.Tests.csproj -c Release --no-build --logger trx
+      - run: dotnet test tests/Server.Tests/Server.Tests.csproj -c Release --no-build --logger trx
+      - if: runner.os == 'Windows'
+        run: dotnet publish src/Host/Host.csproj -c Release -r win-x64 --self-contained true -o artifacts/win-x64
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item README.md,LICENSE,SECURITY.md,THIRD-PARTY-NOTICES.md artifacts/win-x64/
+          Copy-Item licenses artifacts/win-x64/licenses -Recurse
+          Copy-Item docs/QUICKSTART.md artifacts/win-x64/QUICKSTART.md
+          Compress-Archive -Path artifacts/win-x64/* -DestinationPath artifacts/v2rayN-Monitor-win-x64-preview.zip
+          (Get-FileHash artifacts/v2rayN-Monitor-win-x64-preview.zip -Algorithm SHA256).Hash | Out-File artifacts/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: windows-x64-preview
+          path: |
+            artifacts/v2rayN-Monitor-win-x64-preview.zip
+            artifacts/SHA256.txt
+          retention-days: 14
