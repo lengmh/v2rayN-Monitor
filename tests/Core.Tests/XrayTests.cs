@@ -189,14 +189,27 @@ public sealed class XrayTests
     }
 
     [Fact]
-    public void NodeSwitchWithinSameProcessStaysPoisonedUntilNewProcess()
+    public void SelectionOnlySwitchRejectsTheRaceButAllowsANewStableBaseline()
     {
         var guard = new XrayGenerationGuard();
         Assert.True(guard.Observe(Snapshot(), out _));
         Assert.False(guard.Accept(Snapshot(), Snapshot(node: "B"), out _));
-        Assert.False(guard.Observe(Snapshot(node: "B"), out _));
-        Assert.False(guard.Observe(Snapshot(), out _));
+        Assert.True(guard.RequiresBaseline);
+        Assert.True(guard.Accept(Snapshot(node: "B"), Snapshot(node: "B"), out _));
+        Assert.True(guard.RequiresBaseline);
+        guard.AcknowledgePersistence();
+        Assert.False(guard.RequiresBaseline);
+        Assert.True(guard.Observe(Snapshot(), out _));
+        Assert.True(guard.RequiresBaseline);
         Assert.True(guard.Observe(Snapshot(node: "B", process: "pid:100:start:2"), out _));
+    }
+
+    [Fact]
+    public void RenameWithinTheSameSelectionIsDisplayOnly()
+    {
+        var guard = new XrayGenerationGuard();
+        Assert.True(guard.Accept(Snapshot(), Snapshot() with { NodeName = "Renamed synthetic" }, out _));
+        Assert.False(guard.RequiresBaseline);
     }
 
     [Fact]

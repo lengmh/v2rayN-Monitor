@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using V2rayNMonitor.Core;
@@ -119,7 +120,7 @@ public sealed class ProviderImportTests : IDisposable
     [Theory]
     [InlineData("Synthetic-invalid,1,NaN,1,display,2026-01-01 00:00:00", typeof(ArgumentException))]
     [InlineData("Synthetic-overflow,1,9223372036854775807,1,display,2026-01-01 00:00:00", typeof(OverflowException))]
-    [InlineData("Synthetic-overflow,1,1,9223372036854775807,display,2026-01-01 00:00:00", typeof(OverflowException))]
+    [InlineData("Synthetic-overflow,1,1,79228162514264337593543950335,display,2026-01-01 00:00:00", typeof(OverflowException))]
     public void InvalidLastRowInLargeFileNeverSavesPartialRowsOrBatch(string lastRow, Type exceptionType)
     {
         var valid = RepeatedRows(19_869);
@@ -172,12 +173,18 @@ public sealed class ProviderImportTests : IDisposable
         }.ToString());
         db.Open();
         using var command = db.CreateCommand();
-        command.CommandText = "SELECT COUNT(*), COALESCE(SUM(raw_bytes),0), COALESCE(SUM(billed_bytes),0) FROM provider_records";
+        command.CommandText = "SELECT COUNT(*), COALESCE(SUM(raw_bytes),0) FROM provider_records";
         using var reader = command.ExecuteReader();
         Assert.True(reader.Read());
         Assert.Equal(count, reader.GetInt64(0));
         Assert.Equal(raw, reader.GetInt64(1));
-        Assert.Equal(billed, reader.GetInt64(2));
+        reader.Close();
+        // SQLite SUM would coerce decimal text to REAL; do not use it for provider accounting.
+        command.CommandText = "SELECT billed_bytes,typeof(billed_bytes) FROM provider_records";
+        using var values = command.ExecuteReader();
+        var total = BigInteger.Zero;
+        while (values.Read()) { Assert.Equal("text", values.GetString(1)); total += BigInteger.Parse(values.GetString(0), CultureInfo.InvariantCulture); }
+        Assert.Equal(new BigInteger(billed), total);
     }
     public void Dispose() { imports.Dispose(); Directory.Delete(root, true); }
 }

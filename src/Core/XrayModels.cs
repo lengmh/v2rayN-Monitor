@@ -1,6 +1,7 @@
 namespace V2rayNMonitor.Core;
 
-public sealed record CollectorReading(CounterSample? Sample, string State, string Message, string? CurrentNode);
+public sealed record CollectorReading(CounterSample? Sample, string State, string Message, string? CurrentNode,
+    bool InvalidateContinuity = false);
 public sealed record XrayCounters(long Upload, long Download);
 public sealed record XrayGuiSelection(string IndexId, bool EnableStatistics, bool DisplayRealTimeSpeed, bool EnableTun)
 {

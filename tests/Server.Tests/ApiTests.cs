@@ -85,5 +85,55 @@ public sealed class ApiTests : IAsyncLifetime
     [Theory]
     [InlineData("=x")][InlineData(" +x")][InlineData("-x")][InlineData("@x")][InlineData("\tx")]
     public void SpreadsheetFormulaPrefixesEscaped(string value) => Assert.StartsWith("\"'", MonitorServer.Cell(value));
+
+    [Fact] public async Task DecimalProviderCsvRoundTripsPreviewCommitListAndDuplicateWithoutChangingLocalLedger()
+    {
+        await Login();
+        const string csv = """
+            node_name,rate,origin_traffic,origin_x_rate,traffic,log_time
+            Synthetic-A,1,1000,1000,synthetic,2026-01-01 00:00:00
+            Synthetic-A,0.8,1000,800,synthetic,2026-01-01 00:01:00
+            Synthetic-A,0.8,1001,800.800000000123,synthetic,2026-01-01 00:02:00
+            """;
+        var request = new { source = "synthetic-decimal-http", timeZoneId = "UTC", csv };
+        foreach (var route in new[] { "/api/imports/preview", "/api/imports/commit" })
+        {
+            var response = await client.PostAsJsonAsync(route, request);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("2600.800000000123", body.GetProperty("billedBytes").GetString());
+            Assert.Equal("3001", body.GetProperty("rawBytes").GetString());
+            Assert.False(body.GetProperty("duplicate").GetBoolean());
+        }
+        var duplicate = await client.PostAsJsonAsync("/api/imports/commit", request);
+        Assert.True((await duplicate.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("duplicate").GetBoolean());
+        var batches = await client.GetFromJsonAsync<JsonElement>("/api/imports");
+        Assert.Equal(1, batches.GetArrayLength());
+        Assert.Equal("2600.800000000123", batches[0].GetProperty("billedBytes").GetString());
+        Assert.Empty(server.Ledger.GetNodes());
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC");
+        Assert.Equal("0", history.GetProperty("upload").GetString());
+        Assert.Equal("0", history.GetProperty("download").GetString());
+    }
+
+    [Theory]
+    [InlineData("0.00000000000000000000000000001")]
+    [InlineData("79228162514264337593543950336")]
+    [InlineData("-1")]
+    public async Task InvalidDecimalProviderCsvReturnsBadRequestAndNoBatch(string billed)
+    {
+        await Login();
+        var csv = "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic-A,1,1,0.1,synthetic,2026-01-01 00:00:00\n"
+            + $"Synthetic-B,1,1,{billed},synthetic,2026-01-01 00:01:00";
+        var request = new { source = "synthetic-invalid-http", timeZoneId = "UTC", csv };
+        foreach (var route in new[] { "/api/imports/preview", "/api/imports/commit" })
+        {
+            var response = await client.PostAsJsonAsync(route, request);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("无损", (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        }
+        Assert.Equal(0, (await client.GetFromJsonAsync<JsonElement>("/api/imports")).GetArrayLength());
+        Assert.Empty(server.Ledger.GetNodes());
+    }
     public async Task DisposeAsync() { client.Dispose(); await server.DisposeAsync(); Directory.Delete(root, true); }
 }

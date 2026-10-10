@@ -1,6 +1,7 @@
 import './style.css';
 import { chartSlots, shortLabel } from './lib/chart.ts';
 import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
+import { exactProviderBytes, formatProviderBytes } from './lib/provider-format.ts';
 import type { Unit } from './lib/format.ts';
 import { dateInZone, dateRange, periodRange, shiftAnchor, timestamp } from './lib/ranges.ts';
 import type { Bucket, Period, Range } from './lib/ranges.ts';
@@ -82,7 +83,7 @@ function selectRange(): void {
 }
 function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
-  const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
+  const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
   put('collector-state', states[status.state.toLowerCase()] || status.state);
   put('collector-message', status.message || '等待有效采样。');
   put('current-node', status.currentNode || '未确定'); el('current-node').title = status.currentNode || '未确定';
@@ -207,7 +208,11 @@ async function loadBatches(): Promise<void> {
 function renderBatches(): void {
   const body = el('import-batches'); body.replaceChildren();
   if (!lastBatchList.length) { const row = element('tr'), cell = element('td', '尚未导入服务商账单。本机自动采集无需导入 CSV。', 'empty-state'); cell.colSpan = 5; row.append(cell); body.append(row); }
-  for (const batch of lastBatchList) { const row = element('tr'); row.append(element('td', batch.source), element('td', String(batch.rowCount)), element('td', formatBytes(batch.rawBytes, unit), 'numeric'), element('td', formatBytes(batch.billedBytes, unit), 'numeric'), element('td', timestamp(batch.importedAt || null, settings.timeZoneId))); body.append(row); }
+  for (const batch of lastBatchList) {
+    const row = element('tr'), billed = element('td', undefined, 'numeric');
+    billed.append(element('div', formatProviderBytes(batch.billedBytes, unit)), element('small', exactProviderBytes(batch.billedBytes)));
+    row.append(element('td', batch.source), element('td', String(batch.rowCount)), element('td', formatBytes(batch.rawBytes, unit), 'numeric'), billed, element('td', timestamp(batch.importedAt || null, settings.timeZoneId))); body.append(row);
+  }
 }
 function invalidateImport(): void { importRevision++; importRequest = null; show('import-preview', false); put('import-result', ''); }
 function formResult(id: string, value: string, isError = false): void { put(id, value); el(id).classList.toggle('error', isError); }
@@ -257,7 +262,7 @@ el('import-form').addEventListener('submit', async event => {
     const preview = await post<ImportPreview>('/api/imports/preview', request);
     if (revision !== importRevision) return;
     importRequest = request;
-    put('preview-details', `来源：${request.source}\n记录：${preview.rowCount.toLocaleString('zh-CN')} 条\n服务商原始量：${formatBytes(preview.rawBytes, unit)}（${exactBytes(preview.rawBytes)}）\n服务商计费量：${formatBytes(preview.billedBytes, unit)}（${exactBytes(preview.billedBytes)}）\n最早记录：${timestamp(preview.firstTime, request.timeZoneId)}\n最晚记录：${timestamp(preview.lastTime, request.timeZoneId)}`);
+    put('preview-details', `来源：${request.source}\n记录：${preview.rowCount.toLocaleString('zh-CN')} 条\n服务商原始量：${formatBytes(preview.rawBytes, unit)}（${exactBytes(preview.rawBytes)}）\n服务商计费量：${formatProviderBytes(preview.billedBytes, unit)}（${exactProviderBytes(preview.billedBytes)}）\n最早记录：${timestamp(preview.firstTime, request.timeZoneId)}\n最晚记录：${timestamp(preview.lastTime, request.timeZoneId)}`);
     el('import-warnings').replaceChildren(...(preview.warnings || []).map(warning => element('li', warning)));
     show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate;
     formResult('import-result', preview.duplicate ? '这个文件已经导入，不会重复记账。' : '预览完成。请确认来源与时区后导入。');
