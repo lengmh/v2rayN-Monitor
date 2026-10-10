@@ -63,6 +63,25 @@ public sealed class ApiTests : IAsyncLifetime
         var csv = await client.GetStringAsync("/api/export" + query);
         Assert.Contains("9007199254740993", csv); Assert.Contains("' =Synthetic", csv);
     }
+    [Fact] public async Task RepresentativeProviderCsvPassesPreviewAndCommitThroughHttp()
+    {
+        await Login();
+        const int rowCount = 19_870;
+        const string row = "Synthetic-A,1,1024,1024,1 KiB,2026-01-01 10:00:00\n";
+        var csv = "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\n" + string.Concat(Enumerable.Repeat(row, rowCount));
+        var request = new { source = "synthetic-http", timeZoneId = "UTC", csv };
+        var preview = await client.PostAsJsonAsync("/api/imports/preview", request);
+        Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
+        var body = await preview.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(rowCount, body.GetProperty("rowCount").GetInt32());
+        var commit = await client.PostAsJsonAsync("/api/imports/commit", request);
+        Assert.Equal(HttpStatusCode.OK, commit.StatusCode);
+        var batches = await client.GetFromJsonAsync<JsonElement>("/api/imports");
+        Assert.Equal(1, batches.GetArrayLength());
+        Assert.Equal(rowCount, batches[0].GetProperty("rowCount").GetInt32());
+        Assert.Equal((rowCount * 1024L).ToString(), batches[0].GetProperty("rawBytes").GetString());
+        Assert.Empty(server.Ledger.GetNodes());
+    }
     [Theory]
     [InlineData("=x")][InlineData(" +x")][InlineData("-x")][InlineData("@x")][InlineData("\tx")]
     public void SpreadsheetFormulaPrefixesEscaped(string value) => Assert.StartsWith("\"'", MonitorServer.Cell(value));
