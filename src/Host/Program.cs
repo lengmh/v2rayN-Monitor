@@ -96,7 +96,8 @@ internal sealed class TrayContext : ApplicationContext
                 var reading = await discovery.ReadAsync(server.Settings.V2rayNPath, stop.Token);
                 if (reading.Sample is { } sample)
                 {
-                    var outcome = server.Ledger.Accept(sample);
+                    var outcome = server.Ledger.Accept(sample, reading.InvalidateContinuity);
+                    if (outcome != "stale") discovery.AcknowledgePersistence();
                     string? up = null, down = null;
                     if (outcome == "recorded" && previous is not null && previous.SessionId == sample.SessionId && previous.Generation == sample.Generation && previous.NodeId == sample.NodeId && sample.At > previous.At && sample.Upload >= previous.Upload && sample.Download >= previous.Download)
                     {
@@ -109,7 +110,8 @@ internal sealed class TrayContext : ApplicationContext
                 }
                 else
                 {
-                    server.Ledger.RecordGap(DateTimeOffset.UtcNow, reading.State); previous = null;
+                    server.Ledger.RecordGap(DateTimeOffset.UtcNow, reading.State, reading.InvalidateContinuity);
+                    discovery.AcknowledgePersistence(); previous = null;
                     server.SetStatus(new(reading.State, reading.Message, reading.CurrentNode));
                 }
             }
@@ -118,7 +120,14 @@ internal sealed class TrayContext : ApplicationContext
             {
                 previous = null;
                 server.SetStatus(new("error", "采集或写入失败，已有历史保留。请检查统计设置、目录权限和磁盘空间。"));
-                try { server.Ledger.RecordGap(DateTimeOffset.UtcNow, "collector_error"); } catch (Exception) { /* Failed writes do not advance the durable cursor. */ }
+                try
+                {
+                    // If committing a discovered boundary failed, do not turn its next retry
+                    // into recoverable outage bytes from an earlier node.
+                    server.Ledger.RecordGap(DateTimeOffset.UtcNow, "collector_error", discovery.RequiresBaseline);
+                    discovery.AcknowledgePersistence();
+                }
+                catch (Exception) { /* Failed writes do not advance the durable cursor or acknowledge the guard. */ }
             }
             try { await Task.Delay(TimeSpan.FromSeconds(1), stop.Token); }
             catch (OperationCanceledException) { break; }

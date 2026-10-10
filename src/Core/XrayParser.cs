@@ -124,7 +124,7 @@ public static class XrayParser
         if (protocol is null || coreType is not (null or 2) || string.IsNullOrWhiteSpace(address)
             || port is < 1 or > 65535) return false;
         if (protocol == "hysteria" && string.IsNullOrEmpty(password)) return false;
-        if (protocol is "socks" or "http" && (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password)))
+        if (protocol is "socks" or "http" && (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password)))
             (username, password) = ("", "");
         identity = ServerIdentity(protocol, address, port, protocol is "socks" or "http" ? username : "", password);
         return true;
@@ -137,6 +137,215 @@ public static class XrayParser
 
     public static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     public static string Hash(ReadOnlySpan<byte> value) => Convert.ToHexString(SHA256.HashData(value));
+
+    /// <summary>
+    /// Checks the selected 95f68d9 profile's connection fields, not uniqueness among profiles.
+    /// Inputs are transient: neither profile values nor their fingerprints enter the ledger.
+    /// This is a bounded projection of the pinned generator, not a replacement generator.
+    /// </summary>
+    public static bool MatchesSelectedConnection(IReadOnlyDictionary<string, string?> profile,
+        ReadOnlyMemory<byte> guiJson, ReadOnlyMemory<byte> configurationJson, out string reason)
+    {
+        reason = "mapping_changed";
+        try
+        {
+            string P(string key) => profile.TryGetValue(key, out var value) ? value ?? "" : "";
+            using var config = JsonDocument.Parse(configurationJson);
+            using var gui = JsonDocument.Parse(guiJson);
+            using var protocol = JsonDocument.Parse(string.IsNullOrWhiteSpace(P("ProtoExtra")) ? "{}" : P("ProtoExtra"));
+            using var transport = JsonDocument.Parse(string.IsNullOrWhiteSpace(P("TransportExtra")) ? "{}" : P("TransportExtra"));
+            var proto = protocol.RootElement;
+            var trans = transport.RootElement;
+            var defaults = Read(gui.RootElement, "CoreBasicItem");
+            var proxy = Read(config.RootElement, "outbounds").EnumerateArray().Single(x => Value(x, "tag") == "proxy");
+            var settings = Read(proxy, "settings");
+            var stream = Read(proxy, "streamSettings");
+            var kind = Value(proxy, "protocol");
+            if (proto.ValueKind != JsonValueKind.Object || trans.ValueKind != JsonValueKind.Object) return false;
+            if (kind == "vless" && (!Same(settings, "encryption", Value(proto, "VlessEncryption"))
+                || !Same(settings, "flow", Nonblank(Value(proto, "Flow"))))) return false;
+            if (kind == "vmess")
+            {
+                var cipher = Value(proto, "VmessSecurity");
+                if (cipher is not ("aes-128-gcm" or "chacha20-poly1305" or "auto" or "none" or "zero")) cipher = "auto";
+                var alterId = int.TryParse(Value(proto, "AlterId"), out var number) ? number : 0;
+                if (!Same(settings, "security", cipher) || Number(settings, "alterId") != alterId) return false;
+            }
+            if (kind == "shadowsocks")
+            {
+                var method = Value(proto, "SsMethod");
+                if (method is not ("aes-256-gcm" or "aes-128-gcm" or "chacha20-poly1305" or "chacha20-ietf-poly1305"
+                    or "xchacha20-poly1305" or "xchacha20-ietf-poly1305" or "none" or "plain"
+                    or "2022-blake3-aes-128-gcm" or "2022-blake3-aes-256-gcm" or "2022-blake3-chacha20-poly1305")) method = "none";
+                if (!Same(settings, "method", method) || Flag(settings, "uot") != Flag(proto, "Uot")) return false;
+            }
+            if (kind == "http" && !SameJsonText(Read(settings, "headers"), Value(proto, "HttpHeaders"))) return false;
+
+            var network = P("Network") is "raw" or "xhttp" or "kcp" or "grpc" or "ws" or "httpupgrade" ? P("Network") : "raw";
+            if (kind == "hysteria") network = "hysteria";
+            // These advanced branches require parsing a separate mask/certificate language.
+            // Do not silently accept a stale config by ignoring them.
+            if (network == "kcp" || !string.IsNullOrWhiteSpace(P("Cert")) || !string.IsNullOrWhiteSpace(P("Finalmask"))
+                || (kind == "hysteria" && !string.IsNullOrWhiteSpace(Value(proto, "Hy2RealmUrl"))))
+            { reason = "unsupported_connection"; return false; }
+            if (!Same(stream, "network", network)) return false;
+            var host = network == "grpc" ? Value(trans, "GrpcAuthority").Trim()
+                : network is "raw" or "xhttp" or "ws" or "httpupgrade" ? Value(trans, "Host").Trim() : "";
+            var path = Value(trans, "Path").Trim();
+            var security = P("StreamSecurity") == "reality" ? "reality"
+                : kind == "hysteria" || P("StreamSecurity") == "tls" ? "tls" : "";
+            if (!Same(stream, "security", security)) return false;
+            if (security.Length != 0)
+            {
+                var tls = Read(stream, security + "Settings");
+                var fingerprint = string.IsNullOrWhiteSpace(P("Fingerprint")) ? Value(defaults, "DefFingerprint") : P("Fingerprint");
+                var sni = P("Sni").Trim();
+                if (security == "tls" && sni.Length == 0 && host.Length != 0) sni = List(host).FirstOrDefault() ?? "";
+                if (!Same(tls, "serverName", sni) || !Same(tls, "fingerprint", fingerprint)) return false;
+                if (security == "reality")
+                {
+                    if (!Same(tls, "publicKey", P("PublicKey")) || !Same(tls, "shortId", P("ShortId"))
+                        || !Same(tls, "spiderX", P("SpiderX")) || !Same(tls, "mldsa65Verify", P("Mldsa65Verify"))) return false;
+                }
+                else
+                {
+                    if (!SameList(Read(tls, "alpn"), List(P("Alpn")))
+                        || !Same(tls, "echConfigList", Nonblank(P("EchConfigList")))
+                        || !Same(tls, "verifyPeerCertByName", Nonblank(P("VerifyPeerCertByName")))
+                        || !Same(tls, "pinnedPeerCertSha256", Nonblank(P("CertSha")))
+                        || Flag(tls, "allowInsecure") != (string.IsNullOrWhiteSpace(P("CertSha")) && P("AllowInsecure") == "true")
+                        || Flag(tls, "disableSystemRoot") || !Empty(Read(tls, "certificates"))) return false;
+                }
+            }
+
+            var userAgent = Nonblank(Value(defaults, "DefUserAgent"));
+            switch (network)
+            {
+                case "xhttp":
+                    var xhttp = Read(stream, "xhttpSettings");
+                    if (!string.IsNullOrWhiteSpace(Value(defaults, "BindInterface"))
+                        && !Empty(Read(Read(xhttp, "extra"), "downloadSettings")))
+                    { reason = "unsupported_connection"; return false; }
+                    var mode = Value(trans, "XhttpMode").Trim();
+                    if (mode is not ("auto" or "packet-up" or "stream-up" or "stream-one")) mode = "";
+                    if (!Same(xhttp, "host", host) || !Same(xhttp, "path", path) || !Same(xhttp, "mode", mode)
+                        || !SameJsonText(Read(xhttp, "extra"), Value(trans, "XhttpExtra"))) return false;
+                    break;
+                case "ws":
+                case "httpupgrade":
+                    var http = Read(stream, network + "Settings");
+                    if (!Same(http, "host", host) || !Same(http, "path", path)
+                        || !Same(Read(http, "headers"), "User-Agent", userAgent)) return false;
+                    break;
+                case "grpc":
+                    var grpc = Read(stream, "grpcSettings");
+                    if (!Same(grpc, "authority", host) || !Same(grpc, "serviceName", Value(trans, "GrpcServiceName").Trim())
+                        || Flag(grpc, "multiMode") != (Value(trans, "GrpcMode").Trim() == "multi")
+                        || !Same(grpc, "user_agent", userAgent)) return false;
+                    break;
+                case "raw":
+                    var header = Read(Read(stream, "rawSettings"), "header");
+                    var httpHeader = Value(trans, "RawHeaderType").Trim() == "http";
+                    if (!Same(header, "type", httpHeader ? "http" : "")) return false;
+                    if (httpHeader)
+                    {
+                        var request = Read(header, "request");
+                        if (!SameList(Read(request, "path"), (path.Length == 0 ? "/" : path).Split(','))
+                            || !SameList(Read(Read(request, "headers"), "Host"), host.Split(','))) return false;
+                    }
+                    break;
+                case "hysteria":
+                    if (!MatchesHysteriaOptions(stream, proto, Read(gui.RootElement, "HysteriaItem"))) return false;
+                    break;
+            }
+            reason = "ready";
+            return true;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException or OverflowException)
+        { reason = "unsupported_connection"; return false; }
+    }
+
+    private static bool MatchesHysteriaOptions(JsonElement stream, JsonElement proto, JsonElement defaults)
+    {
+        var mask = Read(stream, "finalmask");
+        var quic = Read(mask, "quicParams");
+        var hop = Read(quic, "udpHop");
+        var ports = Value(proto, "Ports");
+        var hopping = ports.IndexOfAny([':', '-', ',']) >= 0;
+        var interval = Value(proto, "HopInterval");
+        if (string.IsNullOrWhiteSpace(interval))
+        {
+            var seconds = Number(defaults, "HopInterval");
+            interval = seconds >= 5 ? seconds.ToString(CultureInfo.InvariantCulture) : "30";
+        }
+        if (hopping ? !Same(hop, "ports", ports.Replace(':', '-')) || !Same(hop, "interval", interval) : !Empty(hop)) return false;
+        int Bandwidth(string key)
+        {
+            var value = Read(proto, key);
+            return !Empty(value) && value.TryGetInt32(out var n) && n >= 0 ? n : Empty(defaults) ? 100 : Number(defaults, key);
+        }
+        var up = Bandwidth("UpMbps"); var down = Bandwidth("DownMbps");
+        if (!Same(quic, "congestion", up > 0 || down > 0 ? "brutal" : "bbr")
+            || !Same(quic, "brutalUp", up > 0 ? $"{up}mbps" : "") || !Same(quic, "brutalDown", down > 0 ? $"{down}mbps" : "")) return false;
+        var udp = Read(mask, "udp");
+        var password = Value(proto, "SalamanderPass");
+        if (string.IsNullOrWhiteSpace(password)) return Empty(udp);
+        if (udp.ValueKind != JsonValueKind.Array || udp.GetArrayLength() != 1) return false;
+        var entry = udp[0]; var options = Read(entry, "settings");
+        var min = Value(proto, "GeckoMinPacketSize"); var max = Value(proto, "GeckoMaxPacketSize");
+        return Same(entry, "type", "salamander") && Same(options, "password", password.Trim())
+            && Same(options, "packetSize", string.IsNullOrWhiteSpace(min) && string.IsNullOrWhiteSpace(max) ? "" : $"{min}-{max}");
+    }
+
+    // Optional generated fields may be omitted/null, but duplicate keys and wrong scalar
+    // types are never defaults. This also prevents nested extra JSON from hiding ambiguity.
+    private static JsonElement Read(JsonElement root, string key)
+    {
+        if (root.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null) return default;
+        if (root.ValueKind != JsonValueKind.Object) throw new JsonException();
+        var matches = root.EnumerateObject().Where(x => x.NameEquals(key)).ToArray();
+        if (matches.Length > 1) throw new JsonException();
+        return matches.Length == 0 ? default : matches[0].Value;
+    }
+    private static string Value(JsonElement root, string key)
+    {
+        var item = Read(root, key);
+        return item.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ? "" : item.GetString()!;
+    }
+    private static bool Same(JsonElement root, string key, string expected) => Value(root, key) == expected;
+    private static bool Flag(JsonElement root, string key)
+    {
+        var item = Read(root, key);
+        return item.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ? false : item.GetBoolean();
+    }
+    private static int Number(JsonElement root, string key)
+    {
+        var item = Read(root, key);
+        return item.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ? 0 : item.GetInt32();
+    }
+    private static string Nonblank(string value) => string.IsNullOrWhiteSpace(value) ? "" : value;
+    private static string[] List(string value) => string.IsNullOrWhiteSpace(value) ? []
+        : value.Replace("\r", "").Replace("\n", "").Split(',', StringSplitOptions.RemoveEmptyEntries);
+    private static bool Empty(JsonElement item) => item.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null
+        || (item.ValueKind == JsonValueKind.Array && item.GetArrayLength() == 0);
+    private static bool SameList(JsonElement actual, string[] expected) => expected.Length == 0 ? Empty(actual)
+        : actual.ValueKind == JsonValueKind.Array && actual.EnumerateArray().Select(x => x.GetString()).SequenceEqual(expected);
+    private static bool SameJsonText(JsonElement actual, string expected)
+    {
+        if (string.IsNullOrWhiteSpace(expected)) return Empty(actual);
+        using var parsed = JsonDocument.Parse(expected);
+        void NoDuplicates(JsonElement item)
+        {
+            if (item.ValueKind == JsonValueKind.Object)
+            {
+                var keys = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var p in item.EnumerateObject()) { if (!keys.Add(p.Name)) throw new JsonException(); NoDuplicates(p.Value); }
+            }
+            else if (item.ValueKind == JsonValueKind.Array) foreach (var child in item.EnumerateArray()) NoDuplicates(child);
+        }
+        NoDuplicates(parsed.RootElement); NoDuplicates(actual);
+        return actual.ValueKind != JsonValueKind.Undefined && JsonElement.DeepEquals(actual, parsed.RootElement);
+    }
 
     private static bool TryServerIdentity(JsonElement proxy, string protocol, out string identity)
     {

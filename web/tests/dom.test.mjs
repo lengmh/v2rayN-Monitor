@@ -85,3 +85,45 @@ test('provider upload help agrees with the shared backend parser limits', async 
   assert.ok(get('import-limits').textContent.includes(`${maxBytes / 1_000_000} MB`));
   assert.ok(get('import-limits').textContent.includes('不含表头'));
 });
+
+test('provider decimal preview, committed list and unit changes retain exact billing without changing local totals', async t => {
+  const billedBytes = '2600.800000000123', batch = { source: 'Synthetic Decimal', hash: 'synthetic-decimal', rowCount: 3, rawBytes: '3001', billedBytes, firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-01T00:02:00Z', importedAt: '2026-01-02T00:00:00Z' };
+  let committed = false;
+  const { w, get, submit, change, calls, errors } = await fixture(t, {
+    '/api/imports/preview': () => Response.json({ ...batch, warnings: [], duplicate: committed }),
+    '/api/imports/commit': () => { committed = true; return Response.json(batch); },
+    '/api/imports': () => Response.json(committed ? [batch] : [])
+  });
+  w.document.querySelector('.nav-item[data-view=provider]').click(); get('provider-source').value = 'Synthetic Decimal';
+  Object.defineProperty(get('csv-file'), 'files', { value: [{ size: 100, text: async () => 'synthetic decimal csv' }] });
+  submit('import-form'); await until(() => !get('import-preview').hidden);
+  assert.ok(get('preview-details').textContent.includes('2,600.800000000123 bytes'));
+  assert.ok(get('preview-details').textContent.includes('3,001 bytes'));
+  get('commit-import').click(); await until(() => get('import-batches').textContent.includes('2,600.800000000123 bytes'));
+  assert.equal(get('import-preview').hidden, true);
+  assert.ok(get('import-batches').textContent.includes('0.000 GB'));
+  change('unit', 'GiB');
+  assert.ok(get('import-batches').textContent.includes('0.000 GiB'));
+  assert.ok(get('import-batches').textContent.includes('2,600.800000000123 bytes'));
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  submit('import-form'); await until(() => !get('import-preview').hidden);
+  assert.equal(get('commit-import').disabled, true);
+  assert.ok(get('preview-details').textContent.includes('2,600.800000000123 bytes'));
+  assert.equal(calls.filter(call => call.path === '/api/imports/commit').length, 1);
+  assert.equal(errors.length, 0);
+});
+
+test('provider list preserves large exact decimal values and source names remain plain text', async t => {
+  const source = '<img src=x onerror=alert(1)>', billedBytes = '9007199254740993.123456789012';
+  const { w, get, errors } = await fixture(t, { '/api/imports': () => Response.json([{ source, rowCount: 1, rawBytes: '1', billedBytes, importedAt: '2026-01-02T00:00:00Z' }]) });
+  w.document.querySelector('.nav-item[data-view=provider]').click();
+  await until(() => get('import-batches').textContent.includes('9,007,199,254,740,993.123456789012 bytes'));
+  assert.ok(get('import-batches').textContent.includes(source));
+  assert.equal(w.document.querySelectorAll('img').length, 0);
+  assert.equal(errors.length, 0);
+});
+
+test('local attribution note states active configuration identity without exposing identifiers', async t => {
+  const { get } = await fixture(t);
+  assert.ok(get('attribution-note').textContent.includes('本机统计按 v2rayN 活动配置归属，连接参数相同的不同 IndexId 分账；名称仅用于展示。'));
+});
