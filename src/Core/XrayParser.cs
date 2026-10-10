@@ -111,8 +111,24 @@ public static class XrayParser
 
     public static string? ProtocolForConfigType(int type) => type switch
     {
-        1 => "vmess", 3 => "shadowsocks", 4 => "socks", 5 => "vless", 6 => "trojan", 10 => "http", _ => null
+        1 => "vmess", 3 => "shadowsocks", 4 => "socks", 5 => "vless", 6 => "trojan", 7 => "hysteria", 10 => "http", _ => null
     };
+
+    // CoreType may be null when v2rayN chooses its protocol default. The caller must still
+    // prove that the active process is Xray; a profile preference is not process evidence.
+    public static bool TryProfileIdentity(int configType, int? coreType, string address, int port,
+        string password, string username, out string identity)
+    {
+        identity = "";
+        var protocol = ProtocolForConfigType(configType);
+        if (protocol is null || coreType is not (null or 2) || string.IsNullOrWhiteSpace(address)
+            || port is < 1 or > 65535) return false;
+        if (protocol == "hysteria" && string.IsNullOrEmpty(password)) return false;
+        if (protocol is "socks" or "http" && (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password)))
+            (username, password) = ("", "");
+        identity = ServerIdentity(protocol, address, port, protocol is "socks" or "http" ? username : "", password);
+        return true;
+    }
 
     // This comparison value is transient and never written to the ledger or exposed by the API.
     public static string ServerIdentity(string protocol, string address, int port, string user, string secret)
@@ -134,7 +150,17 @@ public static class XrayParser
             || !Property(server, "port", out var portValue) || !portValue.TryGetInt32(out var port)
             || port is < 1 or > 65535) return false;
         string user = "", secret = "";
-        if (protocol is "vmess" or "vless")
+        if (protocol == "hysteria")
+        {
+            // fqfqgo/v2rayN 95f68d9 (7.25.1): Hysteria2 is Xray protocol "hysteria".
+            // Its credential is streamSettings.hysteriaSettings.auth, NOT settings.password.
+            if (!Property(server, "version", out var version) || !version.TryGetInt32(out var protocolVersion) || protocolVersion != 2
+                || !Property(proxy, "streamSettings", out var stream) || !Text(stream, "network", out var network) || network != "hysteria"
+                || !Property(stream, "hysteriaSettings", out var hysteria)
+                || !Property(hysteria, "version", out var transportVersion) || !transportVersion.TryGetInt32(out var transport) || transport != 2
+                || !Text(hysteria, "auth", out secret) || string.IsNullOrEmpty(secret)) return false;
+        }
+        else if (protocol is "vmess" or "vless")
         {
             if (!Text(server, "id", out secret)) return false;
         }
@@ -154,7 +180,7 @@ public static class XrayParser
     }
 
     private static bool SupportedProtocol(string protocol)
-        => protocol is "vmess" or "vless" or "trojan" or "shadowsocks" or "socks" or "http";
+        => protocol is "vmess" or "vless" or "trojan" or "shadowsocks" or "socks" or "http" or "hysteria";
 
     private static bool HasChaining(JsonElement item)
     {

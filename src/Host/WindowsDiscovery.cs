@@ -13,7 +13,7 @@ using V2rayNMonitor.Core;
 namespace V2rayNMonitor.Host;
 
 /// <summary>
-/// Read-only adapter for official v2rayN 7.25.1, ordinary single-proxy Xray mode.
+/// Read-only adapter for compatible v2rayN 7.25.1 builds, ordinary single-proxy Xray mode.
 /// Never starts/stops a core or writes its configuration/profile records. SQLite is opened
 /// ReadOnly; SQLite can still participate in the existing database's shared-memory locking.
 /// Real Windows/core integration remains a separate acceptance requirement.
@@ -95,13 +95,12 @@ public sealed class WindowsDiscovery : IDisposable
         if (!selection.StatisticsRequested)
             throw Fail("statistics_disabled", "请在 v2rayN 中手动开启流量统计或实时速度显示，并让 v2rayN 重新加载核心。Monitor 不会修改设置。");
         var configBytes = ReadStableFile(configPath, MaxConfigurationBytes, out var configStamp);
-        if (!XrayParser.TryReadConfiguration(configBytes, out var configuration, out var configurationReason))
-            throw configurationReason is "statistics_unavailable" or "statistics_disabled"
-                ? Fail(configurationReason, "有效配置没有可用的回环 Xray metrics 统计；请在 v2rayN 中检查统计设置。")
-                : Fail("unsupported_mode", "仅支持可核实的单 proxy 出站；自定义配置、策略组、代理链和多代理出站暂不支持。");
-        var node = ReadProfile(databasePath, selection.IndexId, configuration!);
+        var node = ReadProfile(databasePath, selection.IndexId, configBytes, out var configuration);
         var processes = ReadProcesses();
         var parents = processes.Where(p => p.Name.Equals("v2rayN.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
+        // An unreadable candidate cannot be silently discarded in favour of a readable one.
+        var unverifiedParent = parents.FirstOrDefault(p => p.Failure is not null);
+        if (unverifiedParent is not null) throw ProcessFailure(unverifiedParent.Failure!);
         var localAppDataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "v2rayN");
         var isAppDataRoot = SamePath(root, localAppDataRoot);
         var matchingParents = parents.Where(p => p.ExecutablePath.Length != 0
@@ -112,27 +111,30 @@ public sealed class WindowsDiscovery : IDisposable
         var parent = matchingParents[0];
         var version = FileVersionInfo.GetVersionInfo(parent.ExecutablePath);
         if (version.FileMajorPart != 7 || version.FileMinorPart != 25 || version.FileBuildPart != 1)
-            throw Fail("unsupported_version", "当前发现路径仅针对官方 v2rayN 7.25.1；其他版本尚未核实。");
+            throw Fail("unsupported_version", "当前发现路径仅针对 v2rayN 7.25.1 兼容构建；其他版本尚未核实。");
         var corePath = Path.Combine(root, "bin", "xray", "xray.exe");
-        var cores = processes.Where(p => p.ParentPid == parent.Pid && p.Name.Equals("xray.exe", StringComparison.OrdinalIgnoreCase)
-            && p.StartedAt >= parent.StartedAt && SamePath(corePath, p.ExecutablePath)
-            && ExpectedCommandLine(p)).ToArray();
+        var cores = processes.Where(p => p.ParentPid == parent.Pid && p.Name.Equals("xray.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (cores.Length == 0) throw Fail("core_not_running", "未找到该 v2rayN 启动的标准 Xray config.json 进程；其他内核或启动方式暂不支持。");
-        if (cores.Length != 1) throw Fail("ambiguous_instance", "发现多个符合条件的 Xray 进程；暂不归属流量。");
+        if (cores.Length != 1) throw Fail("ambiguous_instance", "发现多个 Xray 子进程；暂不归属流量。");
         var core = cores[0];
+        if (!ProcessBinding.TryBindCore(parent, core, corePath, ReadArguments(core.CommandLine), out var bindingReason))
+            throw ProcessFailure(bindingReason);
+        var coreStartedAt = core.StartedAt!.Value;
+        var parentStartedAt = parent.StartedAt!.Value;
         var listenerIdentity = ReadListenerIdentity(configuration!.MetricsEndpoint, core.Pid);
         if (Stamp(guiPath) != guiStamp || Stamp(configPath) != configStamp)
             throw Fail("snapshot_changed", "配置在读取过程中发生变化；本次采样保留为缺口。");
         var instanceId = XrayParser.Hash(root.ToUpperInvariant());
-        var processIdentity = XrayParser.Hash(string.Join('|', core.Pid, core.StartedAt.UtcTicks, core.ExecutablePath.ToUpperInvariant(),
-            parent.Pid, parent.StartedAt.UtcTicks, parent.ExecutablePath.ToUpperInvariant()));
+        var processIdentity = XrayParser.Hash(string.Join('|', core.Pid, coreStartedAt.UtcTicks, core.ExecutablePath.ToUpperInvariant(),
+            parent.Pid, parentStartedAt.UtcTicks, parent.ExecutablePath.ToUpperInvariant()));
         var generation = XrayParser.Hash(configBytes) + ":" + configStamp.WrittenAt.UtcTicks.ToString(CultureInfo.InvariantCulture);
-        return new(instanceId, selection.IndexId, node, processIdentity, generation, core.StartedAt,
+        return new(instanceId, selection.IndexId, node, processIdentity, generation, coreStartedAt,
             configStamp.WrittenAt, listenerIdentity, configuration.MetricsEndpoint);
     }
 
-    private static string ReadProfile(string path, string indexId, XrayEffectiveConfiguration configuration)
+    private static string ReadProfile(string path, string indexId, byte[] configBytes, out XrayEffectiveConfiguration configuration)
     {
+        configuration = null!;
         if (!File.Exists(path)) throw Fail("missing_database", "所选目录中没有 guiConfigs/guiNDB.db。");
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -148,6 +150,7 @@ public sealed class WindowsDiscovery : IDisposable
         command.CommandText = "SELECT IndexId, Remarks, ConfigType, CoreType, Address, Port, Password, Username FROM ProfileItem WHERE IndexId = $id";
         command.Parameters.AddWithValue("$id", indexId);
         int type;
+        int? coreType;
         string name, address, password, username;
         int port;
         using (var reader = command.ExecuteReader())
@@ -155,8 +158,17 @@ public sealed class WindowsDiscovery : IDisposable
             if (!reader.Read()) throw Fail("unknown_node", "当前 IndexId 在配置库中不存在；不按名称推测归属。");
             name = reader.IsDBNull(1) ? "" : reader.GetString(1);
             type = reader.GetInt32(2);
-            if (XrayParser.ProtocolForConfigType(type) != configuration.Protocol
-                || (!reader.IsDBNull(3) && reader.GetInt32(3) != 2))
+            coreType = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+            if (type == 11)
+                throw Fail("unsupported_core", "此版本的 AnyTLS 使用 sing-box，当前 Xray 采集器尚未覆盖；流量保持未知。");
+            // Classify the selected protocol before parsing Xray-only fields so AnyTLS does
+            // not misleadingly ask the user to enable Xray metrics in a sing-box config.
+            if (!XrayParser.TryReadConfiguration(configBytes, out var parsedConfiguration, out var configurationReason))
+                throw configurationReason is "statistics_unavailable" or "statistics_disabled"
+                    ? Fail(configurationReason, "有效配置没有可用的回环 Xray metrics 统计；请在 v2rayN 中检查统计设置。")
+                    : Fail("unsupported_mode", "仅支持可核实的单 proxy 出站；自定义配置、策略组、代理链和多代理出站暂不支持。");
+            configuration = parsedConfiguration!;
+            if (XrayParser.ProtocolForConfigType(type) != configuration.Protocol)
                 throw Fail("unsupported_mode", "当前节点类型或内核与已读取的 Xray 配置不一致。");
             address = reader.GetString(4);
             port = reader.GetInt32(5);
@@ -164,14 +176,9 @@ public sealed class WindowsDiscovery : IDisposable
             username = reader.IsDBNull(7) ? "" : reader.GetString(7);
             if (reader.Read()) throw Fail("ambiguous_node", "当前节点标识不唯一；暂不采集。");
         }
-        string Identity(string secret, string user)
-        {
-            if (configuration.Protocol is "socks" or "http" && (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(secret)))
-                (user, secret) = ("", "");
-            return XrayParser.ServerIdentity(configuration.Protocol, address, port,
-                configuration.Protocol is "socks" or "http" ? user : "", secret);
-        }
-        if (Identity(password, username) != configuration.ServerIdentity)
+        if (!XrayParser.TryProfileIdentity(type, coreType, address, port, password, username, out var identity))
+            throw Fail("unsupported_mode", "当前节点类型或内核与已读取的 Xray 配置不一致。");
+        if (identity != configuration.ServerIdentity)
             throw Fail("mapping_changed", "当前节点与核心有效配置不一致；等待重新加载后再采集。");
         command.Parameters.Clear();
         command.CommandText = "SELECT Password, Username FROM ProfileItem WHERE IndexId <> $id AND ConfigType = $type AND Address = $address COLLATE NOCASE AND Port = $port";
@@ -184,7 +191,8 @@ public sealed class WindowsDiscovery : IDisposable
             {
                 var otherPassword = reader.IsDBNull(0) ? "" : reader.GetString(0);
                 var otherUser = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                if (Identity(otherPassword, otherUser) == configuration.ServerIdentity)
+                if (XrayParser.TryProfileIdentity(type, null, address, port, otherPassword, otherUser, out var otherIdentity)
+                    && otherIdentity == configuration.ServerIdentity)
                     throw Fail("ambiguous_node", "多个配置具有相同的服务器身份；无法证明当前 IndexId 的独立归属。");
             }
         transaction.Commit(); // Ends a read-only transaction; no profile or setting is changed.
@@ -221,26 +229,28 @@ public sealed class WindowsDiscovery : IDisposable
             using (row)
             {
                 var created = row["CreationDate"] as string;
-                if (string.IsNullOrEmpty(created)) continue;
-                result.Add(new(Convert.ToInt32(row["ProcessId"], CultureInfo.InvariantCulture),
+                // Wildcard CIM dates are not a known creation identity.
+                DateTimeOffset? startedAt = string.IsNullOrEmpty(created) || created.Contains('*') ? null
+                    : new DateTimeOffset(ManagementDateTimeConverter.ToDateTime(created)).ToUniversalTime();
+                var wmi = new ProcessInfo(Convert.ToInt32(row["ProcessId"], CultureInfo.InvariantCulture),
                     Convert.ToInt32(row["ParentProcessId"], CultureInfo.InvariantCulture),
-                    new DateTimeOffset(ManagementDateTimeConverter.ToDateTime(created)).ToUniversalTime(),
-                    row["ExecutablePath"] as string ?? "", row["CommandLine"] as string ?? "", row["Name"] as string ?? ""));
+                    startedAt, row["ExecutablePath"] as string ?? "", row["CommandLine"] as string ?? "", row["Name"] as string ?? "");
+                result.Add(ProcessBinding.Reconcile(wmi, WindowsProcessReader.Read(wmi.Pid)));
             }
         }
         return result;
     }
 
-    private static bool ExpectedCommandLine(ProcessInfo process)
+    private static string[]? ReadArguments(string commandLine)
     {
-        if (string.IsNullOrWhiteSpace(process.CommandLine)) return false;
-        var argv = CommandLineToArgvW(process.CommandLine, out var count);
+        if (string.IsNullOrWhiteSpace(commandLine) || commandLine.Contains('\0')) return null;
+        var argv = CommandLineToArgvW(commandLine, out var count);
         if (argv == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
         try
         {
-            if (count != 4) return false;
+            if (count != 4) return [];
             string Arg(int index) => Marshal.PtrToStringUni(Marshal.ReadIntPtr(argv, index * IntPtr.Size)) ?? "";
-            return SamePath(Arg(0), process.ExecutablePath) && Arg(1) == "run" && Arg(2) == "-c" && Arg(3) == "config.json";
+            return [Arg(0), Arg(1), Arg(2), Arg(3)];
         }
         finally { _ = LocalFree(argv); }
     }
@@ -282,8 +292,15 @@ public sealed class WindowsDiscovery : IDisposable
         finally { Marshal.FreeHGlobal(memory); }
     }
 
-    private static bool SamePath(string a, string b) => a.Length != 0 && b.Length != 0
-        && string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)), StringComparison.OrdinalIgnoreCase);
+    private static bool SamePath(string a, string b) => ProcessBinding.SamePath(a, b);
+    private static DiscoveryException ProcessFailure(string state) => Fail(state, state switch
+    {
+        "process_commandline_unverified" => "普通权限无法读取 Xray 启动命令行，无法核实有效配置归属；本次采样保留为缺口。Monitor 不会自动提权。",
+        "process_path_unverified" => "普通权限无法核实 v2rayN 或 Xray 程序路径；本次采样保留为缺口。Monitor 不会自动提权。",
+        "process_identity_changed" => "进程身份或启动信息在读取时不一致；本次采样保留为缺口。",
+        "process_binding_mismatch" => "Xray 父子进程、程序路径或标准启动命令不匹配；不猜测有效配置归属。",
+        _ => "无法只读核实进程创建身份；本次采样保留为缺口。"
+    });
     private static CollectorReading Unknown(string state, string message, string? node = null) => new(null, state, message, node);
     private static CollectorReading GuardFailure(string state, string? node) => Unknown(state,
         state == "waiting_for_core" ? "配置已更新但核心尚未重新加载；本次采样保留为缺口。"
@@ -292,7 +309,6 @@ public sealed class WindowsDiscovery : IDisposable
     public void Dispose() { client.Dispose(); gate.Dispose(); }
 
     private sealed record FileStamp(long Length, DateTimeOffset WrittenAt);
-    private sealed record ProcessInfo(int Pid, int ParentPid, DateTimeOffset StartedAt, string ExecutablePath, string CommandLine, string Name);
     private sealed class DiscoveryException(string state, string safeMessage) : Exception
     {
         public string State { get; } = state;
