@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Microsoft.Data.Sqlite;
 using V2rayNMonitor.Core;
 
@@ -31,11 +32,20 @@ public sealed class WindowsDiscovery : IDisposable
     private readonly XrayGenerationGuard guard = new();
     private readonly SemaphoreSlim gate = new(1, 1);
 
+    // The single collection loop calls this only after Ledger.Accept/RecordGap commits.
+    public void AcknowledgePersistence() => guard.AcknowledgePersistence();
+    public bool RequiresBaseline => guard.RequiresBaseline;
+
     public async Task<CollectorReading> ReadAsync(string dataRoot, CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindows()) return Unknown("unsupported_platform", "采集器只支持 Windows。尚未进行 Windows 实机验收。");
-        if (string.IsNullOrWhiteSpace(dataRoot)) return Unknown("needs_directory", "请选择包含 guiConfigs 的 v2rayN 数据目录。");
+        if (string.IsNullOrWhiteSpace(dataRoot))
+        {
+            guard.InvalidateContinuity();
+            return Unknown("needs_directory", "请选择包含 guiConfigs 的 v2rayN 数据目录。");
+        }
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var readingMetrics = false;
         try
         {
             var before = Capture(dataRoot);
@@ -43,6 +53,7 @@ public sealed class WindowsDiscovery : IDisposable
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(3));
             using var request = new HttpRequestMessage(HttpMethod.Get, before.MetricsEndpoint);
+            readingMetrics = true;
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
                 return Unknown("interface_unavailable", "Xray 统计接口暂时不可用；当前流量未知。", before.NodeName);
@@ -59,21 +70,33 @@ public sealed class WindowsDiscovery : IDisposable
                 bytes.Write(buffer, 0, count);
             }
             var observedAt = DateTimeOffset.UtcNow;
+            readingMetrics = false;
             var after = Capture(dataRoot);
             if (!guard.Accept(before, after, out reason)) return GuardFailure(reason, after.NodeName);
             if (!XrayParser.TryReadCounters(bytes.ToArray(), out var counters))
                 return Unknown("missing_counters", "proxy 上下行累计计数缺失或无效；未知不能记为零。", after.NodeName);
             return new(new CounterSample(after.InstanceId, after.NodeId, after.NodeName,
                 after.ProcessIdentity, after.Generation, observedAt, counters!.Upload, counters.Download),
-                "connected", "已读取 Xray proxy 原始累计字节。", after.NodeName);
+                "connected", "已按 v2rayN 活动配置读取 Xray proxy 原始累计字节。", after.NodeName, guard.RequiresBaseline);
         }
-        catch (DiscoveryException e) { return Unknown(e.State, e.SafeMessage); }
+        catch (DiscoveryException e)
+        {
+            guard.InvalidateContinuity();
+            return Unknown(e.State, e.SafeMessage);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        { return Unknown("collector_stopped", "采集已停止；未完成的采样保留为缺口。"); }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         { return Unknown("interface_unavailable", "Xray 统计读取超时；当前流量未知。"); }
+        catch (HttpRequestException)
+        { return Unknown("interface_unavailable", "Xray 统计接口暂时不可用；当前流量未知。"); }
+        catch (IOException) when (readingMetrics)
+        { return Unknown("interface_unavailable", "Xray 统计响应中断；当前流量未知。"); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or SqliteException
-            or ManagementException or Win32Exception or HttpRequestException or ArgumentException
+            or ManagementException or Win32Exception or ArgumentException
             or InvalidOperationException or System.Security.SecurityException)
         {
+            guard.InvalidateContinuity();
             // Exception messages can contain local paths, SQL parameters, or raw response fragments.
             // Keep diagnostics deliberately constant and do not log the exception or input files.
             return Unknown("unavailable", "无法只读核实 v2rayN 配置、数据库、进程或统计接口；当前流量未知。");
@@ -81,6 +104,7 @@ public sealed class WindowsDiscovery : IDisposable
         finally { gate.Release(); }
     }
 
+    [SupportedOSPlatform("windows")]
     private static XraySnapshot Capture(string root)
     {
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
@@ -95,7 +119,7 @@ public sealed class WindowsDiscovery : IDisposable
         if (!selection.StatisticsRequested)
             throw Fail("statistics_disabled", "请在 v2rayN 中手动开启流量统计或实时速度显示，并让 v2rayN 重新加载核心。Monitor 不会修改设置。");
         var configBytes = ReadStableFile(configPath, MaxConfigurationBytes, out var configStamp);
-        var node = ReadProfile(databasePath, selection.IndexId, configBytes, out var configuration);
+        var node = ReadProfile(databasePath, selection.IndexId, guiBytes, configBytes, out var configuration);
         var processes = ReadProcesses();
         var parents = processes.Where(p => p.Name.Equals("v2rayN.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
         // An unreadable candidate cannot be silently discarded in favour of a readable one.
@@ -132,7 +156,7 @@ public sealed class WindowsDiscovery : IDisposable
             configStamp.WrittenAt, listenerIdentity, configuration.MetricsEndpoint);
     }
 
-    private static string ReadProfile(string path, string indexId, byte[] configBytes, out XrayEffectiveConfiguration configuration)
+    internal static string ReadProfile(string path, string indexId, byte[] guiBytes, byte[] configBytes, out XrayEffectiveConfiguration configuration)
     {
         configuration = null!;
         if (!File.Exists(path)) throw Fail("missing_database", "所选目录中没有 guiConfigs/guiNDB.db。");
@@ -145,14 +169,21 @@ public sealed class WindowsDiscovery : IDisposable
         using var transaction = connection.BeginTransaction(deferred: true);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        // Credentials are used only in this stack frame to disambiguate the effective server.
+        // Credentials are used only in this stack frame to check the selected configuration.
         // They are never copied into the monitor's database, public API, or diagnostics.
-        command.CommandText = "SELECT IndexId, Remarks, ConfigType, CoreType, Address, Port, Password, Username FROM ProfileItem WHERE IndexId = $id";
+        command.CommandText = """
+            SELECT IndexId, Remarks, ConfigType, CoreType, Address, Port, Password, Username,
+                Network, ProtoExtra, TransportExtra, StreamSecurity, Sni, Alpn, Fingerprint,
+                PublicKey, ShortId, SpiderX, Mldsa65Verify, AllowInsecure, Cert, CertSha,
+                EchConfigList, VerifyPeerCertByName, Finalmask
+            FROM ProfileItem WHERE IndexId = $id
+            """;
         command.Parameters.AddWithValue("$id", indexId);
         int type;
         int? coreType;
         string name, address, password, username;
         int port;
+        var selectedFields = new Dictionary<string, string?>(StringComparer.Ordinal);
         using (var reader = command.ExecuteReader())
         {
             if (!reader.Read()) throw Fail("unknown_node", "当前 IndexId 在配置库中不存在；不按名称推测归属。");
@@ -174,27 +205,20 @@ public sealed class WindowsDiscovery : IDisposable
             port = reader.GetInt32(5);
             password = reader.IsDBNull(6) ? "" : reader.GetString(6);
             username = reader.IsDBNull(7) ? "" : reader.GetString(7);
+            for (var i = 8; i < reader.FieldCount; i++)
+                selectedFields.Add(reader.GetName(i), reader.IsDBNull(i) ? null : reader.GetString(i));
             if (reader.Read()) throw Fail("ambiguous_node", "当前节点标识不唯一；暂不采集。");
         }
         if (!XrayParser.TryProfileIdentity(type, coreType, address, port, password, username, out var identity))
             throw Fail("unsupported_mode", "当前节点类型或内核与已读取的 Xray 配置不一致。");
         if (identity != configuration.ServerIdentity)
             throw Fail("mapping_changed", "当前节点与核心有效配置不一致；等待重新加载后再采集。");
-        command.Parameters.Clear();
-        command.CommandText = "SELECT Password, Username FROM ProfileItem WHERE IndexId <> $id AND ConfigType = $type AND Address = $address COLLATE NOCASE AND Port = $port";
-        command.Parameters.AddWithValue("$id", indexId);
-        command.Parameters.AddWithValue("$type", type);
-        command.Parameters.AddWithValue("$address", address);
-        command.Parameters.AddWithValue("$port", port);
-        using (var reader = command.ExecuteReader())
-            while (reader.Read())
-            {
-                var otherPassword = reader.IsDBNull(0) ? "" : reader.GetString(0);
-                var otherUser = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                if (XrayParser.TryProfileIdentity(type, null, address, port, otherPassword, otherUser, out var otherIdentity)
-                    && otherIdentity == configuration.ServerIdentity)
-                    throw Fail("ambiguous_node", "多个配置具有相同的服务器身份；无法证明当前 IndexId 的独立归属。");
-            }
+        if (!XrayParser.MatchesSelectedConnection(selectedFields, guiBytes, configBytes, out var matchReason))
+            throw matchReason == "unsupported_connection"
+                ? Fail(matchReason, "当前连接包含尚未核实的配置字段；本次采样保留为缺口。")
+                : Fail("mapping_changed", "活动配置的协议、传输或 TLS 字段与核心有效配置不一致；等待重新加载后再采集。");
+        // Other IndexIds (in this or another subscription) are intentionally irrelevant.
+        // Attribution follows the selected record; it is not proof of core-side uniqueness.
         transaction.Commit(); // Ends a read-only transaction; no profile or setting is changed.
         return string.IsNullOrWhiteSpace(name) ? "未命名节点" : name;
     }
@@ -218,6 +242,7 @@ public sealed class WindowsDiscovery : IDisposable
         return new(info.Length, new DateTimeOffset(info.LastWriteTimeUtc));
     }
 
+    [SupportedOSPlatform("windows")]
     private static List<ProcessInfo> ReadProcesses()
     {
         var result = new List<ProcessInfo>();
@@ -301,15 +326,15 @@ public sealed class WindowsDiscovery : IDisposable
         "process_binding_mismatch" => "Xray 父子进程、程序路径或标准启动命令不匹配；不猜测有效配置归属。",
         _ => "无法只读核实进程创建身份；本次采样保留为缺口。"
     });
-    private static CollectorReading Unknown(string state, string message, string? node = null) => new(null, state, message, node);
-    private static CollectorReading GuardFailure(string state, string? node) => Unknown(state,
+    private CollectorReading Unknown(string state, string message, string? node = null) => new(null, state, message, node, guard.RequiresBaseline);
+    private CollectorReading GuardFailure(string state, string? node) => Unknown(state,
         state == "waiting_for_core" ? "配置已更新但核心尚未重新加载；本次采样保留为缺口。"
         : "节点、配置、进程或监听在采样边界发生变化；本次采样保留为缺口。", node);
     private static DiscoveryException Fail(string state, string message) => new(state, message);
     public void Dispose() { client.Dispose(); gate.Dispose(); }
 
     private sealed record FileStamp(long Length, DateTimeOffset WrittenAt);
-    private sealed class DiscoveryException(string state, string safeMessage) : Exception
+    internal sealed class DiscoveryException(string state, string safeMessage) : Exception
     {
         public string State { get; } = state;
         public string SafeMessage { get; } = safeMessage;

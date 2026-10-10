@@ -84,6 +84,35 @@ test('provider preview is separate, edits invalidate preview, and explicit confi
   await expect(page.locator('#import-result')).toContainText('导入完成'); expect(calls.filter(c => c.path === '/api/imports/commit')).toHaveLength(1);
   await page.click('.nav-item[data-view=overview]'); await expect(page.locator('#total-value')).toHaveText('16.106 GB');
 });
+test('provider decimal preview, commit and reloaded list display every digit on desktop and mobile', async ({ page }) => {
+  let committed = false;
+  const batch = { source: 'Synthetic Decimal', hash: 'synthetic-decimal', rowCount: 3, rawBytes: '3001', billedBytes: '2600.800000000123', importedAt: '2026-01-02T00:00:00Z', firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-01T00:02:00Z' };
+  const calls = await mock(page, {
+    '/api/imports/preview': route => route.fulfill(json({ ...batch, warnings: [], duplicate: committed })),
+    '/api/imports/commit': route => { committed = true; return route.fulfill(json(batch)); },
+    '/api/imports': route => route.fulfill(json(committed ? [batch] : []))
+  });
+  await page.click('.nav-item[data-view=provider]'); await page.fill('#provider-source', batch.source);
+  await page.setInputFiles('#csv-file', { name: 'synthetic-decimal.csv', mimeType: 'text/csv', buffer: Buffer.from('node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic,0.8,1001,800.800000000123,synthetic,2026-01-01 00:02:00') });
+  await page.click('#preview-import');
+  await expect(page.locator('#preview-details')).toContainText('2,600.800000000123 bytes');
+  await expect(page.locator('#preview-details')).toContainText('3,001 bytes');
+  await page.click('#commit-import');
+  await expect(page.locator('#import-batches')).toContainText('2,600.800000000123 bytes');
+  await page.click('.nav-item[data-view=overview]'); await page.selectOption('#unit', 'GiB');
+  await expect(page.locator('#total-exact')).toHaveText('16,106,127,360 bytes');
+  await page.click('.nav-item[data-view=provider]');
+  await expect(page.locator('#import-batches')).toContainText('0.000 GiB');
+  await expect(page.locator('#import-batches')).toContainText('2,600.800000000123 bytes');
+  await page.screenshot({ path: 'test-results/provider-decimal-desktop.png', fullPage: true });
+  await page.reload(); await page.click('.nav-item[data-view=provider]');
+  await expect(page.locator('#import-batches')).toContainText('2,600.800000000123 bytes');
+  expect(calls.filter(c => c.path === '/api/imports/commit')).toHaveLength(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(page.locator('#import-batches small')).toHaveText('2,600.800000000123 bytes');
+  await page.screenshot({ path: 'test-results/provider-decimal-mobile.png', fullPage: true });
+});
 test('mobile page has no horizontal document overflow', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 }); await mock(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

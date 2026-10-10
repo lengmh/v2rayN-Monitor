@@ -68,7 +68,7 @@ public sealed class Ledger : IDisposable
     }
 
     /// <summary>Commits aggregates and their cumulative cursor in the same SQLite transaction.</summary>
-    public string Accept(CounterSample sample)
+    public string Accept(CounterSample sample, bool invalidateContinuity = false)
     {
         ArgumentNullException.ThrowIfNull(sample);
         ArgumentException.ThrowIfNullOrWhiteSpace(sample.InstanceId);
@@ -85,7 +85,7 @@ public sealed class Ledger : IDisposable
             var previous = ReadCursor(transaction, sample.InstanceId);
             var at = sample.At.UtcTicks;
             var key = Key(sample.InstanceId, sample.NodeId);
-            var sameIdentity = previous is not null && previous.NodeKey == key &&
+            var sameIdentity = !invalidateContinuity && previous is not null && previous.NodeKey == key &&
                 previous.Session == sample.SessionId && previous.Generation == sample.Generation;
             if (previous is not null && at <= previous.At)
             {
@@ -145,7 +145,7 @@ public sealed class Ledger : IDisposable
     }
 
     /// <summary>Coalesces an outage; a later proven-continuous delta stays explicitly unallocated.</summary>
-    public void RecordGap(DateTimeOffset at, string reason)
+    public void RecordGap(DateTimeOffset at, string reason, bool invalidateContinuity = false)
     {
         ArgumentNullException.ThrowIfNull(reason);
         lock (gate)
@@ -163,7 +163,10 @@ public sealed class Ledger : IDisposable
             }
             else
                 Execute(transaction, "UPDATE gaps SET end_ticks=MAX(end_ticks,$at) WHERE is_open=1;", ("$at", ticks));
-            Execute(transaction, "UPDATE cursors SET interrupted=1;");
+            // A known or unverified mapping boundary is not recoverable even if selection
+            // later returns to the exact same IndexId/config/process. Preserve the gap and
+            // history, but atomically discard the old cumulative cursor before any restart.
+            Execute(transaction, invalidateContinuity ? "DELETE FROM cursors;" : "UPDATE cursors SET interrupted=1;");
             transaction.Commit();
         }
     }
