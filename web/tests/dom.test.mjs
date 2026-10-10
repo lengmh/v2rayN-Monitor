@@ -75,3 +75,13 @@ test('recovered unallocated totals are disclosed separately and never added to c
   const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history, unallocatedUpload: '1000000000', unallocatedDownload: '2000000000', gapCount: 2 }) });
   assert.equal(get('total-value').textContent, '16.106 GB'); assert.ok(get('quality-notice').textContent.includes('3.000 GB')); assert.ok(get('quality-notice').textContent.includes('未计入上方合计与图表')); assert.ok(get('quality-notice').textContent.includes('不能跨日期视图相加'));
 });
+
+test('provider upload help agrees with the shared backend parser limits', async t => {
+  const source = await readFile(new URL('../../src/Core/ProviderImports.cs', import.meta.url), 'utf8');
+  const maxRows = Number(source.match(/public const int MaxRows = ([\d_]+);/)[1].replaceAll('_', ''));
+  const maxBytes = Number(source.match(/public const int MaxCsvBytes = ([\d_]+);/)[1].replaceAll('_', ''));
+  const { get } = await fixture(t);
+  assert.ok(get('import-limits').textContent.includes(maxRows.toLocaleString('zh-CN')));
+  assert.ok(get('import-limits').textContent.includes(`${maxBytes / 1_000_000} MB`));
+  assert.ok(get('import-limits').textContent.includes('不含表头'));
+});

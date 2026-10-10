@@ -13,6 +13,8 @@ public sealed record ImportBatch(string Hash, string Source, string ImportedAt, 
 /// <summary>A separate, user-imported provider ledger. It never changes local accounting.</summary>
 public sealed class ProviderImports : IDisposable
 {
+    public const int MaxRows = 50_000;
+    public const int MaxCsvBytes = 4_000_000;
     private readonly SqliteConnection db;
     private readonly object gate = new();
     private sealed record Row(string Name, decimal Rate, long Raw, long Billed, string Display, DateTimeOffset At);
@@ -64,7 +66,7 @@ public sealed class ProviderImports : IDisposable
     private (ImportPreview Preview, List<Row> Rows) Prepare(ImportRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Source) || request.Source.Trim().Length > 100) throw new ArgumentException("请填写 1–100 字符的服务商/账户来源。");
-        if (request.Csv is null || Encoding.UTF8.GetByteCount(request.Csv) > 4_000_000) throw new ArgumentException("CSV 上限为 4 MB。");
+        if (request.Csv is null || Encoding.UTF8.GetByteCount(request.Csv) > MaxCsvBytes) throw new ArgumentException("CSV 上限为 4 MB。");
         var zone = TimeZoneInfo.FindSystemTimeZoneById(request.TimeZoneId);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.Csv))).ToLowerInvariant();
         using var reader = new TextFieldParser(new StringReader(request.Csv.TrimStart('\uFEFF'))) { TextFieldType = FieldType.Delimited, HasFieldsEnclosedInQuotes = true, TrimWhiteSpace = false };
@@ -77,7 +79,8 @@ public sealed class ProviderImports : IDisposable
         {
             var fields = reader.ReadFields();
             if (fields is null) break;
-            if (fields.Length != 6 || rows.Count >= 10000) throw new ArgumentException("CSV 须每行六列，最多 10000 行。");
+            if (fields.Length != 6) throw new ArgumentException("CSV 每条数据记录须有六列。");
+            if (rows.Count >= MaxRows) throw new ArgumentException($"CSV 最多 {MaxRows.ToString("N0", CultureInfo.InvariantCulture)} 条数据记录（不含表头）。");
             if (string.IsNullOrWhiteSpace(fields[0]) || fields[0].Length > 500 || fields[4].Length > 500) throw new ArgumentException($"第 {rows.Count + 2} 行名称或显示文本无效。");
             if (!decimal.TryParse(fields[1], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var rate) || rate < 0 ||
                 !long.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out var rowRaw) || rowRaw < 0 ||
