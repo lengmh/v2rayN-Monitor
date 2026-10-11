@@ -106,7 +106,14 @@ internal sealed class TrayContext : ApplicationContext
                         down = decimal.Floor((sample.Download - previous.Download) / seconds).ToString(CultureInfo.InvariantCulture);
                     }
                     previous = sample;
-                    server.SetStatus(new(outcome == "recorded" ? "collecting" : outcome, outcome == "recorded" ? "正在采集 Xray 普通单节点原始字节。" : "已建立新采样基线；切换、重启或缺口不会作为新节点流量入账。", reading.CurrentNode, sample.At, up, down));
+                    var state = outcome is "recorded" or "unallocated" ? "collecting" : outcome;
+                    var message = outcome switch
+                    {
+                        "recorded" => "正在采集 Xray 普通单节点原始字节。",
+                        "unallocated" => "采集已恢复；已找回连续会话的区间流量，细分时间未知，详见统计说明。",
+                        _ => "已建立采样基线；节点切换或核心重启后从新基线开始记录。"
+                    };
+                    server.SetStatus(new(state, message, reading.CurrentNode, sample.At, up, down));
                 }
                 else
                 {
