@@ -1,6 +1,6 @@
 import { addDays } from './ranges.ts';
 import type { Bucket, Range } from './ranges.ts';
-export interface ChartPoint { label: string; upload: string; download: string }
+export interface ChartPoint { label: string; upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string }
 export interface ChartSlot { label: string; point?: ChartPoint }
 function hourKey(date: Date, timeZone: string): string {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date).map(p => [p.type, p.value]));

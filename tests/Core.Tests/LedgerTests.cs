@@ -148,23 +148,82 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Fact]
+    public void RecoveredIntervalInsideOneHourContributesToKnownTotalsAndNodeRanking()
+    {
+        using var ledger = new Ledger(Database);
+        var start = DateTimeOffset.Parse("2026-01-15T10:00:00Z", CultureInfo.InvariantCulture);
+        ledger.Accept(Sample(0, 0, 0) with { At = start });
+        ledger.Accept(Sample(0, 1000, 2000) with { At = start.AddSeconds(1) });
+        // A new session begins with a baseline; only its subsequent continuous delta is recoverable.
+        ledger.Accept(Sample(0, 0, 0, session: "process-2") with { At = start.AddMinutes(15) });
+        ledger.Accept(Sample(0, 1200, 2800, session: "process-2") with { At = start.AddMinutes(45) });
+
+        var dayStart = new DateTimeOffset(start.Date, TimeSpan.Zero);
+        var day = new QuerySpec(dayStart, dayStart.AddDays(1), "UTC", "hour");
+        var result = ledger.Query(day);
+        Assert.Equal("2200", result.Upload);
+        Assert.Equal("4800", result.Download);
+        Assert.Equal("2200", Assert.Single(result.Nodes).Upload);
+        Assert.Equal("4800", Assert.Single(result.Nodes).Download);
+        Assert.Equal("2200", Assert.Single(result.Series).Upload);
+        Assert.Equal("4800", Assert.Single(result.Series).Download);
+        Assert.Equal("1200", Assert.Single(result.Series).RecoveredUpload);
+        Assert.Equal("2800", Assert.Single(result.Series).RecoveredDownload);
+
+        // Knowing the whole interval's total does not establish how much occurred in this subrange.
+        var partial = ledger.Query(day with { Start = start.AddMinutes(20), End = start.AddMinutes(30) });
+        Assert.Equal("0", partial.Upload);
+        Assert.Equal("0", partial.Download);
+        Assert.Empty(partial.Nodes);
+        Assert.Empty(partial.Series);
+    }
+
+    [Theory]
+    [InlineData("2026-01-15T10:30:00Z", "2026-01-15T11:00:00Z", "UTC", "hour", true)]
+    [InlineData("2026-01-15T10:30:00Z", "2026-01-15T11:01:00Z", "UTC", "hour", false)]
+    [InlineData("2026-01-15T15:30:00Z", "2026-01-15T16:00:00Z", "Asia/Shanghai", "day", true)]
+    [InlineData("2026-01-15T15:30:00Z", "2026-01-15T16:01:00Z", "Asia/Shanghai", "day", false)]
+    [InlineData("2024-11-03T05:30:00Z", "2024-11-03T06:30:00Z", "America/New_York", "hour", false)]
+    public void RecoveryUsesHalfOpenBucketsAndTimeZoneWithoutSplitting(string from, string to, string zone, string bucket, bool fits)
+    {
+        using var ledger = new Ledger(Database);
+        var start = DateTimeOffset.Parse(from, CultureInfo.InvariantCulture);
+        var end = DateTimeOffset.Parse(to, CultureInfo.InvariantCulture);
+        ledger.Accept(Sample(0, 0) with { At = start });
+        ledger.Accept(Sample(0, 123) with { At = end });
+        var query = new QuerySpec(start, end, zone, bucket, "instance/node");
+        var result = ledger.Query(query);
+        Assert.Equal("123", result.Upload);
+        Assert.Equal("123", result.RecoveredUpload);
+        Assert.Equal(fits ? "0" : "123", result.UnbucketedUpload);
+        Assert.Equal(fits ? 1 : 0, result.Series.Count);
+        Assert.Equal("123", Assert.Single(result.Nodes).Upload);
+        Assert.Equal("0", ledger.Query(query with { Start = end, End = end.AddHours(1) }).Upload);
+        Assert.Equal("0", ledger.Query(query with { NodeKey = "other" }).Upload);
+    }
+
+    [Fact]
     public void LongContinuousIntervalIsRecoveredButNotAssignedToDates()
     {
         using var ledger = new Ledger(Database);
         ledger.Accept(Sample(0, 100, 200));
         Assert.Equal("unallocated", ledger.Accept(Sample(7200, 125, 280)));
         var result = ledger.Query(All());
-        Assert.Equal("0", result.Upload);
-        Assert.Equal("0", result.Download);
+        Assert.Equal("25", result.Upload);
+        Assert.Equal("80", result.Download);
         Assert.Equal("25", result.UnallocatedUpload);
         Assert.Equal("80", result.UnallocatedDownload);
         Assert.Empty(result.Series);
-        Assert.Empty(result.Nodes);
-        Assert.Equal("recovered-unallocated", Assert.Single(result.Records).Quality);
+        Assert.Equal("25", Assert.Single(result.Nodes).Upload);
+        Assert.Equal("25", result.UnbucketedUpload);
+        Assert.Equal("recovered-contained", Assert.Single(result.Records).Quality);
         Assert.Equal(1, result.GapCount);
         // An intersecting range reports the whole uncertain interval, never a made-up proportional part.
         var overlap = ledger.Query(new QuerySpec(Epoch.AddMinutes(30), Epoch.AddMinutes(40), "UTC"));
         Assert.Equal("25", overlap.UnallocatedUpload);
+        Assert.Equal("25", overlap.PartialUpload);
+        Assert.Equal("0", overlap.Upload);
+        Assert.Equal("recovered-partial", Assert.Single(overlap.Records).Quality);
         var outside = ledger.Query(new QuerySpec(Epoch.AddHours(2), Epoch.AddHours(3), "UTC"));
         Assert.Equal("0", outside.UnallocatedUpload);
     }
@@ -180,8 +239,10 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("unallocated", ledger.Accept(Sample(3, 130)));
         ledger.Accept(Sample(4, 137));
         var result = ledger.Query(All());
-        Assert.Equal("7", result.Upload);
+        Assert.Equal("37", result.Upload);
         Assert.Equal("30", result.UnallocatedUpload);
+        Assert.Equal("30", result.RecoveredUpload);
+        Assert.False(Assert.Single(result.Gaps).IsOpen);
         Assert.Equal(1, result.GapCount);
         Assert.Equal(2, result.RecordCount);
     }
@@ -263,7 +324,7 @@ public sealed class LedgerTests : IDisposable
         {
             Assert.Equal("unallocated", ledger.Accept(Sample(4, 140)));
             var result = ledger.Query(All());
-            Assert.Equal("30", result.Upload);
+            Assert.Equal("40", result.Upload);
             Assert.Equal("10", result.UnallocatedUpload);
             Assert.Equal(1, result.GapCount);
         }

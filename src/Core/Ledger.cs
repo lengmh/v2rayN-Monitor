@@ -172,8 +172,8 @@ public sealed class Ledger : IDisposable
     }
 
     /// <summary>
-    /// Allocated rows use UTC minute starts in [Start, End). Unallocated totals include complete
-    /// intervals overlapping that range, and therefore must not be summed across adjacent queries.
+    /// Known totals include recovered intervals fully contained by the query.
+    /// Partially overlapping recovery is disclosed separately and never apportioned.
     /// </summary>
     public HistoryResult Query(QuerySpec query)
     {
@@ -195,7 +195,10 @@ public sealed class Ledger : IDisposable
             using var transaction = connection.BeginTransaction();
             var totals = new Bytes();
             var unallocated = new Bytes();
-            var series = new Dictionary<string, (long FirstTick, Bytes Bytes)>(StringComparer.Ordinal);
+            var recovered = new Bytes();
+            var partial = new Bytes();
+            var unbucketed = new Bytes();
+            var series = new Dictionary<string, (long FirstTick, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
             var nodes = new Dictionary<string, (string Name, Bytes Bytes)>(StringComparer.Ordinal);
             using (var command = Command(transaction, """
                 SELECT m.start_ticks,m.node_key,n.name,m.upload,m.download
@@ -213,7 +216,7 @@ public sealed class Ledger : IDisposable
                     var label = BucketLabel(new DateTimeOffset(reader.GetInt64(0), TimeSpan.Zero), zone, query.Bucket);
                     if (!series.TryGetValue(label, out var bucket))
                     {
-                        bucket = (reader.GetInt64(0), new Bytes());
+                        bucket = (reader.GetInt64(0), new Bytes(), new Bytes());
                         series.Add(label, bucket);
                     }
                     bucket.Bytes.Add(up, down);
@@ -227,11 +230,47 @@ public sealed class Ledger : IDisposable
                 }
             }
             using (var command = Command(transaction, """
-                SELECT upload,download FROM unallocated
-                WHERE start_ticks < $end AND end_ticks > $start AND ($node IS NULL OR node_key=$node);
+                SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download
+                FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
+                WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node);
                 """, parameters))
             using (var reader = command.ExecuteReader())
-                while (reader.Read()) unallocated.Add(reader.GetInt64(0), reader.GetInt64(1));
+                while (reader.Read())
+                {
+                    var start = reader.GetInt64(0);
+                    var end = reader.GetInt64(1);
+                    var up = reader.GetInt64(4);
+                    var down = reader.GetInt64(5);
+                    unallocated.Add(up, down);
+                    if (start < query.Start.UtcTicks || end > query.End.UtcTicks)
+                    {
+                        partial.Add(up, down);
+                        continue;
+                    }
+                    recovered.Add(up, down);
+                    totals.Add(up, down);
+                    var key = reader.GetString(2);
+                    if (!nodes.TryGetValue(key, out var node))
+                    {
+                        node = (reader.GetString(3), new Bytes());
+                        nodes.Add(key, node);
+                    }
+                    node.Bytes.Add(up, down);
+                    var label = BucketLabel(new DateTimeOffset(start, TimeSpan.Zero), zone, query.Bucket);
+                    if (label != BucketLabel(new DateTimeOffset(end - 1, TimeSpan.Zero), zone, query.Bucket))
+                    {
+                        unbucketed.Add(up, down);
+                        continue;
+                    }
+                    if (!series.TryGetValue(label, out var bucket))
+                    {
+                        bucket = (start, new Bytes(), new Bytes());
+                        series.Add(label, bucket);
+                    }
+                    bucket.Bytes.Add(up, down);
+                    bucket.Recovered.Add(up, down);
+                    if (start < bucket.FirstTick) series[label] = (start, bucket.Bytes, bucket.Recovered);
+                }
             var count = checked((int)Scalar(transaction, """
                 SELECT (SELECT COUNT(*) FROM minutes WHERE start_ticks >= $start AND start_ticks < $end AND ($node IS NULL OR node_key=$node))
                      + (SELECT COUNT(*) FROM unallocated WHERE start_ticks < $end AND end_ticks > $start AND ($node IS NULL OR node_key=$node));
@@ -242,6 +281,17 @@ public sealed class Ledger : IDisposable
                     OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
                     AND ($node IS NULL OR node_key=$node OR node_key IS NULL);
                 """, parameters));
+            var gapDetails = new List<GapInfo>();
+            using (var command = Command(transaction, """
+                SELECT start_ticks,end_ticks,reason,is_open FROM gaps
+                WHERE ((start_ticks < $end AND end_ticks > $start)
+                    OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
+                    AND ($node IS NULL OR node_key=$node OR node_key IS NULL)
+                ORDER BY start_ticks DESC LIMIT 200;
+                """, parameters))
+            using (var reader = command.ExecuteReader())
+                while (reader.Read())
+                    gapDetails.Add(new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2), reader.GetInt64(3) != 0));
             var records = new List<TrafficRow>();
             using (var command = Command(transaction, """
                 SELECT m.start_ticks AS start_ticks,m.start_ticks+$minute AS end_ticks,m.node_key AS node_key,n.name,m.upload,m.download,
@@ -250,7 +300,9 @@ public sealed class Ledger : IDisposable
                 FROM minutes m JOIN nodes n ON n.node_key=m.node_key
                 WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
                 UNION ALL
-                SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download,u.quality,1 AS kind,u.id AS row_id
+                SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download,
+                    CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
+                    1 AS kind,u.id AS row_id
                 FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
                 WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
                 ORDER BY start_ticks DESC,node_key,kind,row_id LIMIT $limit OFFSET $offset;
@@ -265,10 +317,16 @@ public sealed class Ledger : IDisposable
             transaction.Commit();
             return new HistoryResult(Iso(query.Start.UtcTicks), Iso(query.End.UtcTicks), totals.UploadText, totals.DownloadText,
                 unallocated.UploadText, unallocated.DownloadText, gaps,
-                series.OrderBy(x => x.Value.FirstTick).Select(x => new SeriesPoint(x.Key, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText)).ToArray(),
+                series.OrderBy(x => x.Value.FirstTick).Select(x => new SeriesPoint(x.Key, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText, x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)).ToArray(),
                 nodes.OrderByDescending(x => x.Value.Bytes.Upload + x.Value.Bytes.Download).ThenBy(x => x.Key, StringComparer.Ordinal)
                     .Select(x => new NodeTotal(x.Key, x.Value.Name, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText)).ToArray(),
-                records, count);
+                records, count)
+            {
+                RecoveredUpload = recovered.UploadText, RecoveredDownload = recovered.DownloadText,
+                PartialUpload = partial.UploadText, PartialDownload = partial.DownloadText,
+                UnbucketedUpload = unbucketed.UploadText, UnbucketedDownload = unbucketed.DownloadText,
+                Gaps = gapDetails
+            };
         }
     }
 
