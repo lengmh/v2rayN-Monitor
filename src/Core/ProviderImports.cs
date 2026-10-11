@@ -127,7 +127,14 @@ public sealed class ProviderImports : IDisposable
         }
     }
 
-    private sealed record QueryRow(ProviderRecord Record, long Raw, ProviderDecimal Billed, DateTimeOffset At);
+    private sealed class QueryTotal
+    {
+        private BigInteger raw;
+        private BigInteger billed;
+        public void Add(long rawBytes, ProviderDecimal billedBytes) { raw += rawBytes; billed += billedBytes.ScaledUnits; }
+        public string Raw => raw.ToString(CultureInfo.InvariantCulture);
+        public string Billed => ProviderDecimal.FormatScaledUnits(billed);
+    }
     private static void ValidateSource(string source)
     {
         if (string.IsNullOrWhiteSpace(source) || source.Length > 100)
@@ -143,17 +150,15 @@ public sealed class ProviderImports : IDisposable
         var zone = TimeZoneInfo.FindSystemTimeZoneById(query.TimeZoneId);
         lock (gate)
         {
-            // One SELECT supplies totals, buckets and the page from the same SQLite snapshot.
-            using var cmd = db.CreateCommand();
-            cmd.CommandText = """
-                SELECT node_name,rate,raw_bytes,billed_bytes,at_utc FROM provider_records
-                WHERE source=$source AND at_utc >= $start AND at_utc < $end
-                    AND ($node IS NULL OR node_name=$node)
-                ORDER BY at_utc DESC,hash,row_number;
-                """;
-            Add(cmd, ("$source", source), ("$start", Iso(query.Start)), ("$end", Iso(query.End)),
-                ("$node", (object?)query.NodeKey ?? DBNull.Value));
-            var rows = new List<QueryRow>();
+            // Stream one snapshot. SQLite SUM would coerce exact billing text to floating point.
+            // Retain only group totals and the requested page, not every imported record.
+            using var cmd = QueryCommand(source, query);
+            var records = new List<ProviderRecord>();
+            var totals = new QueryTotal();
+            var series = new Dictionary<string, (DateTimeOffset First, QueryTotal Total)>(StringComparer.Ordinal);
+            var nodes = new Dictionary<string, QueryTotal>(StringComparer.Ordinal);
+            var count = 0;
+            var offset = checked(query.Page * query.PageSize);
             using (var reader = cmd.ExecuteReader())
                 while (reader.Read())
                 {
@@ -162,24 +167,60 @@ public sealed class ProviderImports : IDisposable
                         throw new InvalidOperationException("服务商账本含无法读取的计费量。");
                     var raw = reader.GetInt64(2);
                     var atText = reader.GetString(4);
-                    rows.Add(new(new(atText, reader.GetString(0), reader.GetString(1),
-                        raw.ToString(CultureInfo.InvariantCulture), billedText), raw, billed,
-                        DateTimeOffset.Parse(atText, CultureInfo.InvariantCulture)));
+                    var at = DateTimeOffset.Parse(atText, CultureInfo.InvariantCulture);
+                    var name = reader.GetString(0);
+                    totals.Add(raw, billed);
+                    if (!nodes.TryGetValue(name, out var node)) { node = new(); nodes.Add(name, node); }
+                    node.Add(raw, billed);
+                    var label = Ledger.BucketLabel(at, zone, query.Bucket);
+                    if (!series.TryGetValue(label, out var bucket)) bucket = (at, new QueryTotal());
+                    bucket.Total.Add(raw, billed);
+                    series[label] = (at < bucket.First ? at : bucket.First, bucket.Total);
+                    if (count >= offset && records.Count < query.PageSize) records.Add(ReadRecord(reader));
+                    count = checked(count + 1);
                 }
-            static string Raw(IEnumerable<QueryRow> values) =>
-                values.Aggregate(BigInteger.Zero, (sum, row) => sum + row.Raw).ToString(CultureInfo.InvariantCulture);
-            static string Billed(IEnumerable<QueryRow> values) =>
-                ProviderDecimal.Sum(values.Select(row => row.Billed), enforceImportBound: false).ToString();
-            var series = rows.GroupBy(row => Ledger.BucketLabel(row.At, zone, query.Bucket))
-                .OrderBy(group => group.Min(row => row.At))
-                .Select(group => new ProviderPoint(group.Key, Raw(group), Billed(group))).ToArray();
-            var nodes = rows.GroupBy(row => row.Record.NodeName, StringComparer.Ordinal)
-                .OrderBy(group => group.Key, StringComparer.Ordinal)
-                .Select(group => new ProviderNode(group.Key, Raw(group), Billed(group))).ToArray();
-            return new(source, Raw(rows), Billed(rows), series, nodes,
-                rows.Skip(checked(query.Page * query.PageSize)).Take(query.PageSize).Select(row => row.Record).ToArray(), rows.Count);
+            return new(source, totals.Raw, totals.Billed,
+                series.OrderBy(pair => pair.Value.First).Select(pair => new ProviderPoint(pair.Key, pair.Value.Total.Raw, pair.Value.Total.Billed)).ToArray(),
+                nodes.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new ProviderNode(pair.Key, pair.Value.Raw, pair.Value.Billed)).ToArray(),
+                records, count);
         }
     }
+
+    public IReadOnlyList<ProviderRecord> Export(string source, QuerySpec query)
+    {
+        ValidateSource(source);
+        if (query.End <= query.Start) throw new ArgumentException("统计范围无效。");
+        lock (gate)
+        {
+            using var cmd = QueryCommand(source, query);
+            cmd.CommandText += " LIMIT 100001";
+            var rows = new List<ProviderRecord>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                if (rows.Count == 100000) throw new ArgumentException("导出最多 100000 条记录，请缩小日期范围或选择单个节点。");
+                rows.Add(ReadRecord(reader));
+            }
+            return rows;
+        }
+    }
+
+    private SqliteCommand QueryCommand(string source, QuerySpec query)
+    {
+        var cmd = db.CreateCommand();
+        cmd.CommandText = """
+            SELECT node_name,rate,raw_bytes,billed_bytes,at_utc FROM provider_records
+            WHERE source=$source AND at_utc >= $start AND at_utc < $end
+                AND ($node IS NULL OR node_name=$node)
+            ORDER BY at_utc DESC,hash,row_number
+            """;
+        Add(cmd, ("$source", source), ("$start", Iso(query.Start)), ("$end", Iso(query.End)),
+            ("$node", (object?)query.NodeKey ?? DBNull.Value));
+        return cmd;
+    }
+    private static ProviderRecord ReadRecord(SqliteDataReader reader) =>
+        new(reader.GetString(4), reader.GetString(0), reader.GetString(1),
+            reader.GetInt64(2).ToString(CultureInfo.InvariantCulture), reader.GetString(3));
 
     private (ImportPreview Preview, List<Row> Rows) Prepare(ImportRequest request)
     {
