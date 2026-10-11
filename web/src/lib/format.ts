@@ -11,7 +11,11 @@ export function decimal(value: bigint, divisor: bigint, places = 3): string {
   const whole = (rounded / scale).toLocaleString('zh-CN');
   return places ? `${whole}.${(rounded % scale).toString().padStart(places, '0')}` : whole;
 }
-export const formatBytes = (value: string | bigint, unit: Unit): string => `${decimal(typeof value === 'bigint' ? value : bytes(value), unitDivisor(unit))} ${unit}`;
+export function formatAmount(value: bigint, divisor: bigint, unit: Unit): string {
+  const text = decimal(value, divisor);
+  return `${value > 0n && text === '0.000' ? '< 0.001' : text} ${unit}`;
+}
+export const formatBytes = (value: string | bigint, unit: Unit): string => formatAmount(typeof value === 'bigint' ? value : bytes(value), unitDivisor(unit), unit);
 export const exactBytes = (value: string | bigint): string => `${(typeof value === 'bigint' ? value : bytes(value)).toLocaleString('zh-CN')} bytes`;
 export function rate(value: string | null, unit: Unit): string {
   if (value === null) return '—';
