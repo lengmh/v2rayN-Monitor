@@ -166,7 +166,6 @@ public sealed class MonitorServer : IAsyncDisposable
         var page = int.TryParse(q["page"], out var p) ? p : 0; var size = int.TryParse(q["pageSize"], out var s) ? s : 50;
         if (page < 0 || page > 100000 || size < 1 || size > 500) throw new ArgumentException("分页范围无效。");
         var name = q["nodeName"].FirstOrDefault();
-        if (name?.Length > 500) throw new ArgumentException("节点名称过长。");
         return new(start, end, zone, bucket, q["nodeKey"].FirstOrDefault() is { Length: > 0 } key ? key : null, page, size)
         {
             NodeName = string.IsNullOrEmpty(name) ? null : name
