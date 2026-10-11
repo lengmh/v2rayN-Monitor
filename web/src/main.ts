@@ -1,4 +1,5 @@
 import './style.css';
+import './ui.css';
 import { chartSlots, shortLabel } from './lib/chart.ts';
 import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
 import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProviderTotal, providerUnits, providerUnitsText } from './lib/provider-format.ts';
@@ -110,12 +111,12 @@ function renderChart(history: HistoryPointInput, provider = false): void {
   const exact = (value: string | bigint): string => provider ? exactProviderTotal(providerUnitsText(BigInt(value))) : exactBytes(value);
   const chart = el('chart'); chart.replaceChildren();
   chart.classList.toggle('empty', !history.series.length);
-  if (!history.series.length) { chart.append(element('p', '这个区间还没有可分时的记录。\n采集器连接后，新增流量会显示在这里。')); chart.setAttribute('aria-label', '此区间没有可分时记录，缺失不代表零流量'); put('chart-scale', ''); return; }
+  if (!history.series.length) { chart.append(element('p', provider ? '所选日期没有已导入记录。\n请调整范围或导入服务商 CSV。' : '这个区间还没有可分时的记录。\n采集器连接后，新增流量会显示在这里。')); chart.setAttribute('aria-label', '此区间没有可分时记录，缺失不代表零流量'); put('chart-scale', ''); return; }
   const max = history.series.reduce((result, p) => { const total = bytes(p.upload) + bytes(p.download); return total > result ? total : result; }, 0n);
   chart.setAttribute('aria-label', `流量趋势，共 ${history.series.length} 个有记录的时间桶；空白时间不代表零流量。`);
   const slots = chartSlots(history.series, range, bucket, settings.timeZoneId);
   if (!slots) { chart.classList.add('empty'); chart.append(element('p', '此范围的时间桶过多，请切换为按日、周或月查看。\n上方合计与下方明细仍包含完整查询结果。')); put('chart-scale', ''); return; }
-  const labelEvery = Math.max(1, Math.ceil(slots.length / 10));
+  const labelEvery = Math.max(1, Math.ceil(slots.length / Math.max(2, Math.floor((chart.clientWidth || 600) / 65))));
   slots.forEach(({ label: key, point }, index) => {
     const total = point ? bytes(point.upload) + bytes(point.download) : 0n;
     const column = element('div', '', 'chart-column');
@@ -128,7 +129,8 @@ function renderChart(history: HistoryPointInput, provider = false): void {
     else if (total === 0n) stack.append(element('span', '', 'chart-zero'));
     else { const download = element('span', '', 'bar-part bar-download'); download.style.height = `${percentage(bytes(point.download), max)}%`; const upload = element('span', '', 'bar-part bar-upload'); upload.style.height = `${percentage(bytes(point.upload), max)}%`; stack.append(download, upload); }
     column.append(stack);
-    if (index % labelEvery === 0 || index === slots.length - 1) column.append(element('span', label, 'chart-label'));
+    if (index === 0 || index === slots.length - 1 || (index % labelEvery === 0 && slots.length - 1 - index >= labelEvery / 2))
+      column.append(element('span', label, 'chart-label'));
     chart.append(column);
   });
   put('chart-scale', `最高 ${display(max)}`);
@@ -142,6 +144,10 @@ function renderHistory(history: HistoryResult): void {
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
   put('upload-value', formatBytes(up, unit)); put('upload-exact', exactBytes(up));
+  if (history.recordCount === 0) {
+    for (const id of ['total-value', 'upload-value', 'download-value']) put(id, '—');
+    for (const id of ['total-exact', 'upload-exact', 'download-exact']) put(id, '所选范围无记录');
+  }
   const recovered = bytes(history.recoveredUpload ?? '0') + bytes(history.recoveredDownload ?? '0');
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
@@ -151,6 +157,7 @@ function renderHistory(history: HistoryResult): void {
   if (partial > 0n) quality.push(`另有部分重叠的恢复区间，共 ${formatBytes(partial, unit)}（${exactBytes(partial)}）；本范围内用量未知，未计入合计，不能跨日期相加。`);
   if (history.gapCount) quality.push(`本范围有 ${history.gapCount} 段历史采集间断，当前采集状态见上方。`);
   put('quality-notice', quality.join(' '));
+  put('quality-summary', recovered > 0n ? `已知合计包含 ${formatBytes(recovered, unit)} 恢复量` : history.gapCount ? `本范围有 ${history.gapCount} 段历史采集间断` : '统计口径与数据说明');
   const details = el('gap-list'); details.replaceChildren();
   const reasons: Record<string, string> = { long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
   for (const gap of history.gaps ?? []) details.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
@@ -195,6 +202,9 @@ function statisticLabels(): void {
   const provider = statisticsSource !== '';
   const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
   show('provider-metric-control', provider); show('upload-legend', !provider);
+  show('attribution-note', !provider);
+  el('summary').classList.toggle('provider-summary', provider);
+  show('raw-card', !provider || providerMetric !== 'raw'); show('billed-card', !provider || providerMetric !== 'billed');
   put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : '本机内核统计 · 含可确定范围的恢复量');
   put('total-title', provider ? metric : '区间已知合计');
   put('total-note', provider ? '仅当前来源 · 不与本机流量相加' : '上传 + 下载 · 包含区间内恢复量');
@@ -214,7 +224,12 @@ function renderProviderHistory(history: ProviderHistory): void {
   put('total-value', formatProviderTotal(metric(history), unit)); put('total-exact', exactProviderTotal(metric(history)));
   put('download-value', formatBytes(history.rawBytes, unit)); put('download-exact', exactBytes(history.rawBytes));
   put('upload-value', formatProviderTotal(history.billedBytes, unit)); put('upload-exact', exactProviderTotal(history.billedBytes));
+  if (history.recordCount === 0) {
+    for (const id of ['total-value', 'upload-value', 'download-value']) put(id, '—');
+    for (const id of ['total-exact', 'upload-exact', 'download-exact']) put(id, '所选范围无记录');
+  }
   put('quality-notice', '仅统计所选服务商的已导入记录，不代表完整使用量。上下行方向、设备和 IP 未知；不与本机流量相加。');
+  put('quality-summary', '服务商独立记录 · 与本机分别统计');
   show('gap-details', false);
   put('trend-subtitle', `${providerMetric === 'raw' ? '原始量' : '计费量'} · ${settings.timeZoneId}`);
   renderChart({ series: history.series.map(point => ({ label: point.label, upload: '0', download: providerUnits(metric(point)).toString() })) }, true);
@@ -240,6 +255,8 @@ function renderProviderHistory(history: ProviderHistory): void {
     const row = element('tr'), name = element('td', record.nodeName, 'node-cell'); name.title = record.nodeName;
     const raw = element('td', formatBytes(record.rawBytes, unit), 'numeric'); raw.title = exactBytes(record.rawBytes);
     const billed = element('td', formatProviderTotal(record.billedBytes, unit), 'numeric'); billed.title = exactProviderTotal(record.billedBytes);
+    raw.append(element('small', exactBytes(record.rawBytes), 'exact-cell'));
+    billed.append(element('small', exactProviderTotal(record.billedBytes), 'exact-cell'));
     row.append(element('td', timestamp(record.at, settings.timeZoneId)), name, raw, billed, element('td', record.rate));
     records.append(row);
   }
@@ -261,6 +278,12 @@ async function refresh(force = false): Promise<void> {
   const controller = new AbortController(); refreshController = controller;
   if (force) { show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
   try {
+    // Imported history changes only on an explicit operation, not each collector tick.
+    if (statisticsSource && latestProvider && !force) {
+      const status = await api<CollectorStatus>('/api/status', { signal: controller.signal });
+      if (!controller.signal.aborted && refreshController === controller) renderStatus(status);
+      return;
+    }
     const results = await Promise.allSettled([
       api<CollectorStatus>('/api/status', { signal: controller.signal }),
       api<NodeInfo[]>(statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : '/api/nodes', { signal: controller.signal }),
@@ -275,7 +298,7 @@ async function refresh(force = false): Promise<void> {
       show('global-error', false);
     }
     for (const result of results) if (result.status === 'rejected') throw result.reason;
-    put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)} · 5 秒`);
+    put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 5 秒'}`);
   } catch (error) {
     if (!controller.signal.aborted && !expired) { fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '连接中断 · 自动重试'); }
   } finally {
@@ -286,7 +309,7 @@ function navigate(view: string): void {
   activeView = view;
   for (const id of ['overview', 'settings', 'provider']) show(`${id}-view`, id === view);
   for (const nav of document.querySelectorAll<HTMLButtonElement>('.nav-item')) { const active = nav.dataset.view === view; nav.classList.toggle('active', active); if (active) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current'); }
-  put('page-name', ({ overview: '本机总览', settings: '采集与设置', provider: '服务商账本' } as Record<string, string>)[view]);
+  put('page-name', ({ overview: '流量统计', settings: '采集与设置', provider: '导入记录' } as Record<string, string>)[view]);
   if (view === 'provider' && ready) void loadBatches();
 }
 async function loadBatches(): Promise<void> {
@@ -298,8 +321,27 @@ function renderBatches(): void {
   for (const batch of lastBatchList) {
     const row = element('tr'), billed = element('td', undefined, 'numeric');
     billed.append(element('div', formatProviderBytes(batch.billedBytes, unit)), element('small', exactProviderBytes(batch.billedBytes)));
-    row.append(element('td', batch.source), element('td', String(batch.rowCount)), element('td', formatBytes(batch.rawBytes, unit), 'numeric'), billed, element('td', timestamp(batch.importedAt || null, settings.timeZoneId))); body.append(row);
+    const source = element('td'), group = element('div', '', 'batch-source'), view = element('button', '查看来源统计 →', 'text-button');
+    view.type = 'button'; view.setAttribute('aria-label', `按当前日期范围查看来源 ${batch.source} 的统计`);
+    view.addEventListener('click', async () => {
+      try {
+        await loadSources(); chooseSource(batch.source);
+        navigate('overview'); void refresh(true);
+      } catch (error) { formResult('import-result', errorText(error), true); }
+    });
+    group.append(element('span', batch.source), view); source.append(group);
+    row.append(source, element('td', String(batch.rowCount)), element('td', formatBytes(batch.rawBytes, unit), 'numeric'), billed, element('td', timestamp(batch.importedAt || null, settings.timeZoneId))); body.append(row);
   }
+}
+function chooseSource(source: string): void {
+  statisticsSource = source; el<HTMLSelectElement>('statistics-source').value = source;
+  nodeKey = ''; page = 0; latestHistory = null; latestProvider = null; statisticLabels();
+  const allNodes = element('option', '全部节点'); allNodes.value = '';
+  el<HTMLSelectElement>('node-filter').replaceChildren(allNodes);
+  for (const id of ['total-value', 'total-exact', 'upload-value', 'upload-exact', 'download-value', 'download-exact', 'node-count']) put(id, '—');
+  for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
+  pagination(0); put('chart-scale', ''); show('gap-details', false);
+  put('quality-notice', '正在读取所选来源…'); put('quality-summary', '正在读取所选来源…');
 }
 function invalidateImport(): void { importRevision++; importRequest = null; show('import-preview', false); put('import-result', ''); }
 function formResult(id: string, value: string, isError = false): void { put(id, value); el(id).classList.toggle('error', isError); }
@@ -317,11 +359,7 @@ el('unit').addEventListener('change', () => { unit = el<HTMLSelectElement>('unit
 el('previous-page').addEventListener('click', () => { if (page > 0) { page--; void refresh(true); } });
 el('next-page').addEventListener('click', () => { if ((page + 1) * pageSize < (latestProvider?.recordCount ?? latestHistory?.recordCount ?? 0)) { page++; void refresh(true); } });
 el('statistics-source').addEventListener('change', () => {
-  statisticsSource = el<HTMLSelectElement>('statistics-source').value; nodeKey = ''; page = 0;
-  latestHistory = null; latestProvider = null; statisticLabels();
-  for (const id of ['total-value', 'total-exact', 'upload-value', 'upload-exact', 'download-value', 'download-exact']) put(id, '—');
-  for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
-  show('gap-details', false); put('quality-notice', '正在读取所选来源…');
+  chooseSource(el<HTMLSelectElement>('statistics-source').value);
   void refresh(true);
 });
 el('provider-metric').addEventListener('change', () => {
@@ -370,7 +408,7 @@ el('import-form').addEventListener('submit', async event => {
 el('commit-import').addEventListener('click', async () => {
   if (!importRequest) return;
   const request = importRequest, button = el<HTMLButtonElement>('commit-import'); button.disabled = true;
-  try { await post('/api/imports/commit', request); invalidateImport(); formResult('import-result', '导入完成，已保存到独立服务商账本。可在统计来源中选择查看节点历史。'); await loadBatches(); await loadSources(); }
+  try { await post('/api/imports/commit', request); invalidateImport(); formResult('import-result', '导入完成，已保存到独立服务商账本。可在统计来源中选择查看节点历史。'); await loadBatches(); await loadSources(); if (statisticsSource === request.source.trim()) await refresh(true); }
   catch (error) { formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('seed-demo').addEventListener('click', async () => {
@@ -380,6 +418,15 @@ el('seed-demo').addEventListener('click', async () => {
 });
 window.addEventListener('pagehide', () => { refreshController?.abort(); if (refreshTimer) clearTimeout(refreshTimer); });
 window.addEventListener('pageshow', event => { if (event.persisted && !expired) void refresh(true); });
+let resizePending = false;
+window.addEventListener('resize', () => {
+  if (resizePending) return;
+  resizePending = true;
+  requestAnimationFrame(() => {
+    resizePending = false;
+    if (latestProvider) renderProviderHistory(latestProvider); else if (latestHistory) renderChart(latestHistory);
+  });
+});
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !expired && range) void refresh(true); });
 
 async function start(): Promise<void> {

@@ -46,6 +46,8 @@ test('CSV source uses node statistics and exact billing without local direction 
   await page.screenshot({ path: 'test-results/provider-statistics-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect.poll(() => page.locator('.chart-label').count()).toBeLessThanOrEqual(6);
+  await expect(page.locator('#total-value')).toHaveText('< 0.001 GB');
   await page.screenshot({ path: 'test-results/provider-statistics-mobile.png', fullPage: true });
   await page.selectOption('#statistics-source', '');
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
@@ -126,7 +128,7 @@ test('provider decimal preview, commit and reloaded list display every digit on 
   await page.click('.nav-item[data-view=overview]'); await page.selectOption('#unit', 'GiB');
   await expect(page.locator('#total-exact')).toHaveText('16,106,127,360 bytes');
   await page.click('.nav-item[data-view=provider]');
-  await expect(page.locator('#import-batches')).toContainText('0.000 GiB');
+  await expect(page.locator('#import-batches')).toContainText('< 0.001 GiB');
   await expect(page.locator('#import-batches')).toContainText('2,600.800000000123 bytes');
   await page.screenshot({ path: 'test-results/provider-decimal-desktop.png', fullPage: true });
   await page.reload(); await page.click('.nav-item[data-view=provider]');

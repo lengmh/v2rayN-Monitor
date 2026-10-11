@@ -17,6 +17,7 @@ test('provider units round with integer arithmetic and preserve exact text indep
   assert.equal(formatProviderBytes('1999499999.9999999999', 'GB'), '1.999 GB');
   assert.equal(formatProviderBytes('1999500000.0000000001', 'GB'), '2.000 GB');
   assert.equal(formatProviderBytes('0', 'GB'), '0.000 GB');
+  assert.equal(formatProviderBytes('0.0000000000000000000000000001', 'GB'), '< 0.001 GB');
   assert.equal(formatProviderBytes('79228162514264337593543950335', 'GB'), '79,228,162,514,264,337,593.544 GB');
 });
 
