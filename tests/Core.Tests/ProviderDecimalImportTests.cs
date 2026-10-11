@@ -17,6 +17,31 @@ public sealed class ProviderDecimalImportTests : IDisposable
     public ProviderDecimalImportTests() => Directory.CreateDirectory(root);
 
     [Fact]
+    public void QueryPreservesLargeCrossBatchTotalsAndSeparatesSourcesAndCalendarDays()
+    {
+        using var imports = new ProviderImports(PathFor());
+        var first = Request(Row("79228162514264337593543950335"));
+        imports.Commit(first);
+        imports.Commit(first with { Csv = first.Csv.Replace("2026-01-01", "2026-01-02") });
+        imports.Commit(first with { Source = "another-source" });
+        var query = new QuerySpec(new DateTimeOffset(2025, 12, 31, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2026, 1, 3, 0, 0, 0, TimeSpan.Zero), "Asia/Shanghai");
+        var result = imports.Query(first.Source, query);
+        Assert.Equal("158456325028528675187087900670", result.BilledBytes);
+        Assert.Equal("2", result.RawBytes);
+        Assert.Equal(2, result.Series.Count);
+        Assert.Equal("2026-01-01", result.Series[0].Label);
+        Assert.Equal("2026-01-02", result.Series[1].Label);
+        Assert.Equal(2, imports.Sources().Count);
+        Assert.Single(imports.GetNodes(first.Source));
+        Assert.Equal("1", imports.Query("another-source", query).RawBytes);
+        var page = imports.Query(first.Source, query with { Page = 1, PageSize = 1 });
+        Assert.Equal(result.BilledBytes, page.BilledBytes);
+        Assert.Single(page.Records);
+        Assert.Empty(imports.Query(first.Source, query with { NodeKey = "missing" }).Records);
+    }
+
+    [Fact]
     public void DecimalPreviewCommitReopenAndListRetainCsvValuesExactlyAndStayIdempotent()
     {
         var request = Request(Row("1000", "1000", "1"), Row("800", "1000"), Row("800.800000000123", "1001"));

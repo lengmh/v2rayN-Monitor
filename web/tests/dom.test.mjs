@@ -17,6 +17,7 @@ async function fixture(t, overrides = {}) {
     const parsed = new URL(url, w.location.href), body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ path: parsed.pathname, query: parsed.searchParams, body, headers: options.headers, signal: options.signal });
     if (overrides[parsed.pathname]) return overrides[parsed.pathname](parsed, options);
+    if (parsed.pathname === '/api/provider/sources') return Response.json([]);
     const routes = { '/api/session': { ok: true }, '/api/settings': { v2rayNPath: 'C:\\Synthetic', timeZoneId: 'UTC', demo: true }, '/api/timezones': [{ id: 'UTC', name: 'UTC' }, { id: 'Asia/Shanghai', name: '中国标准时间' }], '/api/nodes': [{ key: 'a', name: 'Synthetic A' }, { key: 'b', name: 'Synthetic B' }], '/api/history': history, '/api/status': { state: 'demo', message: '合成数据', currentNode: 'Synthetic A', lastSample: null, uploadPerSecond: null, downloadPerSecond: '0', demo: true }, '/api/imports': [], '/api/imports/preview': { hash: 'test', rowCount: 1, rawBytes: '1024', billedBytes: '1024', firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-01T00:00:00Z', warnings: [], duplicate: false }, '/api/imports/commit': { ok: true } };
     return Response.json(routes[parsed.pathname] || {});
   };
@@ -78,6 +79,30 @@ test('recovery is disclosed as already included while partial overlap stays excl
   assert.ok(get('quality-notice').textContent.includes('尚未分配到当前趋势图'));
   assert.ok(get('quality-notice').textContent.includes('本范围内用量未知，未计入合计'));
   assert.ok(get('gap-list').textContent.includes('已结束（不代表流量全部恢复）'));
+});
+
+test('unified statistics switch provider source without mixing local totals or directions', async t => {
+  const provider = { source: 'source-one', rawBytes: '1300', billedBytes: '1000.800000000123',
+    series: [{ label: '2026-10-09', rawBytes: '1300', billedBytes: '1000.800000000123' }],
+    nodes: [{ name: 'CSV node', rawBytes: '1300', billedBytes: '1000.800000000123' }],
+    records: [{ at: '2026-10-09T10:00:00Z', nodeName: 'CSV node', rate: '0.8', rawBytes: '1300', billedBytes: '1000.800000000123' }], recordCount: 1 };
+  const { get, change, calls } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['source-one']),
+    '/api/provider/nodes': () => Response.json([{ key: 'CSV node', name: 'CSV node' }]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  await until(() => get('statistics-source')?.options.length === 2);
+  change('statistics-source', 'source-one');
+  await until(() => get('records').textContent.includes('CSV node'));
+  assert.equal(get('total-exact').textContent, '1,300 bytes');
+  assert.equal(get('upload-exact').textContent, '1,000.800000000123 bytes');
+  assert.equal(get('download-title').textContent, '服务商原始量');
+  change('provider-metric', 'billed');
+  assert.equal(get('total-exact').textContent, '1,000.800000000123 bytes');
+  assert.ok(calls.some(c => c.path === '/api/provider/history' && c.query.get('source') === 'source-one'));
+  change('statistics-source', '');
+  await until(() => get('total-value').textContent === '16.106 GB');
+  assert.equal(get('download-title').textContent, '下载');
 });
 
 test('provider upload help agrees with the shared backend parser limits', async t => {

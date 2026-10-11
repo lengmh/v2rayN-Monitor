@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
@@ -98,6 +99,88 @@ public sealed class ProviderImports : IDisposable
             return result;
         }
     }
+    public IReadOnlyList<string> Sources()
+    {
+        lock (gate)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT DISTINCT source FROM import_batches ORDER BY source";
+            using var reader = cmd.ExecuteReader();
+            var result = new List<string>();
+            while (reader.Read()) result.Add(reader.GetString(0));
+            return result;
+        }
+    }
+
+    public IReadOnlyList<NodeInfo> GetNodes(string source)
+    {
+        ValidateSource(source);
+        lock (gate)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT DISTINCT node_name FROM provider_records WHERE source=$source ORDER BY node_name";
+            Add(cmd, ("$source", source));
+            using var reader = cmd.ExecuteReader();
+            var result = new List<NodeInfo>();
+            while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(0)));
+            return result;
+        }
+    }
+
+    private sealed record QueryRow(ProviderRecord Record, long Raw, ProviderDecimal Billed, DateTimeOffset At);
+    private static void ValidateSource(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source) || source.Length > 100)
+            throw new ArgumentException("请选择有效的服务商来源。");
+    }
+
+    public ProviderHistory Query(string source, QuerySpec query)
+    {
+        ValidateSource(source);
+        if (query.End <= query.Start || query.Page < 0 || query.PageSize is < 1 or > 1000 ||
+            query.Bucket is not ("hour" or "day" or "week" or "month" or "year"))
+            throw new ArgumentException("统计范围、分桶或分页无效。");
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(query.TimeZoneId);
+        lock (gate)
+        {
+            // One SELECT supplies totals, buckets and the page from the same SQLite snapshot.
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                SELECT node_name,rate,raw_bytes,billed_bytes,at_utc FROM provider_records
+                WHERE source=$source AND at_utc >= $start AND at_utc < $end
+                    AND ($node IS NULL OR node_name=$node)
+                ORDER BY at_utc DESC,hash,row_number;
+                """;
+            Add(cmd, ("$source", source), ("$start", Iso(query.Start)), ("$end", Iso(query.End)),
+                ("$node", (object?)query.NodeKey ?? DBNull.Value));
+            var rows = new List<QueryRow>();
+            using (var reader = cmd.ExecuteReader())
+                while (reader.Read())
+                {
+                    var billedText = reader.GetString(3);
+                    if (!ProviderDecimal.TryParse(billedText, out var billed))
+                        throw new InvalidOperationException("服务商账本含无法读取的计费量。");
+                    var raw = reader.GetInt64(2);
+                    var atText = reader.GetString(4);
+                    rows.Add(new(new(atText, reader.GetString(0), reader.GetString(1),
+                        raw.ToString(CultureInfo.InvariantCulture), billedText), raw, billed,
+                        DateTimeOffset.Parse(atText, CultureInfo.InvariantCulture)));
+                }
+            static string Raw(IEnumerable<QueryRow> values) =>
+                values.Aggregate(BigInteger.Zero, (sum, row) => sum + row.Raw).ToString(CultureInfo.InvariantCulture);
+            static string Billed(IEnumerable<QueryRow> values) =>
+                ProviderDecimal.Sum(values.Select(row => row.Billed), enforceImportBound: false).ToString();
+            var series = rows.GroupBy(row => Ledger.BucketLabel(row.At, zone, query.Bucket))
+                .OrderBy(group => group.Min(row => row.At))
+                .Select(group => new ProviderPoint(group.Key, Raw(group), Billed(group))).ToArray();
+            var nodes = rows.GroupBy(row => row.Record.NodeName, StringComparer.Ordinal)
+                .OrderBy(group => group.Key, StringComparer.Ordinal)
+                .Select(group => new ProviderNode(group.Key, Raw(group), Billed(group))).ToArray();
+            return new(source, Raw(rows), Billed(rows), series, nodes,
+                rows.Skip(checked(query.Page * query.PageSize)).Take(query.PageSize).Select(row => row.Record).ToArray(), rows.Count);
+        }
+    }
+
     private (ImportPreview Preview, List<Row> Rows) Prepare(ImportRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Source) || request.Source.Trim().Length > 100) throw new ArgumentException("请填写 1–100 字符的服务商/账户来源。");
