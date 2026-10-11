@@ -42,6 +42,27 @@ public sealed class ProviderDecimalImportTests : IDisposable
     }
 
     [Fact]
+    public void FiftyThousandRowsKeepExactTotalsAndBoundedPagesWhileExportIsOneSnapshot()
+    {
+        using var imports = new ProviderImports(PathFor());
+        var request = new ImportRequest("synthetic-large-query", "UTC", Header + string.Concat(Enumerable.Repeat(Row("0.8") + "\n", 50000)));
+        imports.Commit(request);
+        var query = new QuerySpec(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2026, 1, 3, 0, 0, 0, TimeSpan.Zero), "UTC", Page: 7, PageSize: 50);
+        var result = imports.Query(request.Source, query);
+        Assert.Equal(50000, result.RecordCount);
+        Assert.Equal(50, result.Records.Count);
+        Assert.Equal("50000", result.RawBytes);
+        Assert.Equal("40000", result.BilledBytes);
+        var exported = imports.Export(request.Source, query);
+        Assert.Equal(50000, exported.Count);
+        imports.Commit(Request(Row("3")) with { Source = request.Source, Csv = (Header + Row("3")).Replace("2026-01-01", "2026-01-02") });
+        Assert.Equal(50000, exported.Count);
+        Assert.All(exported, row => Assert.Equal("0.8", row.BilledBytes));
+        Assert.Equal(50001, imports.Query(request.Source, query).RecordCount);
+    }
+
+    [Fact]
     public void DecimalPreviewCommitReopenAndListRetainCsvValuesExactlyAndStayIdempotent()
     {
         var request = Request(Row("1000", "1000", "1"), Row("800", "1000"), Row("800.800000000123", "1001"));
