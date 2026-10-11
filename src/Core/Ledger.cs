@@ -199,7 +199,7 @@ public sealed class Ledger : IDisposable
             var partial = new Bytes();
             var unbucketed = new Bytes();
             var series = new Dictionary<string, (long FirstTick, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
-            var nodes = new Dictionary<string, (string Name, Bytes Bytes)>(StringComparer.Ordinal);
+            var nodes = new Dictionary<string, (string Name, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
             using (var command = Command(transaction, """
                 SELECT m.start_ticks,m.node_key,n.name,m.upload,m.download
                 FROM minutes m JOIN nodes n ON n.node_key=m.node_key
@@ -223,7 +223,7 @@ public sealed class Ledger : IDisposable
                     var key = reader.GetString(1);
                     if (!nodes.TryGetValue(key, out var node))
                     {
-                        node = (reader.GetString(2), new Bytes());
+                        node = (reader.GetString(2), new Bytes(), new Bytes());
                         nodes.Add(key, node);
                     }
                     node.Bytes.Add(up, down);
@@ -252,10 +252,11 @@ public sealed class Ledger : IDisposable
                     var key = reader.GetString(2);
                     if (!nodes.TryGetValue(key, out var node))
                     {
-                        node = (reader.GetString(3), new Bytes());
+                        node = (reader.GetString(3), new Bytes(), new Bytes());
                         nodes.Add(key, node);
                     }
                     node.Bytes.Add(up, down);
+                    node.Recovered.Add(up, down);
                     var label = BucketLabel(new DateTimeOffset(start, TimeSpan.Zero), zone, query.Bucket);
                     if (label != BucketLabel(new DateTimeOffset(end - 1, TimeSpan.Zero), zone, query.Bucket))
                     {
@@ -319,7 +320,7 @@ public sealed class Ledger : IDisposable
                 unallocated.UploadText, unallocated.DownloadText, gaps,
                 series.OrderBy(x => x.Value.FirstTick).Select(x => new SeriesPoint(x.Key, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText, x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)).ToArray(),
                 nodes.OrderByDescending(x => x.Value.Bytes.Upload + x.Value.Bytes.Download).ThenBy(x => x.Key, StringComparer.Ordinal)
-                    .Select(x => new NodeTotal(x.Key, x.Value.Name, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText)).ToArray(),
+                    .Select(x => new NodeTotal(x.Key, x.Value.Name, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText, x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)).ToArray(),
                 records, count)
             {
                 RecoveredUpload = recovered.UploadText, RecoveredDownload = recovered.DownloadText,

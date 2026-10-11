@@ -161,6 +161,11 @@ function renderHistory(history: HistoryResult): void {
     const value = bytes(node.upload) + bytes(node.download);
     heading.append(element('span', String(index + 1).padStart(2, '0'), 'rank-index'), name, element('span', formatBytes(value, unit), 'rank-value'));
     const track = element('div', '', 'rank-track'), bar = element('div', '', 'rank-bar'); bar.style.width = `${percentage(value, max)}%`; track.append(bar); row.append(heading, track); ranking.append(row);
+    const recovered = bytes(node.recoveredUpload ?? '0') + bytes(node.recoveredDownload ?? '0');
+    if (recovered > 0n) {
+      const note = element('small', `其中恢复量 ${formatBytes(recovered, unit)}`, 'rank-recovery');
+      note.title = exactBytes(recovered); row.append(note);
+    }
   });
   const records = el('records'); records.replaceChildren();
   const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
