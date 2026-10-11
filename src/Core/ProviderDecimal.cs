@@ -39,7 +39,7 @@ internal readonly record struct ProviderDecimal
         return true;
     }
 
-    public static ProviderDecimal Sum(IEnumerable<ProviderDecimal> values)
+    public static ProviderDecimal Sum(IEnumerable<ProviderDecimal> values, bool enforceImportBound = true)
     {
         var scale = 0;
         var coefficient = BigInteger.Zero;
@@ -53,7 +53,7 @@ internal readonly record struct ProviderDecimal
         // Only bound the final exact total: a later fractional carry can make an
         // otherwise unrepresentable intermediate total fit. Row order must not matter.
         while (scale > 0 && coefficient % 10 == 0) { coefficient /= 10; scale--; }
-        if (coefficient > MaxCoefficient)
+        if (enforceImportBound && coefficient > MaxCoefficient)
             throw new OverflowException("服务商计费量合计超出可无损表示的十进制范围（96 位系数、最多 28 位小数）；未导入任何记录。");
         return new(coefficient, scale);
     }

@@ -83,6 +83,39 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Contains("recovered-partial", await client.GetStringAsync("/api/export" + partial));
     }
 
+    [Fact] public async Task ProviderHistoryIsQueryableBySourceNodeAndDateWithoutChangingLocalTotals()
+    {
+        await Login();
+        const string csv = """
+            node_name,rate,origin_traffic,origin_x_rate,traffic,log_time
+            Synthetic-A,0.8,1001,800.800000000123,synthetic,2026-01-01 10:00:00
+            Synthetic-A,0,99,0,synthetic,2026-01-02 10:00:00
+            Synthetic-B,1,200,200,synthetic,2026-01-01 11:00:00
+            """;
+        var committed = await client.PostAsJsonAsync("/api/imports/commit", new { source = "source-one", timeZoneId = "UTC", csv });
+        Assert.Equal(HttpStatusCode.OK, committed.StatusCode);
+        await client.PostAsJsonAsync("/api/imports/commit", new { source = "source-two", timeZoneId = "UTC", csv });
+        const string query = "?source=source-one&start=2026-01-01T00:00:00Z&end=2026-01-03T00:00:00Z&timeZoneId=UTC";
+        var response = await client.GetAsync("/api/provider/history" + query);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("1300", result.GetProperty("rawBytes").GetString());
+        Assert.Equal("1000.800000000123", result.GetProperty("billedBytes").GetString());
+        Assert.Equal(3, result.GetProperty("recordCount").GetInt32());
+        Assert.Equal(2, result.GetProperty("nodes").GetArrayLength());
+        Assert.Equal(2, result.GetProperty("series").GetArrayLength());
+        var filtered = await client.GetFromJsonAsync<JsonElement>("/api/provider/history" + query + "&nodeKey=Synthetic-A&pageSize=1");
+        Assert.Equal("1100", filtered.GetProperty("rawBytes").GetString());
+        Assert.Equal("800.800000000123", filtered.GetProperty("billedBytes").GetString());
+        Assert.Equal(2, filtered.GetProperty("recordCount").GetInt32());
+        Assert.Equal(1, filtered.GetProperty("records").GetArrayLength());
+        var exported = await client.GetStringAsync("/api/provider/export" + query);
+        Assert.Contains("800.800000000123", exported);
+        Assert.Contains("source-one", exported);
+        Assert.DoesNotContain("source-two", exported);
+        Assert.Empty(server.Ledger.GetNodes());
+    }
+
     [Fact] public async Task RepresentativeProviderCsvPassesPreviewAndCommitThroughHttp()
     {
         await Login();

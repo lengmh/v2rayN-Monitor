@@ -138,6 +138,21 @@ public sealed class MonitorServer : IAsyncDisposable
         app.MapPost("/api/imports/preview", (ImportRequest request) => imports.Preview(request));
         app.MapPost("/api/imports/commit", (ImportRequest request) => imports.Commit(request));
         app.MapGet("/api/imports", () => imports.List());
+        app.MapGet("/api/provider/sources", () => imports.Sources());
+        app.MapGet("/api/provider/nodes", (HttpRequest request) => imports.GetNodes(request.Query["source"].ToString()));
+        app.MapGet("/api/provider/history", (HttpRequest request) => imports.Query(request.Query["source"].ToString(), ParseQuery(request)));
+        app.MapGet("/api/provider/export", (HttpRequest request) =>
+        {
+            var source = request.Query["source"].ToString();
+            var query = ParseQuery(request) with { Page = 0, PageSize = 500 };
+            var first = imports.Query(source, query);
+            if (first.RecordCount > 100000) return Results.BadRequest(new { error = "导出最多 100000 条记录，请缩小日期范围或选择单个节点。" });
+            var csv = new StringBuilder("\uFEFFsource,at_utc,node,rate,raw_bytes,billed_bytes\r\n");
+            for (var page = 0; page * 500 < first.RecordCount; page++)
+                foreach (var row in (page == 0 ? first : imports.Query(source, query with { Page = page })).Records)
+                    csv.AppendLine(string.Join(',', Cell(source), Cell(row.At), Cell(row.NodeName), row.Rate, row.RawBytes, row.BilledBytes));
+            return Results.File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", "v2rayn-provider-history.csv");
+        });
         app.MapPost("/api/demo", () => { if (!demo) return Results.BadRequest(new { error = "真实账本禁止注入演示数据，请使用 --demo 启动独立演示目录。" }); Ledger.SeedDemo(DateTimeOffset.UtcNow); return Results.Ok(new { ok = true }); });
         app.UseDefaultFiles(); app.UseStaticFiles();
         await app.StartAsync(ct).ConfigureAwait(false);

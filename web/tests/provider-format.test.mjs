@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { exactProviderBytes, formatProviderBytes } from '../src/lib/provider-format.ts';
+import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProviderTotal, providerUnits, providerUnitsText } from '../src/lib/provider-format.ts';
 import { bytes } from '../src/lib/format.ts';
 
 test('provider decimal values keep every digit beyond integer and floating-point precision', () => {
@@ -26,4 +26,11 @@ test('provider decimals do not loosen local integer accounting or accept malform
     assert.throws(() => exactProviderBytes(value));
     assert.throws(() => formatProviderBytes(value, 'GB'));
   }
+});
+
+test('cross-batch query totals remain exact beyond a single import bound', () => {
+  assert.equal(exactProviderTotal('158456325028528675187087900670'), '158,456,325,028,528,675,187,087,900,670 bytes');
+  assert.equal(providerUnitsText(providerUnits('1000.800000000123')), '1000.800000000123');
+  assert.equal(formatProviderTotal('1999500000.0000000001', 'GB'), '2.000 GB');
+  assert.ok(providerUnits('0.0000000000000000000000000002') > providerUnits('0.0000000000000000000000000001'));
 });

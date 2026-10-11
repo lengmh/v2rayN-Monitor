@@ -462,7 +462,7 @@ public sealed class Ledger : IDisposable
     private static long MinuteStart(long ticks) => ticks - ticks % Minute;
     private static string Iso(long ticks) => new DateTimeOffset(ticks, TimeSpan.Zero).ToString("O", CultureInfo.InvariantCulture);
     private static string Text(long bytes) => bytes.ToString(CultureInfo.InvariantCulture);
-    private static string BucketLabel(DateTimeOffset at, TimeZoneInfo zone, string bucket)
+    internal static string BucketLabel(DateTimeOffset at, TimeZoneInfo zone, string bucket)
     {
         var local = TimeZoneInfo.ConvertTime(at, zone);
         return bucket switch

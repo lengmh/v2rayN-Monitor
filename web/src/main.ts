@@ -1,11 +1,11 @@
 import './style.css';
 import { chartSlots, shortLabel } from './lib/chart.ts';
 import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
-import { exactProviderBytes, formatProviderBytes } from './lib/provider-format.ts';
+import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProviderTotal, providerUnits, providerUnitsText } from './lib/provider-format.ts';
 import type { Unit } from './lib/format.ts';
 import { dateInZone, dateRange, periodRange, shiftAnchor, timestamp } from './lib/ranges.ts';
 import type { Bucket, Period, Range } from './lib/ranges.ts';
-import type { CollectorStatus, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings } from './types.ts';
+import type { CollectorStatus, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings, ProviderHistory } from './types.ts';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -35,6 +35,9 @@ let nodeKey = '';
 let page = 0;
 const pageSize = 50;
 let latestHistory: HistoryResult | null = null;
+let latestProvider: ProviderHistory | null = null;
+let statisticsSource = '';
+let providerMetric: 'raw' | 'billed' = 'raw';
 let latestStatus: CollectorStatus | null = null;
 let lastBatchList: ImportBatch[] = [];
 let activeView = 'overview';
@@ -65,6 +68,7 @@ const errorText = (error: unknown): string => error instanceof Error ? error.mes
 function query(): string {
   const params = new URLSearchParams({ start: range.start, end: range.end, timeZoneId: settings.timeZoneId, bucket, page: String(page), pageSize: String(pageSize) });
   if (nodeKey) params.set('nodeKey', nodeKey);
+  if (statisticsSource) params.set('source', statisticsSource);
   return params.toString();
 }
 function updateRange(): void {
@@ -101,7 +105,9 @@ function renderNodes(nodes: NodeInfo[]): void {
   if (nodeKey && !nodes.some(n => n.key === nodeKey)) { const option = element('option', '已删除 / 历史节点'); option.value = nodeKey; select.append(option); }
   select.value = nodeKey;
 }
-function renderChart(history: HistoryPointInput): void {
+function renderChart(history: HistoryPointInput, provider = false): void {
+  const display = (value: string | bigint): string => provider ? formatProviderTotal(providerUnitsText(BigInt(value)), unit) : formatBytes(value, unit);
+  const exact = (value: string | bigint): string => provider ? exactProviderTotal(providerUnitsText(BigInt(value))) : exactBytes(value);
   const chart = el('chart'); chart.replaceChildren();
   chart.classList.toggle('empty', !history.series.length);
   if (!history.series.length) { chart.append(element('p', '这个区间还没有可分时的记录。\n采集器连接后，新增流量会显示在这里。')); chart.setAttribute('aria-label', '此区间没有可分时记录，缺失不代表零流量'); put('chart-scale', ''); return; }
@@ -114,7 +120,7 @@ function renderChart(history: HistoryPointInput): void {
     const total = point ? bytes(point.upload) + bytes(point.download) : 0n;
     const column = element('div', '', 'chart-column');
     const label = shortLabel(key, bucket);
-    column.title = point ? `${key}\n下载 ${formatBytes(point.download, unit)}（${exactBytes(point.download)}）\n上传 ${formatBytes(point.upload, unit)}（${exactBytes(point.upload)}）` : `${key}\n无记录，不能视为零流量`;
+    column.title = point ? provider ? `${key}\n${providerMetric === 'raw' ? '服务商原始量' : '服务商计费量'} ${display(total)}（${exact(total)}）` : `${key}\n下载 ${display(point.download)}（${exact(point.download)}）\n上传 ${display(point.upload)}（${exact(point.upload)}）` : `${key}\n无记录，不能视为零流量`;
     const recovered = bytes(point?.recoveredUpload ?? '0') + bytes(point?.recoveredDownload ?? '0');
     if (recovered > 0n) column.title += `\n其中恢复量 ${exactBytes(recovered)}，更细时间分布未知`;
     const stack = element('div', '', 'chart-stack');
@@ -125,11 +131,13 @@ function renderChart(history: HistoryPointInput): void {
     if (index % labelEvery === 0 || index === slots.length - 1) column.append(element('span', label, 'chart-label'));
     chart.append(column);
   });
-  put('chart-scale', `最高 ${formatBytes(max, unit)}`);
+  put('chart-scale', `最高 ${display(max)}`);
 }
 type HistoryPointInput = Pick<HistoryResult, 'series'>;
 function renderHistory(history: HistoryResult): void {
   latestHistory = history;
+  latestProvider = null;
+  statisticLabels();
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
@@ -174,10 +182,76 @@ function renderHistory(history: HistoryResult): void {
     const qualityCell = element('td'); const label = element('span', labels[record.quality] || record.quality, `quality-pill ${['exact', 'normal', 'measured'].includes(record.quality) ? '' : 'warning'}`); qualityCell.append(label);
     row.append(time, name, download, upload, qualityCell); records.append(row);
   }
-  const pages = Math.max(1, Math.ceil(history.recordCount / pageSize));
-  put('record-count', `${history.recordCount.toLocaleString('zh-CN')} 条记录`); put('page-label', `第 ${page + 1} / ${pages} 页 · 每页 ${pageSize} 条`);
-  el<HTMLButtonElement>('previous-page').disabled = page === 0; el<HTMLButtonElement>('next-page').disabled = (page + 1) * pageSize >= history.recordCount;
+  pagination(history.recordCount);
   el('summary').setAttribute('aria-busy', 'false');
+}
+function pagination(count: number): void {
+  const pages = Math.max(1, Math.ceil(count / pageSize));
+  put('record-count', `${count.toLocaleString('zh-CN')} 条记录`); put('page-label', `第 ${page + 1} / ${pages} 页 · 每页 ${pageSize} 条`);
+  el<HTMLButtonElement>('previous-page').disabled = page === 0;
+  el<HTMLButtonElement>('next-page').disabled = (page + 1) * pageSize >= count;
+}
+function statisticLabels(): void {
+  const provider = statisticsSource !== '';
+  const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
+  show('provider-metric-control', provider); show('upload-legend', !provider);
+  put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : '本机内核统计 · 含可确定范围的恢复量');
+  put('total-title', provider ? metric : '区间已知合计');
+  put('total-note', provider ? '仅当前来源 · 不与本机流量相加' : '上传 + 下载 · 包含区间内恢复量');
+  put('download-title', provider ? '服务商原始量' : '下载'); put('upload-title', provider ? '服务商计费量' : '上传');
+  put('download-note', provider ? 'CSV 原始字节 · 未乘倍率' : '从代理节点接收');
+  put('upload-note', provider ? '保留 CSV 精确数值 · 不重新计算' : '通过代理节点发送');
+  put('download-legend', provider ? metric : '下载');
+  put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
+  put('records-heading', provider ? '服务商记录' : '采集明细');
+  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : '本机独立账本 · 原始整数 bytes');
+  put('download-column', provider ? '原始量' : '下载'); put('upload-column', provider ? '计费量' : '上传');
+  put('quality-column', provider ? '倍率' : '质量');
+}
+function renderProviderHistory(history: ProviderHistory): void {
+  latestProvider = history; latestHistory = null; statisticLabels();
+  const metric = (value: { rawBytes: string; billedBytes: string }): string => providerMetric === 'raw' ? value.rawBytes : value.billedBytes;
+  put('total-value', formatProviderTotal(metric(history), unit)); put('total-exact', exactProviderTotal(metric(history)));
+  put('download-value', formatBytes(history.rawBytes, unit)); put('download-exact', exactBytes(history.rawBytes));
+  put('upload-value', formatProviderTotal(history.billedBytes, unit)); put('upload-exact', exactProviderTotal(history.billedBytes));
+  put('quality-notice', '仅统计所选服务商的已导入记录，不代表完整使用量。上下行方向、设备和 IP 未知；不与本机流量相加。');
+  show('gap-details', false);
+  put('trend-subtitle', `${providerMetric === 'raw' ? '原始量' : '计费量'} · ${settings.timeZoneId}`);
+  renderChart({ series: history.series.map(point => ({ label: point.label, upload: '0', download: providerUnits(metric(point)).toString() })) }, true);
+  const ranking = el('ranking'); ranking.replaceChildren();
+  const sorted = [...history.nodes].sort((a, b) => {
+    const x = providerUnits(metric(a)), y = providerUnits(metric(b)); return x > y ? -1 : x < y ? 1 : a.name.localeCompare(b.name);
+  });
+  put('node-count', String(sorted.length));
+  if (!sorted.length) ranking.append(element('p', '所选范围没有导入的节点记录', 'empty-state'));
+  const max = sorted.length ? providerUnits(metric(sorted[0])) : 0n;
+  sorted.forEach((node, index) => {
+    const row = element('div', '', 'rank-row'), heading = element('div', '', 'rank-heading');
+    const name = element('button', node.name, 'rank-node'); name.type = 'button'; name.title = node.name;
+    name.addEventListener('click', () => { nodeKey = node.name; el<HTMLSelectElement>('node-filter').value = nodeKey; page = 0; void refresh(true); });
+    const amount = element('span', formatProviderTotal(metric(node), unit), 'rank-value'); amount.title = exactProviderTotal(metric(node));
+    heading.append(element('span', String(index + 1), 'rank-index'), name, amount);
+    const track = element('div', '', 'rank-track'), bar = element('div', '', 'rank-bar');
+    bar.style.width = `${percentage(providerUnits(metric(node)), max)}%`; track.append(bar); row.append(heading, track); ranking.append(row);
+  });
+  const records = el('records'); records.replaceChildren();
+  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个范围没有已导入记录，请调整日期或来源。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
+  for (const record of history.records) {
+    const row = element('tr'), name = element('td', record.nodeName, 'node-cell'); name.title = record.nodeName;
+    const raw = element('td', formatBytes(record.rawBytes, unit), 'numeric'); raw.title = exactBytes(record.rawBytes);
+    const billed = element('td', formatProviderTotal(record.billedBytes, unit), 'numeric'); billed.title = exactProviderTotal(record.billedBytes);
+    row.append(element('td', timestamp(record.at, settings.timeZoneId)), name, raw, billed, element('td', record.rate));
+    records.append(row);
+  }
+  pagination(history.recordCount); el('summary').setAttribute('aria-busy', 'false');
+}
+async function loadSources(): Promise<void> {
+  const sources = await api<string[]>('/api/provider/sources');
+  const select = el<HTMLSelectElement>('statistics-source');
+  select.replaceChildren(element('option', '本机采集'));
+  select.options[0].value = '';
+  for (const source of sources) { const option = element('option', `服务商 · ${source}`); option.value = source; select.append(option); }
+  select.value = statisticsSource;
 }
 async function refresh(force = false): Promise<void> {
   if (expired || !ready || !range) return;
@@ -189,14 +263,17 @@ async function refresh(force = false): Promise<void> {
   try {
     const results = await Promise.allSettled([
       api<CollectorStatus>('/api/status', { signal: controller.signal }),
-      api<NodeInfo[]>('/api/nodes', { signal: controller.signal }),
-      api<HistoryResult>(`/api/history?${query()}`, { signal: controller.signal })
+      api<NodeInfo[]>(statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : '/api/nodes', { signal: controller.signal }),
+      api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query()}`, { signal: controller.signal })
     ]);
     if (controller.signal.aborted || refreshController !== controller) return;
     const [status, nodes, history] = results;
     if (status.status === 'fulfilled') renderStatus(status.value);
     if (nodes.status === 'fulfilled') renderNodes(nodes.value);
-    if (history.status === 'fulfilled') { renderHistory(history.value); show('global-error', false); }
+    if (history.status === 'fulfilled') {
+      if (statisticsSource) renderProviderHistory(history.value as ProviderHistory); else renderHistory(history.value as HistoryResult);
+      show('global-error', false);
+    }
     for (const result of results) if (result.status === 'rejected') throw result.reason;
     put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)} · 5 秒`);
   } catch (error) {
@@ -236,9 +313,21 @@ el('next-period').addEventListener('click', () => { if (period !== 'custom') { a
 el('today-button').addEventListener('click', () => { if (period === 'custom') period = 'day'; anchor = dateInZone(new Date(), settings.timeZoneId); selectRange(); });
 el('node-filter').addEventListener('change', () => { nodeKey = el<HTMLSelectElement>('node-filter').value; page = 0; void refresh(true); });
 el('bucket').addEventListener('change', () => { bucket = el<HTMLSelectElement>('bucket').value as Bucket; page = 0; void refresh(true); });
-el('unit').addEventListener('change', () => { unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
+el('unit').addEventListener('change', () => { unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
 el('previous-page').addEventListener('click', () => { if (page > 0) { page--; void refresh(true); } });
-el('next-page').addEventListener('click', () => { if (latestHistory && (page + 1) * pageSize < latestHistory.recordCount) { page++; void refresh(true); } });
+el('next-page').addEventListener('click', () => { if ((page + 1) * pageSize < (latestProvider?.recordCount ?? latestHistory?.recordCount ?? 0)) { page++; void refresh(true); } });
+el('statistics-source').addEventListener('change', () => {
+  statisticsSource = el<HTMLSelectElement>('statistics-source').value; nodeKey = ''; page = 0;
+  latestHistory = null; latestProvider = null; statisticLabels();
+  for (const id of ['total-value', 'total-exact', 'upload-value', 'upload-exact', 'download-value', 'download-exact']) put(id, '—');
+  for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
+  show('gap-details', false); put('quality-notice', '正在读取所选来源…');
+  void refresh(true);
+});
+el('provider-metric').addEventListener('change', () => {
+  providerMetric = el<HTMLSelectElement>('provider-metric').value as 'raw' | 'billed';
+  if (latestProvider) renderProviderHistory(latestProvider);
+});
 el('settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const button = el<HTMLButtonElement>('save-settings'); button.disabled = true; formResult('settings-result', '正在保存…');
   try {
@@ -253,11 +342,11 @@ el('settings-form').addEventListener('submit', async event => {
 el('export-button').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('export-button'); button.disabled = true;
   try {
-    const response = await fetch(`/api/export?${query()}`, { credentials: 'same-origin', cache: 'no-store', headers: { 'x-monitor-request': '1' } });
+    const response = await fetch(`${statisticsSource ? '/api/provider/export' : '/api/export'}?${query()}`, { credentials: 'same-origin', cache: 'no-store', headers: { 'x-monitor-request': '1' } });
     if (response.status === 401 || response.status === 403) { expireSession(); return; }
     if (!response.ok) { const error = await response.json().catch(() => null) as { error?: string } | null; throw new Error(error?.error || `导出失败（${response.status}）。`); }
     const blob = await response.blob(), url = URL.createObjectURL(blob), link = element('a');
-    link.href = url; link.download = `v2rayN-local-${range.from}-${range.through}.csv`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    link.href = url; link.download = `v2rayN-${statisticsSource ? 'provider' : 'local'}-${range.from}-${range.through}.csv`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (error) { fail(errorText(error)); } finally { button.disabled = expired; }
 });
 for (const id of ['provider-source', 'import-zone', 'csv-file']) el(id).addEventListener('change', invalidateImport);
@@ -281,7 +370,7 @@ el('import-form').addEventListener('submit', async event => {
 el('commit-import').addEventListener('click', async () => {
   if (!importRequest) return;
   const request = importRequest, button = el<HTMLButtonElement>('commit-import'); button.disabled = true;
-  try { await post('/api/imports/commit', request); invalidateImport(); formResult('import-result', '导入完成，已保存到独立服务商账本。'); await loadBatches(); }
+  try { await post('/api/imports/commit', request); invalidateImport(); formResult('import-result', '导入完成，已保存到独立服务商账本。可在统计来源中选择查看节点历史。'); await loadBatches(); await loadSources(); }
   catch (error) { formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('seed-demo').addEventListener('click', async () => {
@@ -311,6 +400,7 @@ async function start(): Promise<void> {
     ready = true; for (const id of writeControls) el<HTMLButtonElement>(id).disabled = false;
     anchor = dateInZone(new Date(), settings.timeZoneId); updateRange(); show('demo-notice', settings.demo); show('demo-controls', settings.demo);
     await refresh(true);
+    await loadSources();
     if (activeView === 'provider') await loadBatches();
   } catch (error) { if (!expired) fail(`无法连接本机采集器。${errorText(error)} 请确认托盘仍在运行，并从托盘重新打开页面。`); }
 }
