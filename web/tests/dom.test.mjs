@@ -161,6 +161,13 @@ test('empty local range is unknown while recorded idle traffic stays zero', asyn
   assert.equal(get('total-exact').textContent, '0 bytes');
 });
 
+test('node ranking discloses each node recovery contribution', async t => {
+  const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history,
+    nodes: [{ ...history.nodes[0], recoveredUpload: '1000000000', recoveredDownload: '0' }] }) });
+  assert.ok(get('ranking').textContent.includes('其中恢复量 1.000 GB'));
+  assert.equal(get('ranking').querySelector('.rank-recovery').title, '1,000,000,000 bytes');
+});
+
 test('provider upload help agrees with the shared backend parser limits', async t => {
   const source = await readFile(new URL('../../src/Core/ProviderImports.cs', import.meta.url), 'utf8');
   const maxRows = Number(source.match(/public const int MaxRows = ([\d_]+);/)[1].replaceAll('_', ''));

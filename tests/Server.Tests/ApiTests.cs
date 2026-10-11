@@ -73,6 +73,7 @@ public sealed class ApiTests : IAsyncLifetime
         var json = await client.GetFromJsonAsync<JsonElement>("/api/history" + full);
         Assert.Equal("1200", json.GetProperty("upload").GetString());
         Assert.Equal("2800", json.GetProperty("recoveredDownload").GetString());
+        Assert.Equal("1200", json.GetProperty("nodes")[0].GetProperty("recoveredUpload").GetString());
         Assert.Equal(1, json.GetProperty("series").GetArrayLength());
         Assert.False(json.GetProperty("gaps")[0].GetProperty("isOpen").GetBoolean());
         Assert.Contains("recovered-contained", await client.GetStringAsync("/api/export" + full));
