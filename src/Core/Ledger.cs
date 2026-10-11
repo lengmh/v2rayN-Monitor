@@ -186,7 +186,7 @@ public sealed class Ledger : IDisposable
         var zone = TimeZoneInfo.FindSystemTimeZoneById(query.TimeZoneId);
         var parameters = new (string, object?)[]
         {
-            ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey)
+            ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey), ("$name", query.NodeName)
         };
         lock (gate)
         {
@@ -204,6 +204,7 @@ public sealed class Ledger : IDisposable
                 SELECT m.start_ticks,m.node_key,n.name,m.upload,m.download
                 FROM minutes m JOIN nodes n ON n.node_key=m.node_key
                 WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
+                    AND ($name IS NULL OR n.name=$name COLLATE BINARY)
                 ORDER BY m.start_ticks;
                 """, parameters))
             using (var reader = command.ExecuteReader())
@@ -232,7 +233,8 @@ public sealed class Ledger : IDisposable
             using (var command = Command(transaction, """
                 SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download
                 FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
-                WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node);
+                WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
+                    AND ($name IS NULL OR n.name=$name COLLATE BINARY);
                 """, parameters))
             using (var reader = command.ExecuteReader())
                 while (reader.Read())
@@ -273,14 +275,17 @@ public sealed class Ledger : IDisposable
                     if (start < bucket.FirstTick) series[label] = (start, bucket.Bytes, bucket.Recovered);
                 }
             var count = checked((int)Scalar(transaction, """
-                SELECT (SELECT COUNT(*) FROM minutes WHERE start_ticks >= $start AND start_ticks < $end AND ($node IS NULL OR node_key=$node))
-                     + (SELECT COUNT(*) FROM unallocated WHERE start_ticks < $end AND end_ticks > $start AND ($node IS NULL OR node_key=$node));
+                SELECT (SELECT COUNT(*) FROM minutes WHERE start_ticks >= $start AND start_ticks < $end AND ($node IS NULL OR node_key=$node)
+                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY)))
+                     + (SELECT COUNT(*) FROM unallocated WHERE start_ticks < $end AND end_ticks > $start AND ($node IS NULL OR node_key=$node)
+                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY)));
                 """, parameters));
             var gaps = checked((int)Scalar(transaction, """
                 SELECT COUNT(*) FROM gaps
                 WHERE ((start_ticks < $end AND end_ticks > $start)
                     OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
-                    AND ($node IS NULL OR node_key=$node OR node_key IS NULL);
+                    AND ($node IS NULL OR node_key=$node OR node_key IS NULL)
+                    AND ($name IS NULL OR node_key IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY));
                 """, parameters));
             var gapDetails = new List<GapInfo>();
             using (var command = Command(transaction, """
@@ -288,6 +293,7 @@ public sealed class Ledger : IDisposable
                 WHERE ((start_ticks < $end AND end_ticks > $start)
                     OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
                     AND ($node IS NULL OR node_key=$node OR node_key IS NULL)
+                    AND ($name IS NULL OR node_key IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY))
                 ORDER BY start_ticks DESC LIMIT 200;
                 """, parameters))
             using (var reader = command.ExecuteReader())
@@ -300,12 +306,14 @@ public sealed class Ledger : IDisposable
                     0 AS kind,0 AS row_id
                 FROM minutes m JOIN nodes n ON n.node_key=m.node_key
                 WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
+                    AND ($name IS NULL OR n.name=$name COLLATE BINARY)
                 UNION ALL
                 SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download,
                     CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
                     1 AS kind,u.id AS row_id
                 FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
                 WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
+                    AND ($name IS NULL OR n.name=$name COLLATE BINARY)
                 ORDER BY start_ticks DESC,node_key,kind,row_id LIMIT $limit OFFSET $offset;
                 """, parameters.Concat(new (string, object?)[]
                 {

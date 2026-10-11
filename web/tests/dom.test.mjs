@@ -168,6 +168,41 @@ test('node ranking discloses each node recovery contribution', async t => {
   assert.equal(get('ranking').querySelector('.rank-recovery').title, '1,000,000,000 bytes');
 });
 
+test('same-name comparison keeps sources separate and requests hourly week and month buckets', async t => {
+  let localReads = 0;
+  const comparisonLocal = { ...history, upload: '35', download: '0', nodes: [
+    { key: 'a', name: 'Same', upload: '10', download: '0' }, { key: 'b', name: 'Same', upload: '25', download: '0' }],
+    series: [{ label: '2026-10-09T10:00+00:00', upload: '35', download: '0' }] };
+  const provider = { source: 'cmp', rawBytes: '40', billedBytes: '32.000000000123', recordCount: 1,
+    nodes: [{ name: 'Same', rawBytes: '40', billedBytes: '32.000000000123' }, { name: 'Only CSV', rawBytes: '0', billedBytes: '0' }],
+    series: [{ label: '2026-10-09T10:00+00:00', rawBytes: '40', billedBytes: '32.000000000123' }], records: [] };
+  const { get, change, w, calls } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['cmp']),
+    '/api/provider/nodes': () => Response.json(provider.nodes.map(n => ({ key: n.name, name: n.name }))),
+    '/api/provider/history': () => Response.json(provider),
+    '/api/history': () => Response.json(localReads++ ? comparisonLocal : history)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('statistics-source', 'cmp'); await until(() => get('records').textContent.includes('这个范围'));
+  const toggle = get('compare-toggle'); assert.ok(toggle);
+  toggle.checked = true; toggle.dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-nodes').textContent.includes('Only CSV'));
+  assert.equal(get('bucket').value, 'hour');
+  assert.equal(get('comparison-local-exact').textContent, '35 bytes');
+  const rows = get('comparison-nodes').querySelectorAll('tr');
+  const same = [...rows].find(r => r.textContent.includes('Same'));
+  assert.ok(same.textContent.includes('35 bytes')); assert.ok(same.textContent.includes('32.000000000123 bytes'));
+  const only = [...rows].find(r => r.textContent.includes('Only CSV'));
+  assert.ok(only.textContent.includes('无记录')); assert.ok(only.textContent.includes('0 bytes'));
+  change('node-filter', 'Same');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeName') === 'Same');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('nodeKey'), false);
+  change('bucket', 'week'); change('bucket', 'month');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('bucket') === 'month');
+  toggle.checked = false; toggle.dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-view').hidden);
+});
+
 test('provider upload help agrees with the shared backend parser limits', async t => {
   const source = await readFile(new URL('../../src/Core/ProviderImports.cs', import.meta.url), 'utf8');
   const maxRows = Number(source.match(/public const int MaxRows = ([\d_]+);/)[1].replaceAll('_', ''));

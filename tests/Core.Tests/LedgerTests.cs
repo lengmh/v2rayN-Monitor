@@ -181,6 +181,29 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Theory]
+    [InlineData("hour", "2026-01-02T00:00+08:00", "25")]
+    [InlineData("week", "2025-12-29", "32")]
+    [InlineData("month", "2026-01", "32")]
+    public void SameNameFilterIncludesRecoveryAndPreservesSelectedTimeZoneBuckets(string bucket, string label, string firstAmount)
+    {
+        using var ledger = new Ledger(Database);
+        var start = DateTimeOffset.Parse("2026-01-01T15:15:00Z", CultureInfo.InvariantCulture);
+        ledger.Accept(Sample(0, 0, name: "Same") with { At = start });
+        ledger.Accept(Sample(0, 25, name: "Same") with { At = start.AddHours(1) });
+        ledger.Accept(Sample(0, 0, name: "same", instance: "other") with { At = start });
+        ledger.Accept(Sample(0, 100, name: "same", instance: "other") with { At = start.AddSeconds(1) });
+        ledger.Accept(Sample(0, 32, name: "Same") with { At = start.AddHours(1).AddSeconds(1) });
+        var result = ledger.Query(new QuerySpec(start.AddDays(-1), start.AddDays(2), "Asia/Shanghai", bucket) { NodeName = "Same" });
+        Assert.Equal("32", result.Upload); Assert.Single(result.Nodes);
+        Assert.Equal("25", result.RecoveredUpload); Assert.Equal(2, result.RecordCount);
+        // Recovery crosses midnight/hour: hour excludes it, while week/month include it in one bucket.
+        Assert.Equal(bucket == "hour" ? "25" : "0", result.UnbucketedUpload);
+        Assert.Equal(label, Assert.Single(result.Series).Label);
+        Assert.Equal(bucket == "hour" ? "7" : firstAmount, result.Series[0].Upload);
+        Assert.Equal("0", ledger.Query(new QuerySpec(start.AddMinutes(20), start.AddMinutes(30), "Asia/Shanghai") { NodeName = "Same" }).Upload);
+    }
+
+    [Theory]
     [InlineData("2026-01-15T10:30:00Z", "2026-01-15T11:00:00Z", "UTC", "hour", true)]
     [InlineData("2026-01-15T10:30:00Z", "2026-01-15T11:01:00Z", "UTC", "hour", false)]
     [InlineData("2026-01-15T15:30:00Z", "2026-01-15T16:00:00Z", "Asia/Shanghai", "day", true)]
