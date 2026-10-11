@@ -351,7 +351,7 @@ public sealed class ActiveConfigurationTests : IDisposable
         {
             var guard = new XrayGenerationGuard();
             Assert.Equal("unallocated", Accept(ledger, guard, Snapshot(), 2, 130));
-            Assert.Equal("30", ledger.Query(All).UnallocatedUpload); Assert.Equal("0", ledger.Query(All).Upload);
+            Assert.Equal("30", ledger.Query(All).UnallocatedUpload); Assert.Equal("30", ledger.Query(All).Upload);
         }
     }
 

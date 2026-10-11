@@ -14,7 +14,7 @@ public sealed class ApiTests : IAsyncLifetime
         Directory.CreateDirectory(Path.Combine(root, "web"));
         File.WriteAllText(Path.Combine(root, "web", "index.html"), "<!doctype html><title>Synthetic test</title>");
         server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
-        client = new(new HttpClientHandler { UseCookies = true }) { BaseAddress = new(server.Address) };
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
     }
     private async Task Login()
     {
@@ -63,6 +63,26 @@ public sealed class ApiTests : IAsyncLifetime
         var csv = await client.GetStringAsync("/api/export" + query);
         Assert.Contains("9007199254740993", csv); Assert.Contains("' =Synthetic", csv);
     }
+    [Fact] public async Task RecoveredQueriesAndExportsDiscloseContainedVersusPartialIntervals()
+    {
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 10, 15, 0, TimeSpan.Zero);
+        server.Ledger.Accept(new("test", "one", "Synthetic", "process1", "config1", at, 0, 0));
+        server.Ledger.Accept(new("test", "one", "Synthetic", "process1", "config1", at.AddMinutes(30), 1200, 2800));
+        const string full = "?start=2026-01-01T10:00:00Z&end=2026-01-01T11:00:00Z&timeZoneId=UTC&bucket=hour";
+        var json = await client.GetFromJsonAsync<JsonElement>("/api/history" + full);
+        Assert.Equal("1200", json.GetProperty("upload").GetString());
+        Assert.Equal("2800", json.GetProperty("recoveredDownload").GetString());
+        Assert.Equal(1, json.GetProperty("series").GetArrayLength());
+        Assert.False(json.GetProperty("gaps")[0].GetProperty("isOpen").GetBoolean());
+        Assert.Contains("recovered-contained", await client.GetStringAsync("/api/export" + full));
+        const string partial = "?start=2026-01-01T10:20:00Z&end=2026-01-01T10:30:00Z&timeZoneId=UTC";
+        json = await client.GetFromJsonAsync<JsonElement>("/api/history" + partial);
+        Assert.Equal("0", json.GetProperty("upload").GetString());
+        Assert.Equal("1200", json.GetProperty("partialUpload").GetString());
+        Assert.Contains("recovered-partial", await client.GetStringAsync("/api/export" + partial));
+    }
+
     [Fact] public async Task RepresentativeProviderCsvPassesPreviewAndCommitThroughHttp()
     {
         await Login();

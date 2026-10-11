@@ -71,9 +71,13 @@ test('provider preview is invalidated on edits and commit remains an explicit se
   submit('import-form'); await until(() => !get('import-preview').hidden); get('commit-import').click(); await until(() => get('import-result').textContent.includes('导入完成'));
   assert.equal(calls.filter(c => c.path === '/api/imports/commit').length, 1); assert.equal(get('total-value').textContent, '16.106 GB');
 });
-test('recovered unallocated totals are disclosed separately and never added to cards', async t => {
-  const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history, unallocatedUpload: '1000000000', unallocatedDownload: '2000000000', gapCount: 2 }) });
-  assert.equal(get('total-value').textContent, '16.106 GB'); assert.ok(get('quality-notice').textContent.includes('3.000 GB')); assert.ok(get('quality-notice').textContent.includes('未计入上方合计与图表')); assert.ok(get('quality-notice').textContent.includes('不能跨日期视图相加'));
+test('recovery is disclosed as already included while partial overlap stays excluded', async t => {
+  const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history, recoveredUpload: '1000000000', recoveredDownload: '2000000000', partialUpload: '100', partialDownload: '0', unbucketedUpload: '1000000000', gapCount: 2, gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'long_interval', isOpen: false }] }) });
+  assert.equal(get('total-value').textContent, '16.106 GB');
+  assert.ok(get('quality-notice').textContent.includes('已包含恢复量 3.000 GB'));
+  assert.ok(get('quality-notice').textContent.includes('尚未分配到当前趋势图'));
+  assert.ok(get('quality-notice').textContent.includes('本范围内用量未知，未计入合计'));
+  assert.ok(get('gap-list').textContent.includes('已结束（不代表流量全部恢复）'));
 });
 
 test('provider upload help agrees with the shared backend parser limits', async t => {
