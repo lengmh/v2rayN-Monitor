@@ -115,6 +115,8 @@ function renderChart(history: HistoryPointInput): void {
     const column = element('div', '', 'chart-column');
     const label = shortLabel(key, bucket);
     column.title = point ? `${key}\n下载 ${formatBytes(point.download, unit)}（${exactBytes(point.download)}）\n上传 ${formatBytes(point.upload, unit)}（${exactBytes(point.upload)}）` : `${key}\n无记录，不能视为零流量`;
+    const recovered = bytes(point?.recoveredUpload ?? '0') + bytes(point?.recoveredDownload ?? '0');
+    if (recovered > 0n) column.title += `\n其中恢复量 ${exactBytes(recovered)}，更细时间分布未知`;
     const stack = element('div', '', 'chart-stack');
     if (!point) stack.append(element('span', '', 'chart-missing'));
     else if (total === 0n) stack.append(element('span', '', 'chart-zero'));
@@ -132,12 +134,20 @@ function renderHistory(history: HistoryResult): void {
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
   put('upload-value', formatBytes(up, unit)); put('upload-exact', exactBytes(up));
-  const unallocated = bytes(history.unallocatedUpload) + bytes(history.unallocatedDownload);
-  const quality = ['缺失记录不等于零流量。'];
-  if (history.gapCount) quality.push(`此范围有 ${history.gapCount} 次采集缺口。`);
-  if (unallocated > 0n) quality.push(`另有恢复但未分时：${formatBytes(unallocated, unit)}（${exactBytes(unallocated)}），未计入上方合计与图表。它涉及与查询重叠的完整区间，不能跨日期视图相加。`);
-  if (!history.gapCount && unallocated === 0n) quality.push('首次接入仅建立基线；短区间跨桶的分时量可能为守恒近似。');
+  const recovered = bytes(history.recoveredUpload ?? '0') + bytes(history.recoveredDownload ?? '0');
+  const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
+  const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
+  const quality = ['已知总量不等于完整使用量；缺失记录不等于零流量。'];
+  if (recovered > 0n) quality.push(`合计及节点排行已包含恢复量 ${formatBytes(recovered, unit)}（${exactBytes(recovered)}）。`);
+  if (unbucketed > 0n) quality.push(`其中 ${formatBytes(unbucketed, unit)} 跨越多个时间桶，已计入合计，尚未分配到当前趋势图。`);
+  if (partial > 0n) quality.push(`另有部分重叠的恢复区间，共 ${formatBytes(partial, unit)}（${exactBytes(partial)}）；本范围内用量未知，未计入合计，不能跨日期相加。`);
+  if (history.gapCount) quality.push(`本范围有 ${history.gapCount} 段历史采集间断，当前采集状态见上方。`);
   put('quality-notice', quality.join(' '));
+  const details = el('gap-list'); details.replaceChildren();
+  const reasons: Record<string, string> = { long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
+  for (const gap of history.gaps ?? []) details.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
+  show('gap-details', history.gapCount > 0);
+  put('gap-summary', `查看历史间断（${history.gapCount} 段，最多展示最近 200 段）`);
   put('trend-subtitle', `${({ hour: '小时', day: '日', week: '周', month: '月', year: '年' } as const)[bucket]}分桶 · ${settings.timeZoneId}`);
   renderChart(history);
   const ranking = el('ranking'); ranking.replaceChildren();
@@ -153,7 +163,7 @@ function renderHistory(history: HistoryResult): void {
     const track = element('div', '', 'rank-track'), bar = element('div', '', 'rank-bar'); bar.style.width = `${percentage(value, max)}%`; track.append(bar); row.append(heading, track); ranking.append(row);
   });
   const records = el('records'); records.replaceChildren();
-  const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
+  const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
   if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有采集记录。请检查采集器状态或选择其他日期。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr');
