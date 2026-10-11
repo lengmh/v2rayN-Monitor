@@ -52,6 +52,48 @@ test('CSV source uses node statistics and exact billing without local direction 
   await page.selectOption('#statistics-source', '');
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
 });
+test('same-name comparison aligns sources by hour and keeps week month and missing data explicit', async ({ page }) => {
+  let localReads = 0;
+  const local = { ...history, upload: '3500000000', download: '0', unbucketedUpload: '500', unbucketedDownload: '0',
+    nodes: [{ key: 'a', name: 'Synthetic shared node', upload: '3000000000', download: '0' },
+      { key: 'b', name: 'Synthetic shared node', upload: '500000000', download: '0' }], recordCount: 2 };
+  const provider = { source: 'Synthetic comparison', rawBytes: '4000000000', billedBytes: '3200000000.000123', recordCount: 2,
+    nodes: [{ name: 'Synthetic shared node', rawBytes: '4000000000', billedBytes: '3200000000.000123' },
+      { name: 'CSV only', rawBytes: '0', billedBytes: '0' }], records: [] };
+  const label = url => ({ hour: '2026-10-09T10:00+00:00', week: '2026-10-05', month: '2026-10' })[url.searchParams.get('bucket')] ?? '2026-10-09';
+  const calls = await mock(page, {
+    '/api/provider/sources': route => route.fulfill(json(['Synthetic comparison'])),
+    '/api/nodes': route => route.fulfill(json(local.nodes.map(n => ({ key: n.key, name: n.name })))),
+    '/api/provider/nodes': route => route.fulfill(json(provider.nodes.map(n => ({ key: n.name, name: n.name })))),
+    '/api/history': (route, request, url) => route.fulfill(json(localReads++ ? { ...local, series: [{ label: label(url), upload: '3499999500', download: '0' }] } : history)),
+    '/api/provider/history': (route, request, url) => route.fulfill(json({ ...provider, series: [{ label: label(url), rawBytes: provider.rawBytes, billedBytes: provider.billedBytes }] }))
+  });
+  await page.selectOption('#statistics-source', provider.source);
+  await page.check('#compare-toggle');
+  await expect(page.locator('#comparison-view')).toBeVisible();
+  await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
+  await expect(page.locator('#comparison-nodes')).toContainText('3,200,000,000.000123 bytes');
+  const only = page.locator('#comparison-nodes tr').filter({ hasText: 'CSV only' });
+  await expect(only).toContainText('无记录'); await expect(only).toContainText('0 bytes');
+  await expect(page.locator('#comparison-recovery')).toContainText('500 bytes');
+  await expect(page.locator('#export-button')).toBeHidden();
+  await page.click('[data-period=day]');
+  await expect(page.locator('#comparison-chart .comparison-bar')).toHaveCount(2);
+  expect(await page.locator('#comparison-chart .comparison-bar').first().evaluate(node => parseFloat(getComputedStyle(node).height))).toBeGreaterThan(0);
+  await page.screenshot({ path: 'test-results/comparison-desktop.png', fullPage: true });
+  await page.selectOption('#node-filter', 'Synthetic shared node');
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('nodeName')).toBe('Synthetic shared node');
+  await page.click('[data-period=week]'); await page.selectOption('#bucket', 'week');
+  await expect(page.locator('#comparison-buckets')).toContainText('2026-10-05');
+  await page.click('[data-period=month]'); await page.selectOption('#bucket', 'month');
+  await expect(page.locator('#comparison-buckets')).toContainText('2026-10');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/comparison-mobile.png', fullPage: true });
+  await page.selectOption('#statistics-source', '');
+  await expect(page.locator('#comparison-view')).toBeHidden();
+  expect(await page.locator('#bucket option').count()).toBe(5);
+});
 test('one-time session, secure text rendering, exact unit toggle, and desktop layout', async ({ page }) => {
   const malicious = '<img src=x onerror=alert(1)>';
   const calls = await mock(page, { '/api/nodes': route => route.fulfill(json([{ key: 'x', name: malicious }])), '/api/history': route => route.fulfill(json({ ...history, nodes: [{ key: 'x', name: malicious, upload: '1073741824', download: '15032385536' }], records: [{ ...history.records[0], nodeName: malicious }] })) });

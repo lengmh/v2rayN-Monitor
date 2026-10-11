@@ -16,7 +16,10 @@ public sealed record HistoryResult(string Start, string End, string Upload, stri
     public string UnbucketedDownload { get; init; } = "0";
     public IReadOnlyList<GapInfo> Gaps { get; init; } = [];
 }
-public sealed record QuerySpec(DateTimeOffset Start, DateTimeOffset End, string TimeZoneId, string Bucket = "day", string? NodeKey = null, int Page = 0, int PageSize = 50);
+public sealed record QuerySpec(DateTimeOffset Start, DateTimeOffset End, string TimeZoneId, string Bucket = "day", string? NodeKey = null, int Page = 0, int PageSize = 50)
+{
+    public string? NodeName { get; init; }
+}
 public sealed record ProviderRecord(string At, string NodeName, string Rate, string RawBytes, string BilledBytes);
 public sealed record ProviderPoint(string Label, string RawBytes, string BilledBytes);
 public sealed record ProviderNode(string Name, string RawBytes, string BilledBytes);

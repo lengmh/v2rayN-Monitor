@@ -117,6 +117,26 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Empty(server.Ledger.GetNodes());
     }
 
+    [Fact] public async Task ExactDisplayNameFilterAggregatesDifferentIdsWithoutMergingTheirHistories()
+    {
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 10, 0, 0, TimeSpan.Zero);
+        foreach (var (id, name, amount) in new[] { ("a", "Same", 10), ("b", "Same", 25), ("c", "same", 900), ("d", "Same ", 700) })
+        {
+            server.Ledger.Accept(new("test-" + id, id, name, "p", "g", at, 0, 0));
+            server.Ledger.Accept(new("test-" + id, id, name, "p", "g", at.AddSeconds(1), amount, 0));
+        }
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC&bucket=hour&nodeName=Same";
+        var result = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("35", result.GetProperty("upload").GetString());
+        Assert.Equal(2, result.GetProperty("nodes").GetArrayLength());
+        Assert.Equal(2, result.GetProperty("recordCount").GetInt32());
+        Assert.Equal("35", result.GetProperty("series")[0].GetProperty("upload").GetString());
+        Assert.Equal(4, server.Ledger.GetNodes().Count);
+        var csv = await client.GetStringAsync("/api/export" + query);
+        Assert.DoesNotContain("\"same\"", csv); Assert.DoesNotContain("\"Same \"", csv);
+    }
+
     [Fact] public async Task RepresentativeProviderCsvPassesPreviewAndCommitThroughHttp()
     {
         await Login();

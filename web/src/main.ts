@@ -1,6 +1,8 @@
 import './style.css';
 import './ui.css';
 import { chartSlots, shortLabel } from './lib/chart.ts';
+import { compareNames, compareBuckets } from './lib/comparison.ts';
+import type { ComparisonRow } from './lib/comparison.ts';
 import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
 import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProviderTotal, providerUnits, providerUnitsText } from './lib/provider-format.ts';
 import type { Unit } from './lib/format.ts';
@@ -39,6 +41,8 @@ let latestHistory: HistoryResult | null = null;
 let latestProvider: ProviderHistory | null = null;
 let statisticsSource = '';
 let providerMetric: 'raw' | 'billed' = 'raw';
+let comparison = false;
+let latestComparison: { local: HistoryResult; provider: ProviderHistory } | null = null;
 let latestStatus: CollectorStatus | null = null;
 let lastBatchList: ImportBatch[] = [];
 let activeView = 'overview';
@@ -66,10 +70,10 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 const post = <T>(path: string, body: unknown): Promise<T> => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
 const errorText = (error: unknown): string => error instanceof Error ? error.message : '操作失败，请检查本机采集器。';
-function query(): string {
+function query(localComparison = false): string {
   const params = new URLSearchParams({ start: range.start, end: range.end, timeZoneId: settings.timeZoneId, bucket, page: String(page), pageSize: String(pageSize) });
-  if (nodeKey) params.set('nodeKey', nodeKey);
-  if (statisticsSource) params.set('source', statisticsSource);
+  if (nodeKey) params.set(localComparison ? 'nodeName' : 'nodeKey', nodeKey);
+  if (statisticsSource && !localComparison) params.set('source', statisticsSource);
   return params.toString();
 }
 function updateRange(): void {
@@ -207,6 +211,9 @@ function statisticLabels(): void {
   const provider = statisticsSource !== '';
   const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
   show('provider-metric-control', provider); show('upload-legend', !provider);
+  show('compare-control', provider); show('comparison-view', comparison);
+  el('overview-view').classList.toggle('comparison-mode', comparison);
+  show('export-button', !comparison);
   show('attribution-note', !provider);
   el('summary').classList.toggle('provider-summary', provider);
   show('raw-card', !provider || providerMetric !== 'raw'); show('billed-card', !provider || providerMetric !== 'billed');
@@ -222,6 +229,68 @@ function statisticLabels(): void {
   put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : '本机独立账本 · 原始整数 bytes');
   put('download-column', provider ? '原始量' : '下载'); put('upload-column', provider ? '计费量' : '上传');
   put('quality-column', provider ? '倍率' : '质量');
+}
+function renderComparison(local: HistoryResult, provider: ProviderHistory): void {
+  latestComparison = { local, provider }; latestProvider = null; latestHistory = null; statisticLabels();
+  const card = (id: string, value: string | null): void => {
+    put(`comparison-${id}`, value === null ? '—' : formatProviderTotal(value, unit));
+    put(`comparison-${id}-exact`, value === null ? '所选范围无记录' : exactProviderTotal(value));
+  };
+  card('local', local.recordCount ? (bytes(local.upload) + bytes(local.download)).toString() : null);
+  card('raw', provider.recordCount ? provider.rawBytes : null); card('billed', provider.recordCount ? provider.billedBytes : null);
+  const unbucketed = bytes(local.unbucketedUpload ?? '0') + bytes(local.unbucketedDownload ?? '0');
+  const partial = bytes(local.partialUpload ?? '0') + bytes(local.partialDownload ?? '0');
+  put('comparison-recovery', `本机历史间断 ${local.gapCount} 段。已计入总量但未分配到当前时间桶：${exactBytes(unbucketed)}；部分重叠恢复区间（未计入）：${exactBytes(partial)}。`);
+  put('quality-summary', '同名汇总对照 · 两边数值分别计量');
+  put('quality-notice', '名称相同仅用于展示对照，不证明节点身份相同；服务商记录范围可能不同。缺口不是零，不把差额归因于设备或漏计。');
+  show('gap-details', false);
+  const table = (id: string, rows: ComparisonRow[]): void => {
+    const body = el(id); body.replaceChildren();
+    for (const row of rows) {
+      const tr = element('tr'); tr.append(element('td', row.name));
+      for (const value of [row.local, row.raw, row.billed]) {
+        const cell = element('td', value === null ? '无记录' : formatProviderTotal(value, unit), 'numeric');
+        if (value !== null) cell.append(element('small', exactProviderTotal(value), 'exact-cell'));
+        tr.append(cell);
+      }
+      body.append(tr);
+    }
+    if (!rows.length) { const row = element('tr'), cell = element('td', '所选范围没有可对照记录', 'empty-state'); cell.colSpan = 4; row.append(cell); body.append(row); }
+  };
+  table('comparison-nodes', compareNames(local, provider));
+  const buckets = compareBuckets(local, provider); table('comparison-buckets', buckets);
+  put('comparison-trend-caption', `${bucket === 'hour' ? '小时' : bucket === 'week' ? '周一开始的周' : '月'} · ${settings.timeZoneId}`);
+  put('comparison-metric-label', providerMetric === 'raw' ? '服务商原始量' : '服务商计费量');
+  const chart = el('comparison-chart'); chart.replaceChildren(); chart.classList.remove('empty');
+  const slots = chartSlots(buckets.map(row => ({ label: row.name, upload: '0', download: '0' })), range, bucket, settings.timeZoneId,
+    Math.max(25, Math.floor((chart.clientWidth || 600) / 12)));
+  if (!buckets.length || !slots) {
+    chart.classList.add('empty'); chart.append(element('p', !buckets.length ? '没有已记录的时间桶，请调整范围或导入 CSV。' : '当前宽度无法清楚展示全部时间桶。\n请缩小日期范围或选择周/月；总量和分桶表保持不变。'));
+  } else {
+    const byLabel = new Map(buckets.map(row => [row.name, row]));
+    const scale = buckets.reduce((max, row) => {
+      for (const value of [row.local, providerMetric === 'raw' ? row.raw : row.billed]) {
+        if (value !== null && providerUnits(value) > max) max = providerUnits(value);
+      }
+      return max;
+    }, 0n);
+    const every = Math.max(1, Math.ceil(slots.length / Math.max(2, Math.floor((chart.clientWidth || 600) / 65))));
+    slots.forEach(({ label }, index) => {
+      const row = byLabel.get(label), column = element('div', '', 'chart-column comparison-column'), bars = element('div', '', 'comparison-bars');
+      const values = [row?.local ?? null, (providerMetric === 'raw' ? row?.raw : row?.billed) ?? null];
+      column.title = `${label}\n本机：${values[0] === null ? '无记录' : exactProviderTotal(values[0])}\n服务商：${values[1] === null ? '无记录' : exactProviderTotal(values[1])}`;
+      values.forEach((value, i) => {
+        const bar = element('span', '', value === null ? 'chart-missing' : providerUnits(value) === 0n ? 'chart-zero' : i === 0 ? 'comparison-bar local' : 'comparison-bar provider');
+        if (value !== null && providerUnits(value) > 0n) bar.style.height = `${percentage(providerUnits(value), scale)}%`;
+        bars.append(bar);
+      });
+      column.append(bars);
+      if (index === 0 || index === slots.length - 1 || (index % every === 0 && slots.length - 1 - index >= every / 2))
+        column.append(element('span', shortLabel(label, bucket), 'chart-label'));
+      chart.append(column);
+    });
+  }
+  el('summary').setAttribute('aria-busy', 'false');
 }
 function renderProviderHistory(history: ProviderHistory): void {
   latestProvider = history; latestHistory = null; statisticLabels();
@@ -284,9 +353,25 @@ async function refresh(force = false): Promise<void> {
   if (force) { show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
   try {
     // Imported history changes only on an explicit operation, not each collector tick.
-    if (statisticsSource && latestProvider && !force) {
+    if (statisticsSource && (latestProvider || latestComparison) && !force) {
       const status = await api<CollectorStatus>('/api/status', { signal: controller.signal });
       if (!controller.signal.aborted && refreshController === controller) renderStatus(status);
+      return;
+    }
+    if (comparison) {
+      const [status, localNodes, providerNodes, local, provider] = await Promise.all([
+        api<CollectorStatus>('/api/status', { signal: controller.signal }),
+        api<NodeInfo[]>('/api/nodes', { signal: controller.signal }),
+        api<NodeInfo[]>(`/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}`, { signal: controller.signal }),
+        api<HistoryResult>(`/api/history?${query(true)}`, { signal: controller.signal }),
+        api<ProviderHistory>(`/api/provider/history?${query()}`, { signal: controller.signal })
+      ]);
+      if (controller.signal.aborted || refreshController !== controller) return;
+      renderStatus(status);
+      const names = [...new Set([...localNodes, ...providerNodes].map(node => node.name))].sort();
+      renderNodes(names.map(name => ({ key: name, name })));
+      renderComparison(local, provider);
+      put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)} · 对照按操作刷新`);
       return;
     }
     const results = await Promise.allSettled([
@@ -340,11 +425,21 @@ function renderBatches(): void {
 }
 function chooseSource(source: string): void {
   statisticsSource = source; el<HTMLSelectElement>('statistics-source').value = source;
-  nodeKey = ''; page = 0; latestHistory = null; latestProvider = null; statisticLabels();
+  if (!source) comparison = false;
+  el<HTMLInputElement>('compare-toggle').checked = comparison;
+  const select = el<HTMLSelectElement>('bucket');
+  const options: [Bucket, string][] = comparison ? [['hour', '按小时'], ['week', '按周'], ['month', '按月']] :
+    [['hour', '按小时'], ['day', '按日'], ['week', '按周'], ['month', '按月'], ['year', '按年']];
+  if (!options.some(([value]) => value === bucket)) bucket = 'hour';
+  select.replaceChildren(...options.map(([value, label]) => { const option = element('option', label); option.value = value; return option; }));
+  select.value = bucket;
+  nodeKey = ''; page = 0; latestHistory = null; latestProvider = null; latestComparison = null; statisticLabels();
   const allNodes = element('option', '全部节点'); allNodes.value = '';
   el<HTMLSelectElement>('node-filter').replaceChildren(allNodes);
   for (const id of ['total-value', 'total-exact', 'upload-value', 'upload-exact', 'download-value', 'download-exact', 'node-count']) put(id, '—');
   for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
+  for (const id of ['comparison-nodes', 'comparison-buckets', 'comparison-chart']) el(id).replaceChildren();
+  for (const id of ['local', 'raw', 'billed']) { put(`comparison-${id}`, '—'); put(`comparison-${id}-exact`, '正在读取…'); }
   pagination(0); put('chart-scale', ''); show('gap-details', false);
   put('quality-notice', '正在读取所选来源…'); put('quality-summary', '正在读取所选来源…');
 }
@@ -360,7 +455,7 @@ el('next-period').addEventListener('click', () => { if (period !== 'custom') { a
 el('today-button').addEventListener('click', () => { if (period === 'custom') period = 'day'; anchor = dateInZone(new Date(), settings.timeZoneId); selectRange(); });
 el('node-filter').addEventListener('change', () => { nodeKey = el<HTMLSelectElement>('node-filter').value; page = 0; void refresh(true); });
 el('bucket').addEventListener('change', () => { bucket = el<HTMLSelectElement>('bucket').value as Bucket; page = 0; void refresh(true); });
-el('unit').addEventListener('change', () => { unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
+el('unit').addEventListener('change', () => { unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
 el('previous-page').addEventListener('click', () => { if (page > 0) { page--; void refresh(true); } });
 el('next-page').addEventListener('click', () => { if ((page + 1) * pageSize < (latestProvider?.recordCount ?? latestHistory?.recordCount ?? 0)) { page++; void refresh(true); } });
 el('statistics-source').addEventListener('change', () => {
@@ -370,6 +465,11 @@ el('statistics-source').addEventListener('change', () => {
 el('provider-metric').addEventListener('change', () => {
   providerMetric = el<HTMLSelectElement>('provider-metric').value as 'raw' | 'billed';
   if (latestProvider) renderProviderHistory(latestProvider);
+  if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+});
+el('compare-toggle').addEventListener('change', () => {
+  comparison = el<HTMLInputElement>('compare-toggle').checked && statisticsSource !== '';
+  chooseSource(statisticsSource); void refresh(true);
 });
 el('settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const button = el<HTMLButtonElement>('save-settings'); button.disabled = true; formResult('settings-result', '正在保存…');
@@ -429,7 +529,8 @@ window.addEventListener('resize', () => {
   resizePending = true;
   requestAnimationFrame(() => {
     resizePending = false;
-    if (latestProvider) renderProviderHistory(latestProvider); else if (latestHistory) renderChart(latestHistory);
+    if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+    else if (latestProvider) renderProviderHistory(latestProvider); else if (latestHistory) renderChart(latestHistory);
   });
 });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !expired && range) void refresh(true); });
