@@ -165,6 +165,8 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("4800", result.Download);
         Assert.Equal("2200", Assert.Single(result.Nodes).Upload);
         Assert.Equal("4800", Assert.Single(result.Nodes).Download);
+        Assert.Equal("1200", Assert.Single(result.Nodes).RecoveredUpload);
+        Assert.Equal("2800", Assert.Single(result.Nodes).RecoveredDownload);
         Assert.Equal("2200", Assert.Single(result.Series).Upload);
         Assert.Equal("4800", Assert.Single(result.Series).Download);
         Assert.Equal("1200", Assert.Single(result.Series).RecoveredUpload);

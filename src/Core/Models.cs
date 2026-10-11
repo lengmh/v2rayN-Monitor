@@ -4,7 +4,7 @@ public sealed record CounterSample(string InstanceId, string NodeId, string Node
 public sealed record NodeInfo(string Key, string Name);
 public sealed record TrafficRow(string Start, string End, string NodeKey, string NodeName, string Upload, string Download, string Quality);
 public sealed record SeriesPoint(string Label, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0");
-public sealed record NodeTotal(string Key, string Name, string Upload, string Download);
+public sealed record NodeTotal(string Key, string Name, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0");
 public sealed record GapInfo(string Start, string End, string Reason, bool IsOpen);
 public sealed record HistoryResult(string Start, string End, string Upload, string Download, string UnallocatedUpload, string UnallocatedDownload, int GapCount, IReadOnlyList<SeriesPoint> Series, IReadOnlyList<NodeTotal> Nodes, IReadOnlyList<TrafficRow> Records, int RecordCount)
 {

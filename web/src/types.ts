@@ -5,7 +5,7 @@ export interface TrafficRow { start: string; end: string; nodeKey: string; nodeN
 export interface HistoryResult {
   start: string; end: string; upload: string; download: string; unallocatedUpload: string; unallocatedDownload: string;
   gapCount: number; series: { label: string; upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string }[];
-  nodes: { key: string; name: string; upload: string; download: string }[];
+  nodes: { key: string; name: string; upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string }[];
   records: TrafficRow[]; recordCount: number;
   recoveredUpload?: string; recoveredDownload?: string; partialUpload?: string; partialDownload?: string;
   unbucketedUpload?: string; unbucketedDownload?: string;
