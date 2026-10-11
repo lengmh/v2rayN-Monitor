@@ -43,6 +43,8 @@ let statisticsSource = '';
 let providerMetric: 'raw' | 'billed' = 'raw';
 let comparison = false;
 let latestComparison: { local: HistoryResult; provider: ProviderHistory } | null = null;
+let comparisonBucketPage = 0;
+let comparisonBucketCount = 0;
 let latestStatus: CollectorStatus | null = null;
 let lastBatchList: ImportBatch[] = [];
 let activeView = 'overview';
@@ -231,12 +233,13 @@ function statisticLabels(): void {
   put('quality-column', provider ? '倍率' : '质量');
 }
 function renderComparison(local: HistoryResult, provider: ProviderHistory): void {
+  if (latestComparison?.local !== local || latestComparison?.provider !== provider) comparisonBucketPage = 0;
   latestComparison = { local, provider }; latestProvider = null; latestHistory = null; statisticLabels();
-  const card = (id: string, value: string | null): void => {
+  const card = (id: string, value: string | null, empty = '所选范围无记录'): void => {
     put(`comparison-${id}`, value === null ? '—' : formatProviderTotal(value, unit));
-    put(`comparison-${id}-exact`, value === null ? '所选范围无记录' : exactProviderTotal(value));
+    put(`comparison-${id}-exact`, value === null ? empty : exactProviderTotal(value));
   };
-  card('local', local.recordCount ? (bytes(local.upload) + bytes(local.download)).toString() : null);
+  card('local', local.nodes.length ? (bytes(local.upload) + bytes(local.download)).toString() : null, '所选范围无已知量');
   card('raw', provider.recordCount ? provider.rawBytes : null); card('billed', provider.recordCount ? provider.billedBytes : null);
   const unbucketed = bytes(local.unbucketedUpload ?? '0') + bytes(local.unbucketedDownload ?? '0');
   const partial = bytes(local.partialUpload ?? '0') + bytes(local.partialDownload ?? '0');
@@ -258,14 +261,21 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
     if (!rows.length) { const row = element('tr'), cell = element('td', '所选范围没有可对照记录', 'empty-state'); cell.colSpan = 4; row.append(cell); body.append(row); }
   };
   table('comparison-nodes', compareNames(local, provider));
-  const buckets = compareBuckets(local, provider); table('comparison-buckets', buckets);
+  const buckets = compareBuckets(local, provider);
+  comparisonBucketCount = buckets.length;
+  const pages = Math.max(1, Math.ceil(buckets.length / pageSize));
+  comparisonBucketPage = Math.min(comparisonBucketPage, pages - 1);
+  table('comparison-buckets', buckets.slice(comparisonBucketPage * pageSize, (comparisonBucketPage + 1) * pageSize));
+  put('comparison-bucket-page', `共 ${buckets.length.toLocaleString('zh-CN')} 个已记录桶 · 第 ${comparisonBucketPage + 1} / ${pages} 页 · 每页 ${pageSize} 个`);
+  el<HTMLButtonElement>('comparison-bucket-previous').disabled = comparisonBucketPage === 0;
+  el<HTMLButtonElement>('comparison-bucket-next').disabled = comparisonBucketPage + 1 >= pages;
   put('comparison-trend-caption', `${bucket === 'hour' ? '小时' : bucket === 'week' ? '周一开始的周' : '月'} · ${settings.timeZoneId}`);
   put('comparison-metric-label', providerMetric === 'raw' ? '服务商原始量' : '服务商计费量');
   const chart = el('comparison-chart'); chart.replaceChildren(); chart.classList.remove('empty');
   const slots = chartSlots(buckets.map(row => ({ label: row.name, upload: '0', download: '0' })), range, bucket, settings.timeZoneId,
     Math.max(25, Math.floor((chart.clientWidth || 600) / 12)));
   if (!buckets.length || !slots) {
-    chart.classList.add('empty'); chart.append(element('p', !buckets.length ? '没有已记录的时间桶，请调整范围或导入 CSV。' : '当前宽度无法清楚展示全部时间桶。\n请缩小日期范围或选择周/月；总量和分桶表保持不变。'));
+    chart.classList.add('empty'); chart.append(element('p', !buckets.length ? '没有已记录的时间桶，请调整范围或导入 CSV。' : '当前宽度无法清楚展示全部时间桶。\n请缩小日期范围或选择周/月；完整总量保留，分桶表可翻页查看。'));
   } else {
     const byLabel = new Map(buckets.map(row => [row.name, row]));
     const scale = buckets.reduce((max, row) => {
@@ -434,6 +444,10 @@ function chooseSource(source: string): void {
   select.replaceChildren(...options.map(([value, label]) => { const option = element('option', label); option.value = value; return option; }));
   select.value = bucket;
   nodeKey = ''; page = 0; latestHistory = null; latestProvider = null; latestComparison = null; statisticLabels();
+  comparisonBucketPage = 0; comparisonBucketCount = 0;
+  put('comparison-bucket-page', '正在读取…');
+  el<HTMLButtonElement>('comparison-bucket-previous').disabled = true;
+  el<HTMLButtonElement>('comparison-bucket-next').disabled = true;
   const allNodes = element('option', '全部节点'); allNodes.value = '';
   el<HTMLSelectElement>('node-filter').replaceChildren(allNodes);
   for (const id of ['total-value', 'total-exact', 'upload-value', 'upload-exact', 'download-value', 'download-exact', 'node-count']) put(id, '—');
@@ -458,6 +472,12 @@ el('bucket').addEventListener('change', () => { bucket = el<HTMLSelectElement>('
 el('unit').addEventListener('change', () => { unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
 el('previous-page').addEventListener('click', () => { if (page > 0) { page--; void refresh(true); } });
 el('next-page').addEventListener('click', () => { if ((page + 1) * pageSize < (latestProvider?.recordCount ?? latestHistory?.recordCount ?? 0)) { page++; void refresh(true); } });
+el('comparison-bucket-previous').addEventListener('click', () => {
+  if (latestComparison && comparisonBucketPage > 0) { comparisonBucketPage--; renderComparison(latestComparison.local, latestComparison.provider); }
+});
+el('comparison-bucket-next').addEventListener('click', () => {
+  if (latestComparison && (comparisonBucketPage + 1) * pageSize < comparisonBucketCount) { comparisonBucketPage++; renderComparison(latestComparison.local, latestComparison.provider); }
+});
 el('statistics-source').addEventListener('change', () => {
   chooseSource(el<HTMLSelectElement>('statistics-source').value);
   void refresh(true);

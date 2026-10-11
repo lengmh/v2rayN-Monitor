@@ -137,6 +137,23 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.DoesNotContain("\"same\"", csv); Assert.DoesNotContain("\"Same \"", csv);
     }
 
+    [Theory]
+    [InlineData(500)]
+    [InlineData(501)]
+    public async Task StoredLongDisplayNamesRemainQueryableWithoutTruncation(int length)
+    {
+        await Login();
+        var name = new string('N', length);
+        var at = new DateTimeOffset(2026, 1, 1, 10, 0, 0, TimeSpan.Zero);
+        server.Ledger.Accept(new("test", "one", name, "p", "g", at, 0, 0));
+        server.Ledger.Accept(new("test", "one", name, "p", "g", at.AddSeconds(1), 7, 0));
+        var response = await client.GetAsync("/api/history?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC&nodeName=" + name);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("7", result.GetProperty("upload").GetString());
+        Assert.Equal(name, result.GetProperty("nodes")[0].GetProperty("name").GetString());
+    }
+
     [Fact] public async Task RepresentativeProviderCsvPassesPreviewAndCommitThroughHttp()
     {
         await Login();
