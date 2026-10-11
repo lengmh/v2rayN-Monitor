@@ -1,4 +1,4 @@
-import { decimal, unitDivisor } from './format.ts';
+import { formatAmount, unitDivisor } from './format.ts';
 import type { Unit } from './format.ts';
 
 /** Provider accounting is decimal text; local raw-byte parsing must stay integer-only. */
@@ -14,7 +14,7 @@ function providerValue(value: string, aggregate = false): { whole: string; fract
 /** Unit conversion rounds for display only; always show exactProviderBytes alongside it. */
 export function formatProviderBytes(value: string, unit: Unit): string {
   const { coefficient, scale } = providerValue(value);
-  return `${decimal(coefficient, unitDivisor(unit) * scale)} ${unit}`;
+  return formatAmount(coefficient, unitDivisor(unit) * scale, unit);
 }
 
 export function exactProviderBytes(value: string): string {
@@ -33,7 +33,7 @@ export function providerUnitsText(value: bigint): string {
   return `${text.slice(0, -28)}${fraction ? `.${fraction}` : ''}`;
 }
 export function formatProviderTotal(value: string, unit: Unit): string {
-  return `${decimal(providerUnits(value), unitDivisor(unit) * 10n ** 28n)} ${unit}`;
+  return formatAmount(providerUnits(value), unitDivisor(unit) * 10n ** 28n, unit);
 }
 export function exactProviderTotal(value: string): string {
   const { whole, fraction } = providerValue(value, true);

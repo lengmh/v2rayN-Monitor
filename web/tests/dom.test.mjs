@@ -105,6 +105,62 @@ test('unified statistics switch provider source without mixing local totals or d
   assert.equal(get('download-title').textContent, '下载');
 });
 
+test('import list opens source statistics and preserves the explicit date filter', async t => {
+  const batch = { source: 'batch-source', hash: 'synthetic', rowCount: 1, rawBytes: '50', billedBytes: '40.1',
+    firstTime: '2026-01-02T10:00:00Z', lastTime: '2026-01-03T11:00:00Z' };
+  const { w, get, calls } = await fixture(t, {
+    '/api/imports': () => Response.json([batch]),
+    '/api/provider/sources': () => Response.json(['batch-source']),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json({ source: 'batch-source', rawBytes: '50', billedBytes: '40.1', series: [], nodes: [], records: [], recordCount: 0 })
+  });
+  const original = calls.filter(c => c.path === '/api/history').at(-1).query;
+  w.document.querySelector('.nav-item[data-view=provider]').click();
+  await until(() => get('import-batches').querySelector('button'));
+  get('import-batches').querySelector('button').click();
+  await until(() => calls.some(c => c.path === '/api/provider/history'));
+  const query = calls.filter(c => c.path === '/api/provider/history').at(-1).query;
+  assert.equal(query.get('source'), 'batch-source');
+  assert.equal(query.get('start'), original.get('start'));
+  assert.equal(query.get('end'), original.get('end'));
+  assert.equal(get('overview-view').hidden, false);
+});
+
+test('empty provider range is unknown while a recorded zero remains zero', async t => {
+  let count = 0;
+  const { get, change, calls } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['empty-source']),
+    '/api/provider/nodes': () => new Response('{}', { status: 500 }),
+    '/api/provider/history': () => Response.json({ source: 'empty-source', rawBytes: '0', billedBytes: '0', series: [], nodes: [], records: [], recordCount: count })
+  });
+  change('node-filter', 'a');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === 'a');
+  await until(() => get('statistics-source').options.length === 2);
+  change('statistics-source', 'empty-source');
+  assert.equal(get('node-filter').value, '');
+  assert.equal(get('node-filter').options.length, 1);
+  await until(() => calls.some(c => c.path === '/api/provider/history'));
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(get('total-value').textContent, '—');
+  assert.equal(get('total-exact').textContent, '所选范围无记录');
+  count = 1; change('bucket', 'hour');
+  await until(() => get('total-value').textContent === '0.000 GB');
+  assert.equal(get('total-exact').textContent, '0 bytes');
+});
+
+test('empty local range is unknown while recorded idle traffic stays zero', async t => {
+  let empty = false, count = 0;
+  const { get, change } = await fixture(t, {
+    '/api/history': () => Response.json(empty ? { ...history, upload: '0', download: '0', recordCount: count, records: [], series: [], nodes: [] } : history)
+  });
+  empty = true; change('bucket', 'hour');
+  await until(() => get('total-value').textContent === '—');
+  assert.equal(get('total-exact').textContent, '所选范围无记录');
+  count = 1; change('bucket', 'day');
+  await until(() => get('total-value').textContent === '0.000 GB');
+  assert.equal(get('total-exact').textContent, '0 bytes');
+});
+
 test('provider upload help agrees with the shared backend parser limits', async t => {
   const source = await readFile(new URL('../../src/Core/ProviderImports.cs', import.meta.url), 'utf8');
   const maxRows = Number(source.match(/public const int MaxRows = ([\d_]+);/)[1].replaceAll('_', ''));
@@ -130,9 +186,9 @@ test('provider decimal preview, committed list and unit changes retain exact bil
   assert.ok(get('preview-details').textContent.includes('3,001 bytes'));
   get('commit-import').click(); await until(() => get('import-batches').textContent.includes('2,600.800000000123 bytes'));
   assert.equal(get('import-preview').hidden, true);
-  assert.ok(get('import-batches').textContent.includes('0.000 GB'));
+  assert.ok(get('import-batches').textContent.includes('< 0.001 GB'));
   change('unit', 'GiB');
-  assert.ok(get('import-batches').textContent.includes('0.000 GiB'));
+  assert.ok(get('import-batches').textContent.includes('< 0.001 GiB'));
   assert.ok(get('import-batches').textContent.includes('2,600.800000000123 bytes'));
   assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
   submit('import-form'); await until(() => !get('import-preview').hidden);
