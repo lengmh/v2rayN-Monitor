@@ -53,7 +53,7 @@ test('CSV source uses node statistics and exact billing without local direction 
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
 });
 test('same-name comparison aligns sources by hour and keeps week month and missing data explicit', async ({ page }) => {
-  let localReads = 0;
+  let localReads = 0, partialOnly = false;
   const local = { ...history, upload: '3500000000', download: '0', unbucketedUpload: '500', unbucketedDownload: '0',
     nodes: [{ key: 'a', name: 'Synthetic shared node', upload: '3000000000', download: '0' },
       { key: 'b', name: 'Synthetic shared node', upload: '500000000', download: '0' }], recordCount: 2 };
@@ -65,7 +65,9 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
     '/api/provider/sources': route => route.fulfill(json(['Synthetic comparison'])),
     '/api/nodes': route => route.fulfill(json(local.nodes.map(n => ({ key: n.key, name: n.name })))),
     '/api/provider/nodes': route => route.fulfill(json(provider.nodes.map(n => ({ key: n.name, name: n.name })))),
-    '/api/history': (route, request, url) => route.fulfill(json(localReads++ ? { ...local, series: [{ label: label(url), upload: '3499999500', download: '0' }] } : history)),
+    '/api/history': (route, request, url) => route.fulfill(json(localReads++ ? partialOnly ?
+      { ...local, upload: '0', download: '0', nodes: [], series: [], recordCount: 1, unbucketedUpload: '0', partialUpload: '500' } :
+      { ...local, series: [{ label: label(url), upload: '3499999500', download: '0' }] } : history)),
     '/api/provider/history': (route, request, url) => route.fulfill(json({ ...provider, series: [{ label: label(url), rawBytes: provider.rawBytes, billedBytes: provider.billedBytes }] }))
   });
   await page.selectOption('#statistics-source', provider.source);
@@ -90,9 +92,46 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/comparison-mobile.png', fullPage: true });
+  partialOnly = true; await page.selectOption('#bucket', 'hour');
+  await expect(page.locator('#comparison-local')).toHaveText('—');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('所选范围无已知量');
+  await expect(page.locator('#comparison-recovery')).toContainText('部分重叠恢复区间（未计入）：500 bytes');
+  await expect(page.locator('#comparison-raw-exact')).toHaveText('4,000,000,000 bytes');
   await page.selectOption('#statistics-source', '');
   await expect(page.locator('#comparison-view')).toBeHidden();
   expect(await page.locator('#bucket option').count()).toBe(5);
+});
+test('year of hourly comparison buckets stays paged and keeps the full exact total', async ({ page }) => {
+  let reads = 0;
+  const series = Array.from({ length: 8760 }, (_, i) => ({
+    label: new Date(Date.UTC(2026, 0, 1, i)).toISOString().slice(0, 16) + '+00:00', upload: '1', download: '0'
+  }));
+  const local = { ...history, upload: '8760', download: '0', recordCount: 8760, records: [], series,
+    nodes: [{ key: 'a', name: 'Synthetic hourly', upload: '8760', download: '0' }] };
+  const provider = { source: 'Synthetic paging', rawBytes: '0', billedBytes: '0', recordCount: 0, nodes: [], series: [], records: [] };
+  const calls = await mock(page, {
+    '/api/provider/sources': route => route.fulfill(json([provider.source])),
+    '/api/provider/nodes': route => route.fulfill(json([])),
+    '/api/provider/history': route => route.fulfill(json(provider)),
+    '/api/history': route => route.fulfill(json(reads++ ? local : history))
+  });
+  await page.selectOption('#statistics-source', provider.source);
+  await page.click('[data-period=custom]'); await page.fill('#custom-from', '2026-01-01'); await page.fill('#custom-through', '2026-12-31');
+  await page.locator('#custom-range').getByRole('button').click();
+  await page.check('#compare-toggle');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('8,760 bytes');
+  await expect(page.locator('#comparison-buckets tr')).toHaveCount(50);
+  await expect(page.locator('#comparison-bucket-page')).toContainText('8,760');
+  await expect(page.locator('#comparison-chart')).toContainText('请缩小日期范围或选择周/月');
+  const queries = calls.filter(c => c.path === '/api/history').length;
+  await page.click('#comparison-bucket-next');
+  await expect(page.locator('#comparison-buckets tr').first()).toContainText(series[50].label);
+  await page.selectOption('#unit', 'GiB');
+  await expect(page.locator('#comparison-buckets tr').first()).toContainText(series[50].label);
+  await expect(page.locator('#comparison-local-exact')).toHaveText('8,760 bytes');
+  expect(calls.filter(c => c.path === '/api/history').length).toBe(queries);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 test('one-time session, secure text rendering, exact unit toggle, and desktop layout', async ({ page }) => {
   const malicious = '<img src=x onerror=alert(1)>';

@@ -203,6 +203,72 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   await until(() => get('comparison-view').hidden);
 });
 
+test('partial-only recovery is unknown in comparison while provider recorded zero remains zero', async t => {
+  let reads = 0, knownZero = false;
+  const partial = { ...history, upload: '0', download: '0', recordCount: 1, nodes: [], series: [], records: [],
+    partialUpload: '25', partialDownload: '0' };
+  const provider = { source: 'partial', rawBytes: '0', billedBytes: '0', recordCount: 1,
+    nodes: [{ name: 'Synthetic A', rawBytes: '0', billedBytes: '0' }], series: [], records: [] };
+  const { get, change, w } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['partial']),
+    '/api/provider/nodes': () => Response.json([{ key: 'Synthetic A', name: 'Synthetic A' }]),
+    '/api/provider/history': () => Response.json(provider),
+    '/api/history': () => Response.json(reads++ ? { ...partial,
+      nodes: knownZero ? [{ key: 'a', name: 'Synthetic A', upload: '0', download: '0' }] : [] } : history)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('statistics-source', 'partial'); await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-recovery').textContent.includes('25 bytes'));
+  assert.equal(get('comparison-local').textContent, '—');
+  assert.equal(get('comparison-local-exact').textContent, '所选范围无已知量');
+  assert.equal(get('comparison-raw-exact').textContent, '0 bytes');
+  knownZero = true; change('bucket', 'month');
+  await until(() => get('comparison-local-exact').textContent === '0 bytes');
+  assert.equal(get('comparison-local').textContent, '0.000 GB');
+});
+
+test('comparison bucket table pages long hourly ranges without dropping exact totals', async t => {
+  let reads = 0;
+  const series = Array.from({ length: 101 }, (_, i) => ({
+    label: new Date(Date.UTC(2026, 9, 1, i)).toISOString().slice(0, 16) + '+00:00', upload: '1', download: '0'
+  }));
+  const local = { ...history, upload: '101', download: '0',
+    nodes: [{ key: 'a', name: 'Synthetic A', upload: '101', download: '0' }], recordCount: 101, records: [] };
+  const provider = { source: 'paged', rawBytes: '0', billedBytes: '0', recordCount: 0, nodes: [], series: [], records: [] };
+  const { get, change, w, calls } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['paged']),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json(provider),
+    '/api/history': url => Response.json(reads++ ? { ...local, series: url.searchParams.get('bucket') === 'month' ?
+      [{ label: '2026-10', upload: '101', download: '0' }] : series } : history)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('statistics-source', 'paged'); await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-local-exact').textContent === '101 bytes');
+  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 50);
+  assert.ok(get('comparison-bucket-page').textContent.includes('101'));
+  assert.equal(get('comparison-bucket-previous').disabled, true);
+  const queries = calls.filter(c => c.path === '/api/history').length;
+  get('comparison-bucket-next').click();
+  assert.ok(get('comparison-buckets').querySelector('tr').textContent.includes(series[50].label));
+  change('unit', 'GiB');
+  assert.ok(get('comparison-buckets').querySelector('tr').textContent.includes(series[50].label));
+  get('comparison-bucket-next').click();
+  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 1);
+  assert.ok(get('comparison-buckets').textContent.includes(series[100].label));
+  assert.equal(get('comparison-bucket-next').disabled, true);
+  assert.equal(get('comparison-local-exact').textContent, '101 bytes');
+  assert.equal(calls.filter(c => c.path === '/api/history').length, queries);
+  get('comparison-bucket-previous').click();
+  assert.ok(get('comparison-buckets').querySelector('tr').textContent.includes(series[50].label));
+  change('bucket', 'month');
+  await until(() => get('comparison-buckets').textContent.includes('2026-10') && get('comparison-bucket-next').disabled);
+  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 1);
+  assert.equal(get('comparison-bucket-previous').disabled, true);
+});
+
 test('provider upload help agrees with the shared backend parser limits', async t => {
   const source = await readFile(new URL('../../src/Core/ProviderImports.cs', import.meta.url), 'utf8');
   const maxRows = Number(source.match(/public const int MaxRows = ([\d_]+);/)[1].replaceAll('_', ''));
