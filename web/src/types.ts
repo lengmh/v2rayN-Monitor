@@ -13,3 +13,9 @@ export interface HistoryResult {
 }
 export interface ImportPreview { hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime: string | null; lastTime: string | null; duplicate: boolean; warnings: string[] }
 export interface ImportBatch { source: string; hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime?: string; lastTime?: string; importedAt?: string; timeZoneId?: string }
+export interface ProviderHistory {
+  source: string; rawBytes: string; billedBytes: string; recordCount: number;
+  series: { label: string; rawBytes: string; billedBytes: string }[];
+  nodes: { name: string; rawBytes: string; billedBytes: string }[];
+  records: { at: string; nodeName: string; rate: string; rawBytes: string; billedBytes: string }[];
+}

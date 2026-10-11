@@ -12,6 +12,7 @@ async function mock(page, overrides = {}) {
   await page.route('**/api/**', async route => {
     const request = route.request(), url = new URL(request.url()); calls.push({ path: url.pathname, url, body: request.postDataJSON(), headers: request.headers() });
     if (overrides[url.pathname]) { await overrides[url.pathname](route, request, url); return; }
+    if (url.pathname === '/api/provider/sources') { await route.fulfill(json([])); return; }
     const routes = {
       '/api/session': { ok: true }, '/api/settings': { v2rayNPath: 'C:\\Apps\\v2rayN', timeZoneId: 'UTC', demo: true },
       '/api/timezones': [{ id: 'UTC', name: 'UTC' }, { id: 'Asia/Shanghai', name: '中国标准时间' }, { id: 'America/New_York', name: '纽约' }],
@@ -26,6 +27,29 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('CSV source uses node statistics and exact billing without local direction labels', async ({ page }) => {
+  const provider = { source: 'Synthetic provider', rawBytes: '1300', billedBytes: '1000.800000000123', recordCount: 1,
+    series: [{ label: '2026-10-09', rawBytes: '1300', billedBytes: '1000.800000000123' }],
+    nodes: [{ name: 'Synthetic CSV node', rawBytes: '1300', billedBytes: '1000.800000000123' }],
+    records: [{ at: '2026-10-09T10:00:00Z', nodeName: 'Synthetic CSV node', rate: '0.8', rawBytes: '1300', billedBytes: '1000.800000000123' }] };
+  await mock(page, {
+    '/api/provider/sources': route => route.fulfill(json(['Synthetic provider'])),
+    '/api/provider/nodes': route => route.fulfill(json([{ key: 'Synthetic CSV node', name: 'Synthetic CSV node' }])),
+    '/api/provider/history': route => route.fulfill(json(provider))
+  });
+  await page.selectOption('#statistics-source', 'Synthetic provider');
+  await expect(page.locator('#records')).toContainText('Synthetic CSV node');
+  await expect(page.locator('#download-title')).toHaveText('服务商原始量');
+  await expect(page.locator('#upload-exact')).toHaveText('1,000.800000000123 bytes');
+  await page.selectOption('#provider-metric', 'billed');
+  await expect(page.locator('#total-exact')).toHaveText('1,000.800000000123 bytes');
+  await page.screenshot({ path: 'test-results/provider-statistics-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/provider-statistics-mobile.png', fullPage: true });
+  await page.selectOption('#statistics-source', '');
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+});
 test('one-time session, secure text rendering, exact unit toggle, and desktop layout', async ({ page }) => {
   const malicious = '<img src=x onerror=alert(1)>';
   const calls = await mock(page, { '/api/nodes': route => route.fulfill(json([{ key: 'x', name: malicious }])), '/api/history': route => route.fulfill(json({ ...history, nodes: [{ key: 'x', name: malicious, upload: '1073741824', download: '15032385536' }], records: [{ ...history.records[0], nodeName: malicious }] })) });
