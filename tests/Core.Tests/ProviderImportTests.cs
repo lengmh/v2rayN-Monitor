@@ -97,6 +97,28 @@ public sealed class ProviderImportTests : IDisposable
         Assert.NotEmpty(imports.Preview(conflict).Warnings);
         Assert.Throws<ArgumentException>(() => imports.Commit(conflict)); Assert.Single(imports.List());
     }
+    [Fact] public void ChangedBillingRowWithReducedOldOccurrenceCountIsAConflict()
+    {
+        const string old = "Synthetic-A,1,10,10,display,2026-01-01 10:00:00\n";
+        const string changed = "Synthetic-A,0.5,20,10,display,2026-01-01 10:00:00\n";
+        imports.Commit(Request(old + old));
+        var replacement = Request(old + changed + "Synthetic-B,1,30,30,display,2026-01-01 11:00:00");
+        Assert.NotEmpty(imports.Preview(replacement).Warnings);
+        Assert.Throws<ArgumentException>(() => imports.Commit(replacement));
+        Assert.Single(imports.List());
+        var query = new QuerySpec(new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), new(2026, 1, 2, 0, 0, 0, TimeSpan.Zero), "UTC", "hour");
+        Assert.Equal(2, imports.Query(replacement.Source, query).RecordCount);
+        Assert.Equal("20", imports.Query(replacement.Source, query).RawBytes);
+
+        // All old occurrences retained: the different billing row is an additional event.
+        var retained = Request(old + old + changed);
+        Assert.Empty(imports.Preview(retained).Warnings);
+        Assert.Equal(1, imports.Commit(retained).NewRowCount);
+        var result = imports.Query(retained.Source, query);
+        Assert.Equal(3, result.RecordCount);
+        Assert.Equal("40", result.RawBytes);
+        Assert.Equal("30", result.BilledBytes);
+    }
     [Fact] public void BadRowsNeverPartiallyCommit()
     {
         Assert.Throws<ArgumentException>(() => imports.Commit(Request("Synthetic-A,1,1,1,1 B,2026-01-01 10:00:00\nSynthetic-B,1,NaN,2,2 B,2026-01-01 10:01:00")));
