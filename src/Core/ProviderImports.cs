@@ -306,11 +306,14 @@ public sealed class ProviderImports : IDisposable
                 if (remaining > 0) counts[row.Key] = remaining - 1;
                 else additions.Add(row);
             }
+            // A changed row alongside fewer old occurrences may be a revision, not new billing.
+            foreach (var (key, remaining) in counts)
+                if (remaining > 0) conflicts.Add((key.Name, key.At));
         }
         var newRaw = additions.Aggregate(0L, (sum, row) => checked(sum + row.Raw));
         var newBilled = ProviderDecimal.Sum(additions.Select(row => row.Billed));
         IReadOnlyList<string> warnings = additions.Any(row => conflicts.Contains((row.Name, row.At.UtcTicks))) ?
-            ["同一来源的同时间、同名记录有不同计费字段，且新文件未保留原记录，无法判断是否修订。请核对来源、时区或重新导出；本批不会导入，也不会覆盖旧记录。"] : [];
+            ["同一来源的同时间、同名记录有计费字段或出现次数变化，且新文件未保留全部原记录，无法判断是否修订。请核对来源、时区或重新导出；本批不会导入，也不会覆盖旧记录。"] : [];
         return (new ImportPreview(hash, rows.Count, raw.ToString(CultureInfo.InvariantCulture), billed.ToString(), first, last, additions.Count == 0, warnings)
         {
             NewRowCount = additions.Count, SkippedRowCount = rows.Count - additions.Count,
