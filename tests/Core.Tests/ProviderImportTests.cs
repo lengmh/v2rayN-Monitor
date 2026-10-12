@@ -20,12 +20,104 @@ public sealed class ProviderImportTests : IDisposable
         Assert.True(imports.Commit(request).Duplicate);
         var batch = Assert.Single(imports.List()); Assert.Equal("4194304", batch.RawBytes); Assert.Equal("0", batch.BilledBytes);
     }
+    [Fact] public void OverlappingExportAddsOnlyUnseenBillingRows()
+    {
+        imports.Commit(Request("Synthetic-A,0.8,10,8.000000000123,display,2026-01-01 10:00:00\nSynthetic-B,1,20,20,display,2026-01-01 11:00:00"));
+        var overlap = Request("Synthetic-B,1.00,20,20.000,changed display,2026-01-01 11:00:00\nSynthetic-C,0.5,30,15.000000000123,display,2026-01-01 12:00:00");
+        var preview = imports.Preview(overlap);
+        Assert.Empty(preview.Warnings);
+        Assert.Equal(2, preview.RowCount);
+        Assert.Equal(1, preview.NewRowCount);
+        Assert.Equal(1, preview.SkippedRowCount);
+        Assert.Equal("30", preview.NewRawBytes);
+        Assert.Equal("15.000000000123", preview.NewBilledBytes);
+        var committed = imports.Commit(overlap);
+        Assert.Equal(1, committed.NewRowCount);
+        Assert.Equal(1, committed.SkippedRowCount);
+        Assert.Equal("15.000000000123", committed.NewBilledBytes);
+        var result = imports.Query(overlap.Source, new(new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), new(2026, 1, 2, 0, 0, 0, TimeSpan.Zero), "UTC", "hour"));
+        Assert.Equal(3, result.RecordCount);
+        Assert.Equal("60", result.RawBytes);
+        Assert.Equal("43.000000000246", result.BilledBytes);
+        Assert.Equal(2, imports.List().Count);
+        Assert.Equal(1, imports.List().Single(b => b.Hash == preview.Hash).RowCount);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OverlappingSnapshotsUseOccurrenceCountsAndRemainIdempotentAcrossReopen(bool reverse)
+    {
+        const string x = "Synthetic-X,0.8,10,8.000000000123,display,2026-01-01 10:00:00\n";
+        var a = Request(x + x + "Synthetic-Y,1,20,20,display,2026-01-01 11:00:00\n");
+        var b = Request(x + x + x + "Synthetic-Z,0.5,30,15.000000000123,display,2026-01-01 12:00:00\n");
+        imports.Commit(reverse ? b : a);
+        var pending = imports.Preview(reverse ? a : b);
+        Assert.Equal(reverse ? 1 : 2, pending.NewRowCount);
+        Assert.Equal(2, pending.SkippedRowCount);
+        imports.Commit(reverse ? a : b);
+        var query = new QuerySpec(new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), new(2026, 1, 2, 0, 0, 0, TimeSpan.Zero), "UTC", "hour");
+        var result = imports.Query(a.Source, query);
+        Assert.Equal(5, result.RecordCount);
+        Assert.Equal("80", result.RawBytes);
+        Assert.Equal("59.000000000492", result.BilledBytes);
+        Assert.Equal(3, result.Records.Count(r => r.NodeName == "Synthetic-X"));
+        Assert.Equal(2, imports.List().Count);
+
+        // Same snapshot with different text/order has no new occurrences.
+        var rewritten = a with { Csv = "\uFEFF" + Header + string.Join("\r\n", a.Csv[Header.Length..].TrimEnd('\n').Split('\n').Reverse())
+            .Replace(",0.8,10,8.000000000123,", ",0.800,00010,8.0000000001230,").Replace(",display,", ",another display,") + "\r\n" };
+        using var reopened = new ProviderImports(Path.Combine(root, "provider.db"));
+        var duplicate = reopened.Commit(rewritten);
+        Assert.True(duplicate.Duplicate);
+        Assert.Equal(0, duplicate.NewRowCount);
+        Assert.Equal(3, duplicate.SkippedRowCount);
+        Assert.Equal("0", duplicate.NewRawBytes);
+        Assert.Equal("0", duplicate.NewBilledBytes);
+        Assert.Equal(2, reopened.List().Count);
+        Assert.Equal(5, reopened.Query(a.Source, query).RecordCount);
+        Assert.Equal(4, reopened.Commit(b with { Source = "another-provider" }).NewRowCount);
+        Assert.Equal(4, reopened.Query("another-provider", query).RecordCount);
+    }
+    [Fact] public void CommitRechecksOccurrencesAfterPreview()
+    {
+        var first = Request("Synthetic-A,1,10,10,display,2026-01-01 10:00:00");
+        var next = Request("Synthetic-A,1.00,10,10.00,changed display,2026-01-01 10:00:00\nSynthetic-B,1,20,20,display,2026-01-01 11:00:00");
+        Assert.Equal(2, imports.Preview(next).NewRowCount);
+        imports.Commit(first);
+        var committed = imports.Commit(next);
+        Assert.Equal(1, committed.NewRowCount);
+        Assert.Equal(1, committed.SkippedRowCount);
+        Assert.Equal("20", committed.NewRawBytes);
+        Assert.Equal(2, imports.List().Count);
+    }
     [Fact] public void OverlappingDifferentFilesAreRejectedWithoutPartialImport()
     {
         imports.Commit(Request("Synthetic-A,1,1,1,1 B,2026-01-01 10:00:00"));
-        var conflict = Request("Synthetic-A,1,2,2,2 B,2026-01-01 10:00:00");
+        var conflict = Request("Synthetic-A,1,2,2,2 B,2026-01-01 10:00:00\nSynthetic-B,1,3,3,display,2026-01-01 11:00:00");
         Assert.NotEmpty(imports.Preview(conflict).Warnings);
         Assert.Throws<ArgumentException>(() => imports.Commit(conflict)); Assert.Single(imports.List());
+    }
+    [Fact] public void ChangedBillingRowWithReducedOldOccurrenceCountIsAConflict()
+    {
+        const string old = "Synthetic-A,1,10,10,display,2026-01-01 10:00:00\n";
+        const string changed = "Synthetic-A,0.5,20,10,display,2026-01-01 10:00:00\n";
+        imports.Commit(Request(old + old));
+        var replacement = Request(old + changed + "Synthetic-B,1,30,30,display,2026-01-01 11:00:00");
+        Assert.NotEmpty(imports.Preview(replacement).Warnings);
+        Assert.Throws<ArgumentException>(() => imports.Commit(replacement));
+        Assert.Single(imports.List());
+        var query = new QuerySpec(new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), new(2026, 1, 2, 0, 0, 0, TimeSpan.Zero), "UTC", "hour");
+        Assert.Equal(2, imports.Query(replacement.Source, query).RecordCount);
+        Assert.Equal("20", imports.Query(replacement.Source, query).RawBytes);
+
+        // All old occurrences retained: the different billing row is an additional event.
+        var retained = Request(old + old + changed);
+        Assert.Empty(imports.Preview(retained).Warnings);
+        Assert.Equal(1, imports.Commit(retained).NewRowCount);
+        var result = imports.Query(retained.Source, query);
+        Assert.Equal(3, result.RecordCount);
+        Assert.Equal("40", result.RawBytes);
+        Assert.Equal("30", result.BilledBytes);
     }
     [Fact] public void BadRowsNeverPartiallyCommit()
     {
