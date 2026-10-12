@@ -18,7 +18,10 @@ async function mock(page, overrides = {}) {
       '/api/timezones': [{ id: 'UTC', name: 'UTC' }, { id: 'Asia/Shanghai', name: '中国标准时间' }, { id: 'America/New_York', name: '纽约' }],
       '/api/status': { state: 'demo', message: '合成示例 · 用于界面与汇总验证', currentNode: 'Synthetic · Singapore', lastSample: '2026-10-09T11:01:00Z', uploadPerSecond: '524288', downloadPerSecond: '2097152', demo: true },
       '/api/nodes': history.nodes.map(n => ({ key: n.key, name: n.name })), '/api/history': history,
-      '/api/imports': [], '/api/imports/preview': { hash: 'synthetic', rowCount: 5, rawBytes: '3154944', billedBytes: '1058816', firstTime: '2026-01-01T10:00:00Z', lastTime: '2026-01-01T10:03:00Z', duplicate: false, warnings: ['设备、方向未知。'] }, '/api/imports/commit': { ok: true }, '/api/demo': { ok: true }
+      '/api/imports': [], '/api/imports/preview': { hash: 'synthetic', rowCount: 5, rawBytes: '3154944', billedBytes: '1058816',
+        newRowCount: 5, skippedRowCount: 0, newRawBytes: '3154944', newBilledBytes: '1058816',
+        firstTime: '2026-01-01T10:00:00Z', lastTime: '2026-01-01T10:03:00Z', duplicate: false, warnings: [] },
+      '/api/imports/commit': { newRowCount: 5, skippedRowCount: 0, newRawBytes: '3154944', newBilledBytes: '1058816', duplicate: false }, '/api/demo': { ok: true }
     };
     await route.fulfill(json(routes[url.pathname] ?? {}));
   });
@@ -60,7 +63,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   const provider = { source: 'Synthetic comparison', rawBytes: '4000000000', billedBytes: '3200000000.000123', recordCount: 2,
     nodes: [{ name: 'Synthetic shared node', rawBytes: '4000000000', billedBytes: '3200000000.000123' },
       { name: 'CSV only', rawBytes: '0', billedBytes: '0' }], records: [] };
-  const label = url => ({ hour: '2026-10-09T10:00+00:00', week: '2026-10-05', month: '2026-10' })[url.searchParams.get('bucket')] ?? '2026-10-09';
+  const label = url => ({ hour: '2026-10-09T10:00+00:00', day: '2026-10-09', week: '2026-10-05', month: '2026-10' })[url.searchParams.get('bucket')] ?? '2026-10-09';
   const calls = await mock(page, {
     '/api/provider/sources': route => route.fulfill(json(['Synthetic comparison'])),
     '/api/nodes': route => route.fulfill(json(local.nodes.map(n => ({ key: n.key, name: n.name })))),
@@ -80,17 +83,28 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#comparison-recovery')).toContainText('500 bytes');
   await expect(page.locator('#export-button')).toBeHidden();
   await page.click('[data-period=day]');
+  await expect(page.locator('#bucket')).toHaveValue('hour');
   await expect(page.locator('#comparison-chart .comparison-bar')).toHaveCount(2);
   expect(await page.locator('#comparison-chart .comparison-bar').first().evaluate(node => parseFloat(getComputedStyle(node).height))).toBeGreaterThan(0);
   await page.screenshot({ path: 'test-results/comparison-desktop.png', fullPage: true });
   await page.selectOption('#node-filter', 'Synthetic shared node');
   await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('nodeName')).toBe('Synthetic shared node');
-  await page.click('[data-period=week]'); await page.selectOption('#bucket', 'week');
+  await page.click('[data-period=week]');
+  await expect(page.locator('#bucket')).toHaveValue('day');
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(7);
+  await expect(page.locator('#comparison-trend-caption')).toHaveText('日 · UTC');
+  await page.selectOption('#bucket', 'week');
   await expect(page.locator('#comparison-buckets')).toContainText('2026-10-05');
-  await page.click('[data-period=month]'); await page.selectOption('#bucket', 'month');
-  await expect(page.locator('#comparison-buckets')).toContainText('2026-10');
+  await page.click('[data-period=year]');
+  await expect(page.locator('#bucket')).toHaveValue('month');
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(12);
+  await page.click('[data-period=month]');
+  await expect(page.locator('#bucket')).toHaveValue('day');
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(31);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(31);
+  await expect(page.locator('#comparison-chart')).not.toContainText('无法清楚展示');
   await page.screenshot({ path: 'test-results/comparison-mobile.png', fullPage: true });
   partialOnly = true; await page.selectOption('#bucket', 'hour');
   await expect(page.locator('#comparison-local')).toHaveText('—');
@@ -118,6 +132,7 @@ test('year of hourly comparison buckets stays paged and keeps the full exact tot
   await page.selectOption('#statistics-source', provider.source);
   await page.click('[data-period=custom]'); await page.fill('#custom-from', '2026-01-01'); await page.fill('#custom-through', '2026-12-31');
   await page.locator('#custom-range').getByRole('button').click();
+  await page.selectOption('#bucket', 'hour');
   await page.check('#compare-toggle');
   await expect(page.locator('#comparison-local-exact')).toHaveText('8,760 bytes');
   await expect(page.locator('#comparison-buckets tr')).toHaveCount(50);
@@ -193,12 +208,44 @@ test('provider preview is separate, edits invalidate preview, and explicit confi
   await expect(page.locator('#import-result')).toContainText('导入完成'); expect(calls.filter(c => c.path === '/api/imports/commit')).toHaveLength(1);
   await page.click('.nav-item[data-view=overview]'); await expect(page.locator('#total-value')).toHaveText('16.106 GB');
 });
+test('overlap CSV preview and commit show new skipped counts without duplicate billing', async ({ page }) => {
+  let done = false;
+  const result = { hash: 'synthetic-overlap', rowCount: 4, rawBytes: '50', billedBytes: '34.000000000492',
+    firstTime: '2026-01-01T10:00:00Z', lastTime: '2026-01-01T11:00:00Z', warnings: [] };
+  const added = { ...result, newRowCount: 2, skippedRowCount: 2, newRawBytes: '30', newBilledBytes: '18.000000000246', duplicate: false };
+  const duplicate = { ...result, newRowCount: 0, skippedRowCount: 4, newRawBytes: '0', newBilledBytes: '0', duplicate: true };
+  const calls = await mock(page, {
+    '/api/imports/preview': route => route.fulfill(json(done ? duplicate : added)),
+    '/api/imports/commit': route => { done = true; return route.fulfill(json(added)); }
+  });
+  await page.click('.nav-item[data-view=provider]'); await page.fill('#provider-source', 'Synthetic overlapping source');
+  await page.setInputFiles('#csv-file', { name: 'synthetic-overlap.csv', mimeType: 'text/csv',
+    buffer: Buffer.from('node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic-A,0.8,10,8.000000000123,display,2026-01-01 10:00:00') });
+  await page.click('#preview-import');
+  await expect(page.locator('#preview-details')).toContainText('本次新增：2 条');
+  await expect(page.locator('#preview-details')).toContainText('跳过已存在：2 条');
+  await expect(page.locator('#preview-details')).toContainText('18.000000000246 bytes');
+  await page.screenshot({ path: 'test-results/overlap-preview-desktop.png', fullPage: true });
+  await page.click('#commit-import');
+  await expect(page.locator('#import-result')).toContainText('新增 2 条，跳过 2 条');
+  await expect(page.locator('#import-result')).toContainText('18.000000000246 bytes');
+  await page.click('#preview-import');
+  await expect(page.locator('#preview-details')).toContainText('本次新增：0 条');
+  await expect(page.locator('#preview-details')).toContainText('跳过已存在：4 条');
+  await expect(page.locator('#commit-import')).toBeDisabled();
+  expect(calls.filter(c => c.path === '/api/imports/commit')).toHaveLength(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/overlap-preview-mobile.png', fullPage: true });
+});
 test('provider decimal preview, commit and reloaded list display every digit on desktop and mobile', async ({ page }) => {
   let committed = false;
   const batch = { source: 'Synthetic Decimal', hash: 'synthetic-decimal', rowCount: 3, rawBytes: '3001', billedBytes: '2600.800000000123', importedAt: '2026-01-02T00:00:00Z', firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-01T00:02:00Z' };
   const calls = await mock(page, {
-    '/api/imports/preview': route => route.fulfill(json({ ...batch, warnings: [], duplicate: committed })),
-    '/api/imports/commit': route => { committed = true; return route.fulfill(json(batch)); },
+    '/api/imports/preview': route => route.fulfill(json({ ...batch, warnings: [], duplicate: committed,
+      newRowCount: committed ? 0 : 3, skippedRowCount: committed ? 3 : 0, newRawBytes: committed ? '0' : '3001', newBilledBytes: committed ? '0' : batch.billedBytes })),
+    '/api/imports/commit': route => { committed = true; return route.fulfill(json({ ...batch, newRowCount: 3,
+      skippedRowCount: 0, newRawBytes: '3001', newBilledBytes: batch.billedBytes, duplicate: false })); },
     '/api/imports': route => route.fulfill(json(committed ? [batch] : []))
   });
   await page.click('.nav-item[data-view=provider]'); await page.fill('#provider-source', batch.source);
