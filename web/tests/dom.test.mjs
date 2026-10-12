@@ -152,7 +152,7 @@ test('empty provider range is unknown while a recorded zero remains zero', async
 test('empty local range is unknown while recorded idle traffic stays zero', async t => {
   let empty = false, count = 0;
   const { get, change } = await fixture(t, {
-    '/api/history': () => Response.json(empty ? { ...history, upload: '0', download: '0', recordCount: count, records: [], series: [], nodes: [] } : history)
+    '/api/history': () => Response.json(empty ? { ...history, upload: '0', download: '0', recordCount: count, records: [], series: [], nodes: count ? [{ ...history.nodes[0], upload: '0', download: '0' }] : [] } : history)
   });
   empty = true; change('bucket', 'hour');
   await until(() => get('total-value').textContent === '—');
@@ -347,4 +347,22 @@ test('local minute records show useful small units, exact tooltips and subdued a
   assert.equal(get('records').rows[0].querySelector('.traffic-unit').textContent, 'KiB');
   assert.equal(get('records').rows[0].cells[2].title, '12,345 bytes');
   assert.ok(get('records-caption').textContent.includes('1024'));
+});
+
+test('partial-only local recovery keeps summary unknown while measured idle remains zero', async t => {
+  let result = history;
+  const { get, change } = await fixture(t, { '/api/history': () => Response.json(result) });
+  result = { ...history, upload: '0', download: '0', nodes: [], series: [], recordCount: 1,
+    partialUpload: '500', partialDownload: '0', records: [{ ...history.records[0], upload: '500', download: '0', quality: 'recovered-partial' }] };
+  change('bucket', 'hour');
+  await until(() => get('records').textContent.includes('部分重叠'));
+  for (const id of ['total', 'download', 'upload']) {
+    assert.equal(get(`${id}-value`).textContent, '—');
+    assert.equal(get(`${id}-exact`).textContent, '所选范围无已知量');
+  }
+  assert.ok(get('quality-notice').textContent.includes('本范围内用量未知'));
+  result = { ...result, nodes: [{ ...history.nodes[0], upload: '0', download: '0' }], recordCount: 2 };
+  change('bucket', 'day');
+  await until(() => get('total-value').textContent === '0.000 GB');
+  assert.equal(get('total-exact').textContent, '0 bytes');
 });

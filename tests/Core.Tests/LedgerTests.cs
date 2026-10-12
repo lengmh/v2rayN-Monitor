@@ -378,6 +378,80 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Fact]
+    public void ExportRetainsOneCompleteSnapshotWhileTheCollectorContinues()
+    {
+        using var ledger = new Ledger(Database);
+        for (var minute = 0; minute < 1000; minute++)
+        {
+            ledger.Accept(Sample(minute * 60, 0, session: $"process-{minute}"));
+            ledger.Accept(Sample(minute * 60 + 1, minute + 1, session: $"process-{minute}"));
+        }
+        var query = All(page: 9, size: 1);
+        var exported = ledger.Export(query);
+        // Export returns the full snapshot before CSV formatting, without deferred page reads.
+        var rows = exported.Take(500).ToList();
+        ledger.Accept(Sample(60_000, 0, session: "process-1000", name: "Renamed synthetic"));
+        ledger.Accept(Sample(60_001, 1001, session: "process-1000", name: "Renamed synthetic"));
+        rows.AddRange(exported.Skip(500));
+
+        Assert.Equal(1000, rows.Count);
+        Assert.Equal(1000, rows.Select(row => (row.Start, row.NodeKey)).Distinct().Count());
+        Assert.Equal(500_500, rows.Sum(row => long.Parse(row.Upload, CultureInfo.InvariantCulture)));
+        Assert.Equal(Epoch.ToString("O"), rows[^1].Start);
+        Assert.All(rows, row => Assert.Equal("Synthetic node", row.NodeName));
+        var next = ledger.Export(query);
+        Assert.Equal(1001, next.Count);
+        Assert.Equal(501_501, next.Sum(row => long.Parse(row.Upload, CultureInfo.InvariantCulture)));
+        Assert.All(next, row => Assert.Equal("Renamed synthetic", row.NodeName));
+    }
+
+    [Fact]
+    public void ExportSharesExactFiltersOrderingAndRecoveryLabelsWithHistory()
+    {
+        using var ledger = new Ledger(Database);
+        foreach (var (node, name) in new[] { ("a", "Same"), ("b", "Same"), ("c", "same"), ("d", "Same ") })
+        {
+            ledger.Accept(Sample(0, 0, instance: node, name: name));
+            ledger.Accept(Sample(1, 9_007_199_254_740_993, 7, instance: node, name: name));
+            ledger.Accept(Sample(120, 9_007_199_254_741_093, 27, instance: node, name: name));
+            ledger.Accept(Sample(121, 9_007_199_254_741_096, 29, instance: node, name: name));
+        }
+        var query = new QuerySpec(Epoch, Epoch.AddMinutes(2), "UTC", PageSize: 1000);
+        foreach (var filter in new[] { query, query with { NodeName = "Same" }, query with { NodeKey = "a/node" },
+            query with { NodeKey = "a/node", NodeName = "same" }, query with { Start = Epoch.AddSeconds(30) } })
+            Assert.Equal(ledger.Query(filter).Records, ledger.Export(filter));
+        var contained = ledger.Export(query with { NodeKey = "a/node" });
+        Assert.Equal(2, contained.Count);
+        Assert.Equal("recovered-contained", contained[0].Quality);
+        Assert.Equal("9007199254740993", contained[1].Upload);
+        var partial = ledger.Export(query with { Start = Epoch.AddSeconds(30), NodeKey = "a/node" });
+        Assert.Equal("recovered-partial", Assert.Single(partial).Quality);
+        Assert.Equal("100", partial[0].Upload);
+    }
+
+    [Fact]
+    public void ExportAllowsOneHundredThousandRowsAndRejectsOverflowIncludingRecovery()
+    {
+        using var ledger = new Ledger(Database);
+        ledger.Accept(Sample(0, 0));
+        RunSql($"""
+            WITH RECURSIVE synthetic(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM synthetic WHERE n<99998)
+            INSERT INTO minutes(start_ticks,node_key,upload,download)
+            SELECT {Epoch.UtcTicks}+n*{TimeSpan.TicksPerMinute},'instance/node',1,2 FROM synthetic;
+            INSERT INTO unallocated(start_ticks,end_ticks,node_key,upload,download,quality)
+            VALUES({Epoch.UtcTicks},{Epoch.AddMinutes(2).UtcTicks},'instance/node',3,4,'recovered');
+            """);
+        Assert.Equal(100_000, ledger.Export(All()).Count);
+        RunSql($"""
+            INSERT INTO unallocated(start_ticks,end_ticks,node_key,upload,download,quality)
+            VALUES({Epoch.UtcTicks},{Epoch.AddMinutes(3).UtcTicks},'instance/node',5,6,'recovered');
+            """);
+        Assert.Contains("100000", Assert.Throws<ArgumentException>(() => ledger.Export(All())).Message);
+        Assert.Empty(ledger.Export(All(node: "missing")));
+        Assert.Single(ledger.Export(All() with { Start = Epoch.AddMinutes(99_998) }));
+    }
+
+    [Fact]
     public void IdleSamplesAreMeasuredZeroAndNotMissingData()
     {
         using var ledger = new Ledger(Database);

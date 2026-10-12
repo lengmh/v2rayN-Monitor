@@ -81,7 +81,13 @@ public sealed class MonitorServer : IAsyncDisposable
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { WebRootPath = Path.GetFullPath(webRoot), ContentRootPath = AppContext.BaseDirectory });
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options => { options.Listen(IPAddress.Loopback, 0); options.Limits.MaxRequestBodySize = 4_100_000; });
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.Listen(IPAddress.Loopback, 0);
+            // A CSV byte may be encoded as six JSON bytes (\uXXXX). Keep transport bounded,
+            // with room for metadata; ProviderImports still enforces decoded bytes and rows.
+            options.Limits.MaxRequestBodySize = 6L * ProviderImports.MaxCsvBytes + 100_000;
+        });
         app = builder.Build();
         app.Use(async (context, next) =>
         {
@@ -126,13 +132,10 @@ public sealed class MonitorServer : IAsyncDisposable
         app.MapGet("/api/history", (HttpRequest request) => Ledger.Query(ParseQuery(request)));
         app.MapGet("/api/export", (HttpRequest request) =>
         {
-            var query = ParseQuery(request) with { Page = 0, PageSize = 500 };
-            var first = Ledger.Query(query);
-            if (first.RecordCount > 100000) return Results.BadRequest(new { error = "导出最多 100000 条分钟记录，请缩小日期范围或选择单个节点。" });
+            var rows = Ledger.Export(ParseQuery(request));
             var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality\r\n");
-            for (var page = 0; page * 500 < first.RecordCount; page++)
-                foreach (var row in (page == 0 ? first : Ledger.Query(query with { Page = page })).Records)
-                    csv.AppendLine(string.Join(',', Cell(row.Start), Cell(row.End), Cell(row.NodeName), row.Upload, row.Download, Cell(row.Quality)));
+            foreach (var row in rows)
+                csv.AppendLine(string.Join(',', Cell(row.Start), Cell(row.End), Cell(row.NodeName), row.Upload, row.Download, Cell(row.Quality)));
             return Results.File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", "v2rayn-local-history.csv");
         });
         app.MapPost("/api/imports/preview", (ImportRequest request) => imports.Preview(request));

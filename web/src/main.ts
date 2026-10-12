@@ -159,9 +159,9 @@ function renderHistory(history: HistoryResult): void {
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
   put('upload-value', formatBytes(up, unit)); put('upload-exact', exactBytes(up));
-  if (history.recordCount === 0) {
+  if (history.nodes.length === 0) {
     for (const id of ['total-value', 'upload-value', 'download-value']) put(id, '—');
-    for (const id of ['total-exact', 'upload-exact', 'download-exact']) put(id, '所选范围无记录');
+    for (const id of ['total-exact', 'upload-exact', 'download-exact']) put(id, history.recordCount ? '所选范围无已知量' : '所选范围无记录');
   }
   const recovered = bytes(history.recoveredUpload ?? '0') + bytes(history.recoveredDownload ?? '0');
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
