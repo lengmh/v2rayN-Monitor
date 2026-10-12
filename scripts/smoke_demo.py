@@ -44,6 +44,11 @@ def main() -> None:
             for asset in assets:
                 with request(asset) as response:
                     assert response.status == 200
+            for name, mime in [('icon.svg', 'image/svg+xml'), ('icon.ico', 'image/x-icon'), ('icon-256.png', 'image/png')]:
+                with request('/' + name) as response:
+                    assert response.status == 200
+                    assert response.headers.get_content_type() == mime
+                    assert response.read() == (ROOT / 'web/public' / name).read_bytes()
             now = datetime.now(timezone.utc)
             start = (now - timedelta(days=365)).date().isoformat()
             end = (now + timedelta(days=1)).date().isoformat()

@@ -34,6 +34,13 @@ jobs:
       - if: runner.os == 'Linux'
         run: npm run test:ui
         working-directory: web
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: synthetic-ui-screenshots
+          path: web/test-results/**/*.png
+          if-no-files-found: ignore
+          retention-days: 14
       - run: python scripts/check_plan.py
       - run: dotnet build V2rayNMonitor.sln -c Release
       - if: runner.os == 'Linux'
