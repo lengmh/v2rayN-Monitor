@@ -8,7 +8,13 @@ using Microsoft.VisualBasic.FileIO;
 namespace V2rayNMonitor.Core;
 
 public sealed record ImportRequest(string Source, string TimeZoneId, string Csv);
-public sealed record ImportPreview(string Hash, int RowCount, string RawBytes, string BilledBytes, string FirstTime, string LastTime, bool Duplicate, IReadOnlyList<string> Warnings);
+public sealed record ImportPreview(string Hash, int RowCount, string RawBytes, string BilledBytes, string FirstTime, string LastTime, bool Duplicate, IReadOnlyList<string> Warnings)
+{
+    public int NewRowCount { get; init; }
+    public int SkippedRowCount { get; init; }
+    public string NewRawBytes { get; init; } = "0";
+    public string NewBilledBytes { get; init; } = "0";
+}
 public sealed record ImportBatch(string Hash, string Source, string ImportedAt, int RowCount, string RawBytes, string BilledBytes, string FirstTime, string LastTime);
 
 /// <summary>A separate, user-imported provider ledger. It never changes local accounting.</summary>
@@ -18,7 +24,11 @@ public sealed class ProviderImports : IDisposable
     public const int MaxCsvBytes = 4_000_000;
     private readonly SqliteConnection db;
     private readonly object gate = new();
-    private sealed record Row(string Name, ProviderDecimal Rate, long Raw, ProviderDecimal Billed, string Display, DateTimeOffset At);
+    private readonly record struct BillingKey(string Name, ProviderDecimal Rate, long Raw, ProviderDecimal Billed, long At);
+    private sealed record Row(string Name, ProviderDecimal Rate, long Raw, ProviderDecimal Billed, string Display, DateTimeOffset At)
+    {
+        public BillingKey Key => new(Name, Rate, Raw, Billed, At.UtcTicks);
+    }
     public ProviderImports(string path)
     {
         db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
@@ -66,18 +76,26 @@ public sealed class ProviderImports : IDisposable
             """;
         cmd.ExecuteNonQuery();
     }
-    public ImportPreview Preview(ImportRequest request) { lock (gate) return Prepare(request).Preview; }
+    public ImportPreview Preview(ImportRequest request)
+    {
+        lock (gate)
+        {
+            using var tx = db.BeginTransaction();
+            var result = Prepare(request, tx).Preview;
+            tx.Commit(); return result;
+        }
+    }
     public ImportPreview Commit(ImportRequest request)
     {
         lock (gate)
         {
-            var (preview, rows) = Prepare(request);
+            using var tx = db.BeginTransaction();
+            var (preview, rows) = Prepare(request, tx);
             if (preview.Duplicate) return preview;
             if (preview.Warnings.Count != 0) throw new ArgumentException(preview.Warnings[0]);
-            using var tx = db.BeginTransaction();
             using var batch = db.CreateCommand(); batch.Transaction = tx;
             batch.CommandText = "INSERT INTO import_batches VALUES($source,$hash,$now,$count,$raw,$billed,$first,$last,$zone)";
-            Add(batch, ("$source", request.Source.Trim()), ("$hash", preview.Hash), ("$now", Iso(DateTimeOffset.UtcNow)), ("$count", rows.Count), ("$raw", long.Parse(preview.RawBytes, CultureInfo.InvariantCulture)), ("$billed", preview.BilledBytes), ("$first", preview.FirstTime), ("$last", preview.LastTime), ("$zone", request.TimeZoneId));
+            Add(batch, ("$source", request.Source.Trim()), ("$hash", preview.Hash), ("$now", Iso(DateTimeOffset.UtcNow)), ("$count", rows.Count), ("$raw", long.Parse(preview.NewRawBytes, CultureInfo.InvariantCulture)), ("$billed", preview.NewBilledBytes), ("$first", preview.FirstTime), ("$last", preview.LastTime), ("$zone", request.TimeZoneId));
             batch.ExecuteNonQuery();
             for (var i = 0; i < rows.Count; i++)
             {
@@ -222,7 +240,7 @@ public sealed class ProviderImports : IDisposable
         new(reader.GetString(4), reader.GetString(0), reader.GetString(1),
             reader.GetInt64(2).ToString(CultureInfo.InvariantCulture), reader.GetString(3));
 
-    private (ImportPreview Preview, List<Row> Rows) Prepare(ImportRequest request)
+    private (ImportPreview Preview, List<Row> Rows) Prepare(ImportRequest request, SqliteTransaction tx)
     {
         if (string.IsNullOrWhiteSpace(request.Source) || request.Source.Trim().Length > 100) throw new ArgumentException("请填写 1–100 字符的服务商/账户来源。");
         if (request.Csv is null || Encoding.UTF8.GetByteCount(request.Csv) > MaxCsvBytes) throw new ArgumentException("CSV 上限为 4 MB。");
@@ -254,13 +272,50 @@ public sealed class ProviderImports : IDisposable
         if (rows.Count == 0) throw new ArgumentException("CSV 没有数据行。");
         var billed = ProviderDecimal.Sum(rows.Select(row => row.Billed));
         var first = Iso(rows.Min(r => r.At)); var last = Iso(rows.Max(r => r.At));
-        using var check = db.CreateCommand();
-        check.CommandText = "SELECT hash FROM import_batches WHERE source=$source AND (hash=$hash OR (first_time <= $last AND last_time >= $first))";
-        Add(check, ("$source", request.Source.Trim()), ("$hash", hash), ("$first", first), ("$last", last));
-        using var existing = check.ExecuteReader(); var duplicate = false; var overlap = false;
-        while (existing.Read()) { if (existing.GetString(0) == hash) duplicate = true; else overlap = true; }
-        IReadOnlyList<string> warnings = overlap && !duplicate ? ["该来源存在时间范围重叠的不同文件。缺少稳定记录 ID，初版拒绝提交以避免重复记账；请导出不重叠的记录。最早/最晚时间不代表完整覆盖。"] : [];
-        return (new(hash, rows.Count, raw.ToString(CultureInfo.InvariantCulture), billed.ToString(), first, last, duplicate, warnings), rows);
+        using var check = db.CreateCommand(); check.Transaction = tx;
+        check.CommandText = "SELECT COUNT(*) FROM import_batches WHERE source=$source AND hash=$hash";
+        Add(check, ("$source", request.Source.Trim()), ("$hash", hash));
+        var additions = new List<Row>();
+        var conflicts = new HashSet<(string Name, long At)>();
+        if ((long)check.ExecuteScalar()! == 0)
+        {
+            var keys = rows.Select(row => row.Key).ToHashSet();
+            var groups = keys.Select(key => (key.Name, key.At)).ToHashSet();
+            var counts = new Dictionary<BillingKey, int>();
+            using var command = db.CreateCommand(); command.Transaction = tx;
+            command.CommandText = """
+                SELECT node_name,rate,raw_bytes,billed_bytes,at_utc FROM provider_records
+                WHERE source=$source AND at_utc >= $first AND at_utc <= $last
+                """;
+            Add(command, ("$source", request.Source.Trim()), ("$first", first), ("$last", last));
+            using (var existing = command.ExecuteReader())
+                while (existing.Read())
+                {
+                    if (!ProviderDecimal.TryParse(existing.GetString(1), out var rate) ||
+                        !ProviderDecimal.TryParse(existing.GetString(3), out var amount))
+                        throw new InvalidOperationException("服务商账本含无法读取的倍率或计费量。");
+                    var key = new BillingKey(existing.GetString(0), rate, existing.GetInt64(2), amount,
+                        DateTimeOffset.Parse(existing.GetString(4), CultureInfo.InvariantCulture).UtcTicks);
+                    if (keys.Contains(key)) counts[key] = counts.GetValueOrDefault(key) + 1;
+                    else if (groups.Contains((key.Name, key.At))) conflicts.Add((key.Name, key.At));
+                }
+            // Match each stored occurrence once, preserving legal repeats within a snapshot.
+            foreach (var row in rows)
+            {
+                var remaining = counts.GetValueOrDefault(row.Key);
+                if (remaining > 0) counts[row.Key] = remaining - 1;
+                else additions.Add(row);
+            }
+        }
+        var newRaw = additions.Aggregate(0L, (sum, row) => checked(sum + row.Raw));
+        var newBilled = ProviderDecimal.Sum(additions.Select(row => row.Billed));
+        IReadOnlyList<string> warnings = additions.Any(row => conflicts.Contains((row.Name, row.At.UtcTicks))) ?
+            ["同一来源的同时间、同名记录有不同计费字段，且新文件未保留原记录，无法判断是否修订。请核对来源、时区或重新导出；本批不会导入，也不会覆盖旧记录。"] : [];
+        return (new ImportPreview(hash, rows.Count, raw.ToString(CultureInfo.InvariantCulture), billed.ToString(), first, last, additions.Count == 0, warnings)
+        {
+            NewRowCount = additions.Count, SkippedRowCount = rows.Count - additions.Count,
+            NewRawBytes = newRaw.ToString(CultureInfo.InvariantCulture), NewBilledBytes = newBilled.ToString()
+        }, additions);
     }
     private static void Add(SqliteCommand cmd, params (string Name, object Value)[] values) { foreach (var item in values) cmd.Parameters.AddWithValue(item.Name, item.Value); }
     private static string Iso(DateTimeOffset at) => at.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);
