@@ -2,7 +2,7 @@
 
 以 **v2rayN 本机流量**为主来源的 Windows 托盘统计工具。关闭浏览器后仍持续采集；历史独立保存在本机 SQLite，支持按节点查看日、周、月、年趋势。
 
-> **初版预览代码。** 目标环境是 Windows x64、v2rayN **7.25.1 + Xray 普通单节点**。源码核对、合成测试、跨平台构建与 Windows 实机验收是不同证据；用户已在 `a3f2d80` 报告普通权限采集提升权限 v2rayN/Hysteria2、连续记账和 Monitor 重启恢复通过；节点切换失败触发本轮修复，新预览仍待复测。未发布正式 Release，不能当作计费凭证。
+> **v0.1.0 发布候选。** 目标环境是 Windows x64、v2rayN **7.25.1 + Xray 普通单节点**。2026-10-12 用户确认无图标预览版已验收，并授权发布；这是整体用户确认，不代表已逐项证明所有协议、设备与切换时序。新增图标已经构建和资源检查，尚无 Windows 实机目视确认。源码核对、合成测试和实机证据分开记录，不能当作计费凭证。
 
 ## 已实现的主流程
 
@@ -20,7 +20,7 @@
 
 [快速开始、统计设置与故障排查](docs/QUICKSTART.md) · [支持边界](docs/compatibility.md) · [当前验证状态](docs/STATUS.md)
 
-CI 成功后可在对应 Actions 运行的 `windows-x64-preview` artifact 下载便携预览包。解压到可写目录，运行 `V2rayN-Monitor.exe`，选择包含 `guiConfigs` 和 `binConfigs` 的 v2rayN **数据根目录**。不需要导入 CSV。
+版本包以 [GitHub Releases](https://github.com/lengmh/v2rayN-Monitor/releases) 页面及其 SHA256 为准；开发预览仍可在对应 Actions 运行的 `windows-x64-preview` artifact 下载。解压到可写目录，运行 `V2rayN-Monitor.exe`，选择包含 `guiConfigs` 和 `binConfigs` 的 v2rayN **数据根目录**。不需要导入 CSV。
 
 默认数据位于 `%LOCALAPPDATA%\V2rayN-Monitor\data`。`--demo` 使用独立演示目录，不连接真实核心；`--data-dir "D:\MonitorData"` 可显式选择 Monitor 历史目录。托盘菜单可手动启用当前用户登录时启动。
 

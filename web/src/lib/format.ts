@@ -16,6 +16,20 @@ export function formatAmount(value: bigint, divisor: bigint, unit: Unit): string
   return `${value > 0n && text === '0.000' ? '< 0.001' : text} ${unit}`;
 }
 export const formatBytes = (value: string | bigint, unit: Unit): string => formatAmount(typeof value === 'bigint' ? value : bytes(value), unitDivisor(unit), unit);
+/** Adaptive display for local record rows only; stored and exported bytes stay exact. */
+export function recordByteParts(value: string | bigint | null, unit: Unit): { value: string; unit: string; isZero: boolean } {
+  if (value === null) return { value: '—', unit: '', isZero: false };
+  const number = typeof value === 'bigint' ? value : bytes(value);
+  const base = unit === 'GB' ? 1000n : 1024n;
+  const labels = unit === 'GB' ? ['B', 'KB', 'MB', 'GB'] : ['B', 'KiB', 'MiB', 'GiB'];
+  let divisor = 1n, index = 0;
+  while (number >= divisor * base && index < 3) { divisor *= base; index++; }
+  return { value: decimal(number, divisor, index ? 2 : 0), unit: labels[index], isZero: number === 0n };
+}
+export function formatRecordBytes(value: string | bigint | null, unit: Unit): string {
+  const parts = recordByteParts(value, unit);
+  return parts.unit ? `${parts.value} ${parts.unit}` : parts.value;
+}
 export const exactBytes = (value: string | bigint): string => `${(typeof value === 'bigint' ? value : bytes(value)).toLocaleString('zh-CN')} bytes`;
 export function rate(value: string | null, unit: Unit): string {
   if (value === null) return '—';
