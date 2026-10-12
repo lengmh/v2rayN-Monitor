@@ -260,7 +260,11 @@ public sealed class LedgerTests : IDisposable
         ledger.Accept(Sample(0, 100));
         ledger.RecordGap(Epoch.AddSeconds(1), "network_unavailable");
         ledger.RecordGap(Epoch.AddSeconds(2), "example endpoint and secret must not be persisted");
+        ledger.RecordGap(Epoch.AddSeconds(-1), "network_unavailable");
         Assert.Equal(1, ledger.Query(All()).GapCount);
+        var openGap = Assert.Single(ledger.Query(All()).Gaps);
+        Assert.Equal(Epoch, DateTimeOffset.Parse(openGap.Start, CultureInfo.InvariantCulture));
+        Assert.Equal(Epoch.AddSeconds(2), DateTimeOffset.Parse(openGap.End, CultureInfo.InvariantCulture));
         Assert.Equal("unallocated", ledger.Accept(Sample(3, 130)));
         ledger.Accept(Sample(4, 137));
         var result = ledger.Query(All());
@@ -270,6 +274,23 @@ public sealed class LedgerTests : IDisposable
         Assert.False(Assert.Single(result.Gaps).IsOpen);
         Assert.Equal(1, result.GapCount);
         Assert.Equal(2, result.RecordCount);
+    }
+
+    [Fact]
+    public void OutageStartsAtLatestCursorRatherThanAnUnrelatedHistoricalInstance()
+    {
+        using var ledger = new Ledger(Database);
+        ledger.Accept(Sample(0, 100, instance: "old-instance") with { At = Epoch.AddMonths(-2) });
+        ledger.Accept(Sample(0, 200));
+        ledger.Accept(Sample(1, 210));
+
+        ledger.RecordGap(Epoch.AddSeconds(2), "network_unavailable");
+
+        var gap = Assert.Single(ledger.Query(All()).Gaps);
+        Assert.Equal(Epoch.AddSeconds(1), DateTimeOffset.Parse(gap.Start, CultureInfo.InvariantCulture));
+        Assert.Equal(Epoch.AddSeconds(2), DateTimeOffset.Parse(gap.End, CultureInfo.InvariantCulture));
+        Assert.True(gap.IsOpen);
+        Assert.Equal(0, ledger.Query(new QuerySpec(Epoch.AddDays(-1), Epoch, "UTC")).GapCount);
     }
 
     [Fact]
@@ -283,6 +304,22 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("0", result.Upload);
         Assert.Equal("0", result.UnallocatedUpload);
         Assert.Equal(1, result.GapCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OutageWithoutAnEarlierCursorStartsAtFailureTime(bool hasFutureCursor)
+    {
+        using var ledger = new Ledger(Database);
+        if (hasFutureCursor) ledger.Accept(Sample(2, 100));
+
+        ledger.RecordGap(Epoch.AddSeconds(1), "network_unavailable");
+
+        var gap = Assert.Single(ledger.Query(All()).Gaps);
+        Assert.Equal(Epoch.AddSeconds(1), DateTimeOffset.Parse(gap.Start, CultureInfo.InvariantCulture));
+        Assert.Equal(gap.Start, gap.End);
+        Assert.True(gap.IsOpen);
     }
 
     [Fact]
@@ -336,6 +373,7 @@ public sealed class LedgerTests : IDisposable
     {
         using (var ledger = new Ledger(Database))
         {
+            ledger.Accept(Sample(0, 100, instance: "old-instance") with { At = Epoch.AddMonths(-2) });
             ledger.Accept(Sample(0, 100));
             ledger.Accept(Sample(1, 120));
         }
@@ -344,14 +382,23 @@ public sealed class LedgerTests : IDisposable
             Assert.Equal("duplicate", ledger.Accept(Sample(1, 120)));
             ledger.Accept(Sample(2, 130));
             ledger.RecordGap(Epoch.AddSeconds(3), "network_unavailable");
+            Assert.Equal(Epoch.AddSeconds(2), DateTimeOffset.Parse(Assert.Single(ledger.Query(All()).Gaps).Start, CultureInfo.InvariantCulture));
         }
         using (var ledger = new Ledger(Database))
         {
+            ledger.RecordGap(Epoch.AddSeconds(3.5), "network_unavailable");
+            var pending = Assert.Single(ledger.Query(All()).Gaps);
+            Assert.Equal(Epoch.AddSeconds(2), DateTimeOffset.Parse(pending.Start, CultureInfo.InvariantCulture));
+            Assert.Equal(Epoch.AddSeconds(3.5), DateTimeOffset.Parse(pending.End, CultureInfo.InvariantCulture));
+            Assert.True(pending.IsOpen);
             Assert.Equal("unallocated", ledger.Accept(Sample(4, 140)));
             var result = ledger.Query(All());
             Assert.Equal("40", result.Upload);
             Assert.Equal("10", result.UnallocatedUpload);
             Assert.Equal(1, result.GapCount);
+            Assert.Equal(Epoch.AddSeconds(2), DateTimeOffset.Parse(Assert.Single(result.Gaps).Start, CultureInfo.InvariantCulture));
+            Assert.Equal(Epoch.AddSeconds(4), DateTimeOffset.Parse(result.Gaps[0].End, CultureInfo.InvariantCulture));
+            Assert.False(result.Gaps[0].IsOpen);
         }
     }
 
