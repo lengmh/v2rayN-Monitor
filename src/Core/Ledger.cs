@@ -158,7 +158,9 @@ public sealed class Ledger : IDisposable
                 ? reason : "collector_gap";
             if (Scalar(transaction, "SELECT COUNT(*) FROM gaps WHERE is_open=1;") == 0)
             {
-                var start = Math.Min(ticks, Scalar(transaction, "SELECT COALESCE(MIN(at_ticks),$at) FROM cursors;", ("$at", ticks)));
+                // The single active collector's last successful observation is the latest
+                // persisted cursor; historical instances must not extend a new outage.
+                var start = Math.Min(ticks, Scalar(transaction, "SELECT COALESCE(MAX(at_ticks),$at) FROM cursors;", ("$at", ticks)));
                 InsertGap(transaction, start, ticks, null, category, true);
             }
             else
