@@ -263,3 +263,20 @@ test('local minute details keep compact columns, exact bytes and scoped horizont
   await page.click('#previous-page');
   await expect(page.locator('#page-label')).toContainText('第 1 / 38 页');
 });
+
+test('local partial recovery is unknown and a known idle record remains zero', async ({ page }) => {
+  let result = history;
+  await mock(page, { '/api/history': route => route.fulfill(json(result)) });
+  result = { ...history, upload: '0', download: '0', nodes: [], series: [], recordCount: 1,
+    partialUpload: '500', partialDownload: '0', records: [{ ...history.records[0], upload: '500', download: '0', quality: 'recovered-partial' }] };
+  await page.selectOption('#bucket', 'hour');
+  for (const id of ['total', 'download', 'upload']) {
+    await expect(page.locator(`#${id}-value`)).toHaveText('—');
+    await expect(page.locator(`#${id}-exact`)).toHaveText('所选范围无已知量');
+  }
+  await expect(page.locator('#records')).toContainText('部分重叠');
+  result = { ...result, nodes: [{ ...history.nodes[0], upload: '0', download: '0' }], recordCount: 2 };
+  await page.selectOption('#bucket', 'day');
+  await expect(page.locator('#total-value')).toHaveText('0.000 GB');
+  await expect(page.locator('#total-exact')).toHaveText('0 bytes');
+});

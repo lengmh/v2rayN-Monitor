@@ -63,6 +63,52 @@ public sealed class ApiTests : IAsyncLifetime
         var csv = await client.GetStringAsync("/api/export" + query);
         Assert.Contains("9007199254740993", csv); Assert.Contains("' =Synthetic", csv);
     }
+    [Fact] public async Task LocalExportIncludesEveryRowBeyondOnePageAndStaysSeparateFromProviderData()
+    {
+        await Login();
+        server.Ledger.SeedDemo(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var imported = await client.PostAsJsonAsync("/api/imports/commit", new
+        {
+            source = "synthetic-provider", timeZoneId = "UTC",
+            csv = "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nProvider-only,1,100,100,synthetic,2025-12-31 10:00:00"
+        });
+        Assert.Equal(HttpStatusCode.OK, imported.StatusCode);
+        const string query = "?start=2024-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC&page=2&pageSize=1";
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        var response = await client.GetAsync("/api/export" + query);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/csv", response.Content.Headers.ContentType!.MediaType);
+        var csv = await response.Content.ReadAsStringAsync();
+        var rows = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries).Skip(1).ToArray();
+        Assert.Equal(1200, rows.Length);
+        Assert.Equal(rows.Length, rows.Distinct().Count());
+        Assert.Equal(history.GetProperty("upload").GetString(), rows.Sum(row => long.Parse(row.Split(',')[3], System.Globalization.CultureInfo.InvariantCulture)).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(history.GetProperty("download").GetString(), rows.Sum(row => long.Parse(row.Split(',')[4], System.Globalization.CultureInfo.InvariantCulture)).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Assert.DoesNotContain("Provider-only", csv);
+    }
+
+    [Fact] public async Task LocalExportRejectsTooManyRowsBeforeReturningCsv()
+    {
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        server.Ledger.Accept(new("test", "one", "Synthetic", "process1", "config1", at, 0, 0));
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            { DataSource = Path.Combine(root, "history.db"), Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                WITH RECURSIVE synthetic(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM synthetic WHERE n<100000)
+                INSERT INTO minutes(start_ticks,node_key,upload,download)
+                SELECT {at.UtcTicks}+n*{TimeSpan.TicksPerMinute},'test/one',1,2 FROM synthetic;
+                """;
+            command.ExecuteNonQuery();
+        }
+        var response = await client.GetAsync("/api/export?start=2026-01-01T00:00:00Z&end=2027-01-01T00:00:00Z&timeZoneId=UTC");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType!.MediaType);
+        Assert.Contains("100000", (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+    }
     [Fact] public async Task RecoveredQueriesAndExportsDiscloseContainedVersusPartialIntervals()
     {
         await Login();

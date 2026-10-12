@@ -300,29 +300,9 @@ public sealed class Ledger : IDisposable
                 while (reader.Read())
                     gapDetails.Add(new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2), reader.GetInt64(3) != 0));
             var records = new List<TrafficRow>();
-            using (var command = Command(transaction, """
-                SELECT m.start_ticks AS start_ticks,m.start_ticks+$minute AS end_ticks,m.node_key AS node_key,n.name,m.upload,m.download,
-                    CASE WHEN m.synthetic=1 THEN 'synthetic' WHEN m.approximate=1 THEN 'approximate' ELSE 'measured' END AS quality,
-                    0 AS kind,0 AS row_id
-                FROM minutes m JOIN nodes n ON n.node_key=m.node_key
-                WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
-                    AND ($name IS NULL OR n.name=$name COLLATE BINARY)
-                UNION ALL
-                SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download,
-                    CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
-                    1 AS kind,u.id AS row_id
-                FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
-                WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
-                    AND ($name IS NULL OR n.name=$name COLLATE BINARY)
-                ORDER BY start_ticks DESC,node_key,kind,row_id LIMIT $limit OFFSET $offset;
-                """, parameters.Concat(new (string, object?)[]
-                {
-                    ("$minute", Minute), ("$limit", query.PageSize), ("$offset", checked((long)query.Page * query.PageSize))
-                }).ToArray()))
+            using (var command = RecordCommand(transaction, query, query.PageSize, checked((long)query.Page * query.PageSize)))
             using (var reader = command.ExecuteReader())
-                while (reader.Read())
-                    records.Add(new TrafficRow(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2),
-                        reader.GetString(3), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6)));
+                while (reader.Read()) records.Add(ReadRecord(reader));
             transaction.Commit();
             return new HistoryResult(Iso(query.Start.UtcTicks), Iso(query.End.UtcTicks), totals.UploadText, totals.DownloadText,
                 unallocated.UploadText, unallocated.DownloadText, gaps,
@@ -338,6 +318,51 @@ public sealed class Ledger : IDisposable
             };
         }
     }
+
+    /// <summary>Materializes a bounded export from one SQLite snapshot, without page-by-page reads.</summary>
+    public IReadOnlyList<TrafficRow> Export(QuerySpec query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (query.End <= query.Start) throw new ArgumentException("The end must be after the start.", nameof(query));
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            // The single SELECT fixes the snapshot; the gate keeps the collector off this connection.
+            using var command = RecordCommand(null, query, 100001, 0);
+            using var reader = command.ExecuteReader();
+            var rows = new List<TrafficRow>();
+            while (reader.Read())
+            {
+                if (rows.Count == 100000) throw new ArgumentException("导出最多 100000 条分钟记录，请缩小日期范围或选择单个节点。");
+                rows.Add(ReadRecord(reader));
+            }
+            return rows;
+        }
+    }
+
+    private SqliteCommand RecordCommand(SqliteTransaction? transaction, QuerySpec query, int limit, long offset) =>
+        Command(transaction, """
+            SELECT m.start_ticks AS start_ticks,m.start_ticks+$minute AS end_ticks,m.node_key AS node_key,n.name,m.upload,m.download,
+                CASE WHEN m.synthetic=1 THEN 'synthetic' WHEN m.approximate=1 THEN 'approximate' ELSE 'measured' END AS quality,
+                0 AS kind,0 AS row_id
+            FROM minutes m JOIN nodes n ON n.node_key=m.node_key
+            WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
+                AND ($name IS NULL OR n.name=$name COLLATE BINARY)
+            UNION ALL
+            SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download,
+                CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
+                1 AS kind,u.id AS row_id
+            FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
+            WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
+                AND ($name IS NULL OR n.name=$name COLLATE BINARY)
+            ORDER BY start_ticks DESC,node_key,kind,row_id LIMIT $limit OFFSET $offset;
+            """,
+            ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey), ("$name", query.NodeName),
+            ("$minute", Minute), ("$limit", limit), ("$offset", offset));
+
+    private static TrafficRow ReadRecord(SqliteDataReader reader) =>
+        new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2),
+            reader.GetString(3), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6));
 
     public IReadOnlyList<NodeInfo> GetNodes()
     {
