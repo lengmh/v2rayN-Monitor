@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64">
+  <title>v2rayN Monitor</title>
+  <!-- Original mark: two traffic directions inside a compact monitor tile. -->
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="#142d42"/>
+  <path d="M20 14 10 25h7v20h6V25h7Z" fill="#ecf7ff"/>
+  <path d="m44 50 10-11h-7V19h-6v20h-7Z" fill="#4de0c1"/>
+</svg>

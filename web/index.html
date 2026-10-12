@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="color-scheme" content="light" />
+  <link rel="icon" href="/icon.ico" sizes="16x16 20x20 24x24 32x32 40x40 48x48 64x64 128x128 256x256" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" sizes="any" />
+  <title>v2rayN Monitor · 流量统计</title>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="v2rayN Monitor 主页"><img class="brand-symbol" src="/icon.svg" width="43" height="43" alt="" /><span>v2rayN <strong>Monitor</strong></span></a>
+      <span class="sidebar-caption">流量有迹可循</span>
+      <nav aria-label="主要页面">
+        <button class="nav-item active" data-view="overview" aria-current="page"><span aria-hidden="true">▥</span> 流量统计</button>
+        <button class="nav-item" data-view="provider"><span aria-hidden="true">⇩</span> 导入记录 <span class="nav-optional">CSV</span></button>
+        <button class="nav-item" data-view="settings"><span aria-hidden="true">⚙</span> 采集与设置</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="privacy-dot"></span> 仅在此设备运行<p>数据保存在本机<br />关闭网页，托盘继续采集</p><span class="version">MVP · 0.1</span></div>
+    </aside>
+    <main>
+      <header class="topbar"><div class="breadcrumb">工作台 <span>/</span> <span id="page-name">流量统计</span></div><span class="local-badge">◉ 数据仅存本机</span></header>
+      <div class="content">
+        <div id="session-alert" class="notice error" role="alert" hidden>会话已失效。请从 Windows 托盘重新打开 v2rayN Monitor，获取新的安全会话。</div>
+        <div id="global-error" class="notice error" role="alert" hidden></div>
+        <div id="demo-notice" class="notice demo" hidden>演示模式 · 此页面中的本机记录为合成数据，不代表真实使用量。</div>
+        <section id="overview-view" class="view">
+          <div class="page-heading"><div><p class="eyebrow">TRAFFIC OVERVIEW</p><h1>流量统计</h1><p class="subtitle">按来源和节点查看历史，清楚区分已知流量与采集间断。</p></div><button id="export-button" class="button secondary">↗ 导出当前结果</button></div>
+          <section class="collector-strip" aria-label="采集状态"><span id="status-dot" class="status-dot"></span><div><strong id="collector-state">正在连接采集器</strong><p id="collector-message">读取本机托盘状态…</p></div><div class="current-node"><span>当前节点</span><strong id="current-node">—</strong></div><div class="live-rate"><span id="live-upload">↑ —</span><span id="live-download">↓ —</span></div><button class="text-button" data-view="settings">查看设置 →</button></section>
+          <div class="filter-panel panel">
+            <div class="filter-second source-controls"><label>统计来源<select id="statistics-source"><option value="">本机采集</option></select></label><label id="provider-metric-control" hidden>排行与趋势<select id="provider-metric"><option value="raw">服务商原始量</option><option value="billed">服务商计费量</option></select></label><span id="source-caption" class="muted">本机内核统计 · 含可确定范围的恢复量</span></div>
+            <div id="compare-control" class="filter-second" hidden><label><input id="compare-toggle" type="checkbox" /> 同名节点对照（本机 × 当前服务商）</label></div>
+            <div class="filter-first"><div class="segmented" aria-label="时间范围"><button data-period="day">日</button><button data-period="week">周</button><button data-period="month" class="selected" aria-pressed="true">月</button><button data-period="year">年</button><button data-period="custom">自定义</button></div><div class="date-navigation"><button id="previous-period" class="icon-button" aria-label="上一周期">‹</button><strong id="range-label">加载日期…</strong><button id="next-period" class="icon-button" aria-label="下一周期">›</button><button id="today-button" class="text-button">本期</button></div><div class="unit-control"><label for="unit">显示单位</label><select id="unit"><option>GB</option><option>GiB</option></select></div></div>
+            <form id="custom-range" class="custom-dates" hidden><label>开始日期<input id="custom-from" type="date" required /></label><span>至</span><label>结束日期（含）<input id="custom-through" type="date" required /></label><button class="button small" type="submit">应用范围</button></form>
+            <div class="filter-second"><label>节点<select id="node-filter"><option value="">全部节点</option></select></label><label>分桶<select id="bucket"><option value="hour">按小时</option><option value="day" selected>按日</option><option value="week">按周</option><option value="month">按月</option><option value="year">按年</option></select></label><span id="timezone-note" class="muted">统计时区：—</span><span id="refresh-note" class="refresh-note">每 5 秒更新</span></div>
+          </div>
+          <div id="summary" class="summary-grid" aria-busy="true">
+            <article class="metric-card total"><div class="metric-title"><span id="total-title">区间已知合计</span><span class="metric-icon">∑</span></div><strong id="total-value">—</strong><p id="total-exact">等待记录</p><span id="total-note" class="metric-note">上传 + 下载 · 包含区间内恢复量</span></article>
+            <article id="raw-card" class="metric-card"><div class="metric-title"><span id="download-title">下载</span><span class="metric-icon download">↓</span></div><strong id="download-value">—</strong><p id="download-exact">—</p><span id="download-note" class="metric-note">从代理节点接收</span></article>
+            <article id="billed-card" class="metric-card"><div class="metric-title"><span id="upload-title">上传</span><span class="metric-icon upload">↑</span></div><strong id="upload-value">—</strong><p id="upload-exact">—</p><span id="upload-note" class="metric-note">通过代理节点发送</span></article>
+          </div>
+          <details class="quality-panel"><summary><span id="quality-summary">统计口径与数据说明</span><span class="muted">查看说明</span></summary><div id="quality-notice">缺失记录不等于零流量。首次接入仅建立计数基线，不追记接入前的历史。</div></details>
+          <details id="gap-details" class="history-details" hidden><summary id="gap-summary">历史采集间断</summary><ul id="gap-list"></ul></details>
+          <section id="comparison-view" hidden>
+            <p class="comparison-warning">仅按名称完全相同汇总，区分大小写及空格；不代表身份已验证，不改变 IndexId 分账。缺少记录显示“无记录”，不等于零；两边数值不相加。</p>
+            <div class="summary-grid comparison-summary">
+              <article class="metric-card total"><div class="metric-title">本机已知量</div><strong id="comparison-local">—</strong><p id="comparison-local-exact">—</p><span class="metric-note">上传 + 下载 · 当前范围</span></article>
+              <article class="metric-card"><div class="metric-title">服务商原始量</div><strong id="comparison-raw">—</strong><p id="comparison-raw-exact">—</p><span class="metric-note">所选来源 · 已导入记录</span></article>
+              <article class="metric-card"><div class="metric-title">服务商计费量</div><strong id="comparison-billed">—</strong><p id="comparison-billed-exact">—</p><span class="metric-note">CSV 精确值 · 不重新乘倍率</span></article>
+            </div>
+            <p id="comparison-recovery" class="comparison-warning"></p>
+            <section class="panel comparison-panel"><div class="panel-heading"><div><h2>对照趋势</h2><p id="comparison-trend-caption"></p></div><div class="legend"><span><i class="upload-color"></i>本机已知量</span><span><i class="download-color"></i><span id="comparison-metric-label">服务商原始量</span></span></div></div><div id="comparison-chart" class="chart" role="img" aria-label="同名节点分桶对照"></div></section>
+            <section class="panel comparison-panel"><div class="panel-heading"><div><h2>同名节点对照</h2><p>同名本机配置仅在此视图汇总；原历史独立保留</p></div></div><div class="table-scroll"><table><thead><tr><th>节点名称</th><th class="numeric">本机已知量</th><th class="numeric">服务商原始量</th><th class="numeric">服务商计费量</th></tr></thead><tbody id="comparison-nodes"></tbody></table></div></section>
+            <section class="panel comparison-panel"><div class="panel-heading"><div><h2>时间桶对照</h2><p>无记录的桶不补零；跨桶恢复量不猜测分摊</p></div></div><div class="table-scroll"><table><thead><tr><th>桶开始</th><th class="numeric">本机已知量</th><th class="numeric">服务商原始量</th><th class="numeric">服务商计费量</th></tr></thead><tbody id="comparison-buckets"></tbody></table></div><div class="pagination"><span id="comparison-bucket-page">等待记录</span><div><button id="comparison-bucket-previous" class="button small secondary" disabled>上一页</button><button id="comparison-bucket-next" class="button small secondary" disabled>下一页</button></div></div></section>
+          </section>
+          <div class="analysis-grid"><section class="panel trend-panel"><div class="panel-heading"><div><h2>流量趋势</h2><p id="trend-subtitle">已记录的分时流量</p></div><div class="legend"><span><i class="download-color"></i><span id="download-legend">下载</span></span><span id="upload-legend"><i class="upload-color"></i>上传</span></div></div><div id="chart" class="chart" role="img" aria-label="正在加载流量趋势"></div><div class="chart-footer"><span>空白分桶表示无记录，不代表零流量</span><span id="chart-scale"></span></div></section><section class="panel ranking-panel"><div class="panel-heading"><div><h2>节点排行</h2><p id="ranking-caption">按区间已知合计排序</p></div><span id="node-count" class="count-badge">0</span></div><div id="ranking" class="ranking"></div></section></div>
+          <section class="panel records-panel"><div class="panel-heading"><div><h2 id="records-heading">采集明细</h2><p id="records-caption">本机独立账本 · 原始整数 bytes</p></div><span id="record-count" class="muted">— 条记录</span></div><div class="table-scroll"><table><thead><tr><th>时间</th><th>节点</th><th id="download-column" class="numeric">下载</th><th id="upload-column" class="numeric">上传</th><th id="quality-column">质量</th></tr></thead><tbody id="records"></tbody></table></div><div class="pagination"><span id="page-label">第 1 页</span><div><button id="previous-page" class="button small secondary" disabled>上一页</button><button id="next-page" class="button small secondary" disabled>下一页</button></div></div></section>
+          <p id="attribution-note" class="footnote">本机统计按 v2rayN 活动配置归属，连接参数相同的不同 IndexId 分账；名称仅用于展示。目标基线：v2rayN v7.25.1 + Xray 普通单节点。Windows 实机验证待完成；当前不支持 TUN、代理链、多出站或 sing-box。</p>
+        </section>
+        <section id="settings-view" class="view" hidden>
+          <div class="page-heading"><div><p class="eyebrow">COLLECTOR SETTINGS</p><h1>采集与设置</h1><p class="subtitle">连接现有实例，以只读方式建立本机历史。</p></div></div>
+          <section class="panel settings-panel"><h2>v2rayN 实例</h2><form id="settings-form"><label for="v2rayn-path">v2rayN 数据根目录</label><input id="v2rayn-path" type="text" placeholder="C:\Apps\v2rayN" autocomplete="off" spellcheck="false" /><p class="field-help">填写包含 guiConfigs 和 binConfigs 的数据根目录。便携版通常在程序旁；安装版可能位于用户数据目录。Monitor 不会修改 v2rayN 配置、重启内核或清零统计。</p><label for="time-zone">统计时区</label><select id="time-zone"></select><p class="field-help">日界线、周一开始的周区间和 CSV 时间解释以此时区为准，原始时间始终以 UTC 保存。</p><button type="submit" id="save-settings" class="button">保存设置</button><p id="settings-result" role="status" class="form-result"></p></form></section>
+          <section class="panel settings-panel"><h2>首次连接</h2><ol class="setup-list"><li>使用 v2rayN v7.25.1，选择 Xray 普通单节点模式。</li><li>在 v2rayN 设置中启用流量统计或实时速度显示，并由你自行应用配置。Monitor 仅读取已开启的回环 metrics 接口。</li><li>填入数据根目录并保存。请保持 v2rayN 和 Monitor 托盘运行。</li><li>首次接入先建立基线，后续有效采样才会产生新增记录。</li></ol><div class="notice quality">若状态提示目录、统计接口或模式不受支持，请按具体提示检查。当前不支持 TUN、代理链、多出站或 sing-box；Windows 实机验证仍待完成。</div><p id="settings-collector-status" class="muted"></p></section>
+          <section id="demo-controls" class="panel settings-panel" hidden><h2>合成演示数据</h2><p class="field-help">仅演示宿主允许生成。用于检查页面与汇总，不代表真实内核验证。</p><button id="seed-demo" class="button secondary">生成演示记录</button><p id="demo-result" role="status"></p></section>
+        </section>
+        <section id="provider-view" class="view" hidden>
+          <div class="page-heading"><div><p class="eyebrow">PROVIDER IMPORTS</p><h1>导入记录</h1><p class="subtitle">保存服务商账单，再按节点和日期查看统计。</p></div><button class="button secondary" data-view="overview">查看统计 →</button></div>
+          <div class="notice quality">服务商原始量与计费量单独保存，绝不与本机流量相加。文件没有提供的方向、设备和 IP 均为未知。</div>
+          <section class="panel settings-panel"><h2>导入 CSV</h2><p class="field-help">仅支持六列：node_name, rate, origin_traffic, origin_x_rate, traffic, log_time。文件只发送给本机宿主。</p><p id="import-limits" class="field-help">每文件最多 4 MB、50,000 条数据记录（不含表头）。</p><form id="import-form"><label for="provider-source">来源名称</label><input id="provider-source" maxlength="100" required placeholder="例如：我的服务商" autocomplete="off" /><label for="import-zone">文件中的时间按此时区解释</label><select id="import-zone"></select><label for="csv-file">选择 CSV 文件</label><input id="csv-file" type="file" accept=".csv,text/csv" required /><p class="field-help">先预览，再确认导入。同文件按哈希防重；不同文件的时间区间重叠时会拒绝导入，避免猜测去重。</p><button id="preview-import" class="button secondary" type="submit">检查并预览</button></form><div id="import-preview" hidden><div id="preview-details" class="preview-details"></div><ul id="import-warnings" class="warning-list"></ul><button id="commit-import" class="button">确认导入独立账本</button></div><p id="import-result" role="status" class="form-result"></p></section>
+          <section class="panel"><div class="panel-heading"><div><h2>导入批次</h2><p>最早 / 最晚记录不是完整覆盖区间</p></div></div><div class="table-scroll"><table><thead><tr><th>来源</th><th>记录数</th><th class="numeric">服务商原始量</th><th class="numeric">服务商计费量</th><th>导入时间</th></tr></thead><tbody id="import-batches"></tbody></table></div></section>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
