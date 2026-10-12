@@ -33,3 +33,6 @@ bootstrap-result.json
 guiConfigs/
 guiNConfig.json
 guiNDB.db
+
+TestResults/
+*.trx
