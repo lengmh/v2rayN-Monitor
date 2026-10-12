@@ -32,6 +32,7 @@ internal static class Program
 internal sealed class TrayContext : ApplicationContext
 {
     private readonly NotifyIcon tray;
+    private readonly Icon trayIcon;
     private readonly MonitorServer server;
     private readonly CancellationTokenSource stop = new();
     private readonly Task collectTask;
@@ -62,10 +63,19 @@ internal sealed class TrayContext : ApplicationContext
         }
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出并停止采集", null, (_, _) => ExitThread());
-        tray = new NotifyIcon { Icon = SystemIcons.Application, Text = demo ? "v2rayN Monitor · 演示" : "v2rayN Monitor", ContextMenuStrip = menu, Visible = true };
+        trayIcon = LoadTrayIcon();
+        tray = new NotifyIcon { Icon = trayIcon, Text = demo ? "v2rayN Monitor · 演示" : "v2rayN Monitor", ContextMenuStrip = menu, Visible = true };
         tray.DoubleClick += (_, _) => Open();
         collectTask = demo ? Task.CompletedTask : Task.Run(CollectAsync);
         if (!Environment.GetCommandLineArgs().Contains("--background")) Open();
+    }
+    private static Icon LoadTrayIcon()
+    {
+        // Embedded for portable/self-contained publishing; no working-directory dependency.
+        using var stream = typeof(TrayContext).Assembly.GetManifestResourceStream("V2rayNMonitor.Host.AppIcon.ico")
+            ?? throw new InvalidOperationException("Application icon resource is missing.");
+        using var icon = new Icon(stream, SystemInformation.SmallIconSize);
+        return (Icon)icon.Clone();
     }
     private bool IsStartupEnabled()
     {
@@ -144,6 +154,6 @@ internal sealed class TrayContext : ApplicationContext
     {
         stop.Cancel(); collectTask.GetAwaiter().GetResult();
         server.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        tray.Visible = false; tray.Dispose(); stop.Dispose(); base.ExitThreadCore();
+        tray.Visible = false; tray.Dispose(); trayIcon.Dispose(); stop.Dispose(); base.ExitThreadCore();
     }
 }

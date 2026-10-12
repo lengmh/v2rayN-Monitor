@@ -3,7 +3,7 @@ import './ui.css';
 import { chartSlots, shortLabel } from './lib/chart.ts';
 import { compareNames, compareBuckets } from './lib/comparison.ts';
 import type { ComparisonRow } from './lib/comparison.ts';
-import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
+import { bytes, exactBytes, formatBytes, recordByteParts, percentage, rate } from './lib/format.ts';
 import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProviderTotal, providerUnits, providerUnitsText } from './lib/provider-format.ts';
 import type { Unit } from './lib/format.ts';
 import { dateInZone, dateRange, periodRange, shiftAnchor, timestamp } from './lib/ranges.ts';
@@ -142,6 +142,15 @@ function renderChart(history: HistoryPointInput, provider = false): void {
   put('chart-scale', `最高 ${display(max)}`);
 }
 type HistoryPointInput = Pick<HistoryResult, 'series'>;
+function recordTrafficCell(value: string): HTMLTableCellElement {
+  const parts = recordByteParts(value, unit);
+  const cell = element('td', '', `numeric traffic-cell${parts.isZero ? ' zero' : ''}`);
+  cell.title = exactBytes(value);
+  const amount = element('span', '', 'traffic-amount');
+  amount.append(element('span', parts.value, 'traffic-value'), document.createTextNode(' '), element('span', parts.unit, 'traffic-unit'));
+  cell.append(amount);
+  return cell;
+}
 function renderHistory(history: HistoryResult): void {
   latestHistory = history;
   latestProvider = null;
@@ -195,9 +204,13 @@ function renderHistory(history: HistoryResult): void {
     const row = element('tr');
     const time = element('td', timestamp(record.start, settings.timeZoneId)); time.title = `${record.start} → ${record.end}`;
     const name = element('td', record.nodeName || '未归属', 'node-cell'); name.title = record.nodeName || '未归属';
-    const download = element('td', formatBytes(record.download, unit), 'numeric'); download.title = exactBytes(record.download);
-    const upload = element('td', formatBytes(record.upload, unit), 'numeric'); upload.title = exactBytes(record.upload);
-    const qualityCell = element('td'); const label = element('span', labels[record.quality] || record.quality, `quality-pill ${['exact', 'normal', 'measured'].includes(record.quality) ? '' : 'warning'}`); qualityCell.append(label);
+    const download = recordTrafficCell(record.download);
+    const upload = recordTrafficCell(record.upload);
+    const approximate = ['approximate', 'estimated', 'interpolated', 'apportioned'].includes(record.quality);
+    const qualityCell = element('td'); const label = element('span', labels[record.quality] || record.quality, `quality-pill ${['exact', 'normal', 'measured'].includes(record.quality) ? '' : approximate ? 'approximate' : 'warning'}`);
+    if (approximate) label.title = '区间流量按分钟分配，分时用量为近似值；原始总量保持不变。';
+    if (record.quality === 'recovered-partial') label.title = '恢复区间仅与当前查询范围部分重叠，范围内用量未知，未计入本范围合计。';
+    qualityCell.append(label);
     row.append(time, name, download, upload, qualityCell); records.append(row);
   }
   pagination(history.recordCount);
@@ -211,6 +224,7 @@ function pagination(count: number): void {
 }
 function statisticLabels(): void {
   const provider = statisticsSource !== '';
+  el('records').closest('.records-panel')?.classList.toggle('local-records', !provider);
   const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
   show('provider-metric-control', provider); show('upload-legend', !provider);
   show('compare-control', provider); show('comparison-view', comparison);
@@ -228,7 +242,7 @@ function statisticLabels(): void {
   put('download-legend', provider ? metric : '下载');
   put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
   put('records-heading', provider ? '服务商记录' : '采集明细');
-  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : '本机独立账本 · 原始整数 bytes');
+  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : `本机独立账本 · 自动单位（${unit === 'GB' ? '1000' : '1024'} 进制）· 悬停查看原始 bytes`);
   put('download-column', provider ? '原始量' : '下载'); put('upload-column', provider ? '计费量' : '上传');
   put('quality-column', provider ? '倍率' : '质量');
 }

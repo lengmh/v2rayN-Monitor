@@ -93,3 +93,27 @@ summary:focus-visible { outline: 3px solid #38b7ac; outline-offset: 3px; }
   .pagination { gap: 10px; flex-wrap: wrap; }
   .table-scroll { max-height: 430px; }
 }
+
+/* Local collection details: aligned values and units without changing stored bytes. */
+.local-records table { table-layout: fixed; min-width: 740px; }
+.local-records th, .local-records td { padding: 9px 14px; }
+.local-records th:first-child { width: 148px; }
+.local-records th:nth-child(3), .local-records th:nth-child(4) { width: 152px; }
+.local-records th:last-child { width: 172px; }
+.local-records .node-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-records .numeric { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.local-records .traffic-amount { display: grid; grid-template-columns: minmax(0, 1fr) 3.5ch; gap: 6px; align-items: baseline; }
+.local-records .traffic-value { overflow: hidden; text-overflow: ellipsis; font-weight: 500; text-align: right; }
+.local-records .traffic-unit { color: #607080; font-size: 11px; text-align: left; }
+.local-records .traffic-cell.zero, .local-records .zero .traffic-unit { color: #6b7785; }
+.local-records .zero .traffic-value { font-weight: 400; }
+.local-records .quality-pill.approximate { color: #4c637d; background: #edf2f8; }
+.local-records tbody tr:hover { background: #f3f7fa; }
+.local-records .panel-heading { padding-bottom: 14px; }
+@media (max-width: 640px) {
+  .local-records table { min-width: 680px; }
+  .local-records th, .local-records td { padding: 9px 10px; }
+  .local-records th:first-child { width: 132px; }
+  .local-records th:nth-child(3), .local-records th:nth-child(4) { width: 128px; }
+  .local-records th:last-child { width: 152px; }
+}

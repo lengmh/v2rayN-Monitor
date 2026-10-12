@@ -140,7 +140,9 @@ test('one-time session, secure text rendering, exact unit toggle, and desktop la
   expect(calls.filter(c => c.path === '/api/session')).toHaveLength(1);
   expect(calls.find(c => c.path === '/api/session').headers['x-monitor-request']).toBe('1');
   await expect(page.locator('#ranking')).toContainText(malicious);
-  await expect(page.locator('img')).toHaveCount(0);
+  await expect(page.locator('img')).toHaveCount(1);
+  await expect(page.locator('.brand > img.brand-symbol')).toHaveAttribute('src', '/icon.svg');
+  await expect(page.locator('#ranking img, #records img, #import-batches img')).toHaveCount(0);
   await page.selectOption('#unit', 'GiB'); await expect(page.locator('#total-value')).toHaveText('15.000 GiB');
   await expect(page.locator('#total-exact')).toHaveText('16,106,127,360 bytes');
   await expect(page.locator('.chart-missing')).toHaveCount(13);
@@ -225,4 +227,39 @@ test('mobile page has no horizontal document overflow', async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/dashboard-mobile.png', fullPage: true });
   await page.click('.nav-item[data-view=provider]'); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test('local minute details keep compact columns, exact bytes and scoped horizontal scrolling', async ({ page }) => {
+  const values = ['12345', '98765', '432', '0', '1000000', '1234567890', '9007199254740993'];
+  const records = Array.from({ length: 50 }, (_, i) => ({ ...history.records[0],
+    start: new Date(Date.UTC(2026, 9, 9, 11, -i)).toISOString(),
+    nodeName: i === 5 ? 'Synthetic · Long node name for ellipsis and full-name tooltip verification' : 'Synthetic · Singapore',
+    download: values[i % values.length], upload: String(i * 123), quality: i === 6 ? 'recovered-partial' : 'approximate'
+  }));
+  await mock(page, { '/api/history': route => route.fulfill(json({ ...history, records, recordCount: 1882 })) });
+  const panel = page.locator('.records-panel');
+  await expect(page.locator('#records tr')).toHaveCount(50);
+  await expect(page.locator('#records tr').first().locator('td').nth(2)).toHaveText('12.35 KB');
+  await expect(page.locator('#records tr').first().locator('td').nth(2)).toHaveAttribute('title', '12,345 bytes');
+  await expect(page.locator('#records .approximate')).toHaveCount(49);
+  await expect(page.locator('#records tr').first().locator('.traffic-value').first()).toHaveText('12.35');
+  await expect(page.locator('#records tr').first().locator('.traffic-unit').first()).toHaveText('KB');
+  await expect(page.locator('#records tr').first().locator('.zero')).toHaveText('0 B');
+  await expect(page.locator('#records tr').nth(5).locator('.node-cell')).toHaveAttribute('title', records[5].nodeName);
+  await expect(page.locator('#records .warning')).toHaveCount(1);
+  await panel.screenshot({ path: 'test-results/local-details-after-desktop.png' });
+  await page.selectOption('#unit', 'GiB');
+  await expect(page.locator('#records tr').first().locator('td').nth(2)).toHaveText('12.06 KiB');
+  await expect(page.locator('#records tr').first().locator('.traffic-unit').first()).toHaveText('KiB');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const scroll = panel.locator('.table-scroll');
+  expect(await scroll.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true);
+  await panel.screenshot({ path: 'test-results/local-details-after-mobile.png' });
+  await scroll.evaluate(node => { node.scrollLeft = node.scrollWidth; });
+  await expect(page.locator('#quality-column')).toBeInViewport();
+  await page.click('#next-page');
+  await expect(page.locator('#page-label')).toContainText('第 2 / 38 页');
+  await page.click('#previous-page');
+  await expect(page.locator('#page-label')).toContainText('第 1 / 38 页');
 });
