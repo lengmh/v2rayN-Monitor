@@ -60,7 +60,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   const provider = { source: 'Synthetic comparison', rawBytes: '4000000000', billedBytes: '3200000000.000123', recordCount: 2,
     nodes: [{ name: 'Synthetic shared node', rawBytes: '4000000000', billedBytes: '3200000000.000123' },
       { name: 'CSV only', rawBytes: '0', billedBytes: '0' }], records: [] };
-  const label = url => ({ hour: '2026-10-09T10:00+00:00', week: '2026-10-05', month: '2026-10' })[url.searchParams.get('bucket')] ?? '2026-10-09';
+  const label = url => ({ hour: '2026-10-09T10:00+00:00', day: '2026-10-09', week: '2026-10-05', month: '2026-10' })[url.searchParams.get('bucket')] ?? '2026-10-09';
   const calls = await mock(page, {
     '/api/provider/sources': route => route.fulfill(json(['Synthetic comparison'])),
     '/api/nodes': route => route.fulfill(json(local.nodes.map(n => ({ key: n.key, name: n.name })))),
@@ -80,17 +80,28 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#comparison-recovery')).toContainText('500 bytes');
   await expect(page.locator('#export-button')).toBeHidden();
   await page.click('[data-period=day]');
+  await expect(page.locator('#bucket')).toHaveValue('hour');
   await expect(page.locator('#comparison-chart .comparison-bar')).toHaveCount(2);
   expect(await page.locator('#comparison-chart .comparison-bar').first().evaluate(node => parseFloat(getComputedStyle(node).height))).toBeGreaterThan(0);
   await page.screenshot({ path: 'test-results/comparison-desktop.png', fullPage: true });
   await page.selectOption('#node-filter', 'Synthetic shared node');
   await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('nodeName')).toBe('Synthetic shared node');
-  await page.click('[data-period=week]'); await page.selectOption('#bucket', 'week');
+  await page.click('[data-period=week]');
+  await expect(page.locator('#bucket')).toHaveValue('day');
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(7);
+  await expect(page.locator('#comparison-trend-caption')).toHaveText('日 · UTC');
+  await page.selectOption('#bucket', 'week');
   await expect(page.locator('#comparison-buckets')).toContainText('2026-10-05');
-  await page.click('[data-period=month]'); await page.selectOption('#bucket', 'month');
-  await expect(page.locator('#comparison-buckets')).toContainText('2026-10');
+  await page.click('[data-period=year]');
+  await expect(page.locator('#bucket')).toHaveValue('month');
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(12);
+  await page.click('[data-period=month]');
+  await expect(page.locator('#bucket')).toHaveValue('day');
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(31);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(31);
+  await expect(page.locator('#comparison-chart')).not.toContainText('无法清楚展示');
   await page.screenshot({ path: 'test-results/comparison-mobile.png', fullPage: true });
   partialOnly = true; await page.selectOption('#bucket', 'hour');
   await expect(page.locator('#comparison-local')).toHaveText('—');
@@ -118,6 +129,7 @@ test('year of hourly comparison buckets stays paged and keeps the full exact tot
   await page.selectOption('#statistics-source', provider.source);
   await page.click('[data-period=custom]'); await page.fill('#custom-from', '2026-01-01'); await page.fill('#custom-through', '2026-12-31');
   await page.locator('#custom-range').getByRole('button').click();
+  await page.selectOption('#bucket', 'hour');
   await page.check('#compare-toggle');
   await expect(page.locator('#comparison-local-exact')).toHaveText('8,760 bytes');
   await expect(page.locator('#comparison-buckets tr')).toHaveCount(50);
