@@ -168,6 +168,33 @@ test('node ranking discloses each node recovery contribution', async t => {
   assert.equal(get('ranking').querySelector('.rank-recovery').title, '1,000,000,000 bytes');
 });
 
+test('period defaults follow day week month year while manual granularity survives other controls', async t => {
+  const provider = { source: 'calendar', rawBytes: '1', billedBytes: '1', recordCount: 1, nodes: [], series: [], records: [] };
+  const { get, change, w, calls } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['calendar']),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  for (const mode of ['local', 'provider', 'comparison']) {
+    if (mode === 'provider') { change('statistics-source', 'calendar'); await until(() => get('summary').getAttribute('aria-busy') === 'false'); }
+    if (mode === 'comparison') { get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change')); }
+    for (const [period, expected] of [['day', 'hour'], ['week', 'day'], ['month', 'day'], ['year', 'month']]) {
+      w.document.querySelector(`[data-period=${period}]`).click();
+      assert.equal(get('bucket').value, expected, `${mode} ${period}`);
+      const path = mode === 'comparison' || mode === 'local' ? '/api/history' : '/api/provider/history';
+      await until(() => calls.filter(c => c.path === path).at(-1).query.get('bucket') === expected);
+    }
+  }
+  change('bucket', 'week'); get('previous-period').click(); change('unit', 'GiB');
+  assert.equal(get('bucket').value, 'week');
+  get('compare-toggle').checked = false; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  change('statistics-source', '');
+  assert.equal(get('bucket').value, 'week');
+  w.document.querySelector('[data-period=custom]').click();
+  assert.equal(get('bucket').value, 'week');
+});
+
 test('same-name comparison keeps sources separate and requests hourly week and month buckets', async t => {
   let localReads = 0;
   const comparisonLocal = { ...history, upload: '35', download: '0', nodes: [
@@ -187,7 +214,7 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   const toggle = get('compare-toggle'); assert.ok(toggle);
   toggle.checked = true; toggle.dispatchEvent(new w.Event('change'));
   await until(() => get('comparison-nodes').textContent.includes('Only CSV'));
-  assert.equal(get('bucket').value, 'hour');
+  assert.equal(get('bucket').value, 'day');
   assert.equal(get('comparison-local-exact').textContent, '35 bytes');
   const rows = get('comparison-nodes').querySelectorAll('tr');
   const same = [...rows].find(r => r.textContent.includes('Same'));
