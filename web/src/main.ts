@@ -532,16 +532,22 @@ el('import-form').addEventListener('submit', async event => {
     const preview = await post<ImportPreview>('/api/imports/preview', request);
     if (revision !== importRevision) return;
     importRequest = request;
-    put('preview-details', `来源：${request.source}\n记录：${preview.rowCount.toLocaleString('zh-CN')} 条\n服务商原始量：${formatBytes(preview.rawBytes, unit)}（${exactBytes(preview.rawBytes)}）\n服务商计费量：${formatProviderBytes(preview.billedBytes, unit)}（${exactProviderBytes(preview.billedBytes)}）\n最早记录：${timestamp(preview.firstTime, request.timeZoneId)}\n最晚记录：${timestamp(preview.lastTime, request.timeZoneId)}`);
+    put('preview-details', `来源：${request.source}\n文件记录：${preview.rowCount.toLocaleString('zh-CN')} 条\n本次新增：${preview.newRowCount.toLocaleString('zh-CN')} 条\n跳过已存在：${preview.skippedRowCount.toLocaleString('zh-CN')} 条\n新增原始量：${formatBytes(preview.newRawBytes, unit)}（${exactBytes(preview.newRawBytes)}）\n新增计费量：${formatProviderBytes(preview.newBilledBytes, unit)}（${exactProviderBytes(preview.newBilledBytes)}）\n文件原始量：${formatBytes(preview.rawBytes, unit)}（${exactBytes(preview.rawBytes)}）\n文件计费量：${formatProviderBytes(preview.billedBytes, unit)}（${exactProviderBytes(preview.billedBytes)}）\n最早记录：${timestamp(preview.firstTime, request.timeZoneId)}\n最晚记录：${timestamp(preview.lastTime, request.timeZoneId)}`);
     el('import-warnings').replaceChildren(...(preview.warnings || []).map(warning => element('li', warning)));
-    show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate;
-    formResult('import-result', preview.duplicate ? '这个文件已经导入，不会重复记账。' : '预览完成。请确认来源与时区后导入。');
+    show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate || preview.warnings.length > 0;
+    formResult('import-result', preview.duplicate ? '全部记录已存在，不会重复记账。' : preview.warnings.length ?
+      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : '预览完成。相同来源按重复导出快照比较，保留文件内相同行的出现次数。请确认来源与时区后导入。');
   } catch (error) { if (revision === importRevision) formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('commit-import').addEventListener('click', async () => {
   if (!importRequest) return;
   const request = importRequest, button = el<HTMLButtonElement>('commit-import'); button.disabled = true;
-  try { await post('/api/imports/commit', request); invalidateImport(); formResult('import-result', '导入完成，已保存到独立服务商账本。可在统计来源中选择查看节点历史。'); await loadBatches(); await loadSources(); if (statisticsSource === request.source.trim()) await refresh(true); }
+    try {
+      const result = await post<ImportPreview>('/api/imports/commit', request); invalidateImport();
+      formResult('import-result', `导入完成：新增 ${result.newRowCount.toLocaleString('zh-CN')} 条，跳过 ${result.skippedRowCount.toLocaleString('zh-CN')} 条。${result.duplicate ?
+        '全部记录已存在，未新增批次。' : `新增原始量 ${exactBytes(result.newRawBytes)}，新增计费量 ${exactProviderBytes(result.newBilledBytes)}。已保存到独立服务商账本。`}可在统计来源中选择查看节点历史。`);
+      await loadBatches(); await loadSources(); if (statisticsSource === request.source.trim()) await refresh(true);
+    }
   catch (error) { formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('seed-demo').addEventListener('click', async () => {

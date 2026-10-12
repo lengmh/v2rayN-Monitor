@@ -18,7 +18,7 @@ async function fixture(t, overrides = {}) {
     calls.push({ path: parsed.pathname, query: parsed.searchParams, body, headers: options.headers, signal: options.signal });
     if (overrides[parsed.pathname]) return overrides[parsed.pathname](parsed, options);
     if (parsed.pathname === '/api/provider/sources') return Response.json([]);
-    const routes = { '/api/session': { ok: true }, '/api/settings': { v2rayNPath: 'C:\\Synthetic', timeZoneId: 'UTC', demo: true }, '/api/timezones': [{ id: 'UTC', name: 'UTC' }, { id: 'Asia/Shanghai', name: '中国标准时间' }], '/api/nodes': [{ key: 'a', name: 'Synthetic A' }, { key: 'b', name: 'Synthetic B' }], '/api/history': history, '/api/status': { state: 'demo', message: '合成数据', currentNode: 'Synthetic A', lastSample: null, uploadPerSecond: null, downloadPerSecond: '0', demo: true }, '/api/imports': [], '/api/imports/preview': { hash: 'test', rowCount: 1, rawBytes: '1024', billedBytes: '1024', firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-01T00:00:00Z', warnings: [], duplicate: false }, '/api/imports/commit': { ok: true } };
+    const routes = { '/api/session': { ok: true }, '/api/settings': { v2rayNPath: 'C:\\Synthetic', timeZoneId: 'UTC', demo: true }, '/api/timezones': [{ id: 'UTC', name: 'UTC' }, { id: 'Asia/Shanghai', name: '中国标准时间' }], '/api/nodes': [{ key: 'a', name: 'Synthetic A' }, { key: 'b', name: 'Synthetic B' }], '/api/history': history, '/api/status': { state: 'demo', message: '合成数据', currentNode: 'Synthetic A', lastSample: null, uploadPerSecond: null, downloadPerSecond: '0', demo: true }, '/api/imports': [], '/api/imports/preview': { hash: 'test', rowCount: 1, rawBytes: '1024', billedBytes: '1024', newRowCount: 1, skippedRowCount: 0, newRawBytes: '1024', newBilledBytes: '1024', firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-01T00:00:00Z', warnings: [], duplicate: false }, '/api/imports/commit': { newRowCount: 1, skippedRowCount: 0, newRawBytes: '1024', newBilledBytes: '1024', duplicate: false } };
     return Response.json(routes[parsed.pathname] || {});
   };
   w.eval(script);
@@ -71,6 +71,26 @@ test('provider preview is invalidated on edits and commit remains an explicit se
   get('provider-source').value = 'Changed'; get('provider-source').dispatchEvent(new w.Event('input')); assert.equal(get('import-preview').hidden, true);
   submit('import-form'); await until(() => !get('import-preview').hidden); get('commit-import').click(); await until(() => get('import-result').textContent.includes('导入完成'));
   assert.equal(calls.filter(c => c.path === '/api/imports/commit').length, 1); assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('overlap preview separates new and skipped rows and commit reports its recalculated result', async t => {
+  const preview = { hash: 'synthetic-overlap', rowCount: 3, rawBytes: '240', billedBytes: '192.000000000123',
+    newRowCount: 1, skippedRowCount: 2, newRawBytes: '40', newBilledBytes: '32.000000000123',
+    firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-02T00:00:00Z', duplicate: false, warnings: [] };
+  const { w, get, submit } = await fixture(t, {
+    '/api/imports/preview': () => Response.json(preview),
+    '/api/imports/commit': () => Response.json({ ...preview, newRowCount: 0, skippedRowCount: 3,
+      newRawBytes: '0', newBilledBytes: '0', duplicate: true })
+  });
+  w.document.querySelector('.nav-item[data-view=provider]').click(); get('provider-source').value = 'Synthetic';
+  Object.defineProperty(get('csv-file'), 'files', { value: [{ size: 100, text: async () => 'synthetic overlap csv' }] });
+  submit('import-form'); await until(() => !get('import-preview').hidden);
+  assert.ok(get('preview-details').textContent.includes('本次新增：1 条'));
+  assert.ok(get('preview-details').textContent.includes('跳过已存在：2 条'));
+  assert.ok(get('preview-details').textContent.includes('32.000000000123 bytes'));
+  assert.equal(get('commit-import').disabled, false);
+  get('commit-import').click(); await until(() => get('import-result').textContent.includes('新增 0 条'));
+  assert.ok(get('import-result').textContent.includes('跳过 3 条'));
+  assert.ok(get('import-result').textContent.includes('全部记录已存在'));
 });
 test('recovery is disclosed as already included while partial overlap stays excluded', async t => {
   const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history, recoveredUpload: '1000000000', recoveredDownload: '2000000000', partialUpload: '100', partialDownload: '0', unbucketedUpload: '1000000000', gapCount: 2, gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'long_interval', isOpen: false }] }) });
@@ -310,8 +330,10 @@ test('provider decimal preview, committed list and unit changes retain exact bil
   const billedBytes = '2600.800000000123', batch = { source: 'Synthetic Decimal', hash: 'synthetic-decimal', rowCount: 3, rawBytes: '3001', billedBytes, firstTime: '2026-01-01T00:00:00Z', lastTime: '2026-01-01T00:02:00Z', importedAt: '2026-01-02T00:00:00Z' };
   let committed = false;
   const { w, get, submit, change, calls, errors } = await fixture(t, {
-    '/api/imports/preview': () => Response.json({ ...batch, warnings: [], duplicate: committed }),
-    '/api/imports/commit': () => { committed = true; return Response.json(batch); },
+    '/api/imports/preview': () => Response.json({ ...batch, warnings: [], duplicate: committed,
+      newRowCount: committed ? 0 : 3, skippedRowCount: committed ? 3 : 0, newRawBytes: committed ? '0' : '3001', newBilledBytes: committed ? '0' : billedBytes }),
+    '/api/imports/commit': () => { committed = true; return Response.json({ ...batch, newRowCount: 3,
+      skippedRowCount: 0, newRawBytes: '3001', newBilledBytes: billedBytes, duplicate: false }); },
     '/api/imports': () => Response.json(committed ? [batch] : [])
   });
   w.document.querySelector('.nav-item[data-view=provider]').click(); get('provider-source').value = 'Synthetic Decimal';

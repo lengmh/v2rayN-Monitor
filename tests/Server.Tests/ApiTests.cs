@@ -154,6 +154,40 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Equal(name, result.GetProperty("nodes")[0].GetProperty("name").GetString());
     }
 
+    [Fact] public async Task OverlappingProviderSnapshotsPreviewAndCommitOnlyNewOccurrences()
+    {
+        await Login();
+        const string header = "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\n";
+        const string shared = "Synthetic-A,0.8,10,8.000000000123,display,2026-01-01 10:00:00\n";
+        var a = new { source = "synthetic-overlap", timeZoneId = "UTC", csv = header + shared + shared };
+        var b = new { a.source, a.timeZoneId, csv = header + shared + shared + shared +
+            "Synthetic-B,0.5,20,10.000000000123,display,2026-01-01 11:00:00" };
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/imports/commit", a)).StatusCode);
+        var preview = await client.PostAsJsonAsync("/api/imports/preview", b);
+        Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
+        var body = await preview.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(4, body.GetProperty("rowCount").GetInt32());
+        Assert.Equal(2, body.GetProperty("newRowCount").GetInt32());
+        Assert.Equal(2, body.GetProperty("skippedRowCount").GetInt32());
+        Assert.Equal("18.000000000246", body.GetProperty("newBilledBytes").GetString());
+        var commit = await client.PostAsJsonAsync("/api/imports/commit", b);
+        Assert.Equal(HttpStatusCode.OK, commit.StatusCode);
+        body = await commit.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(2, body.GetProperty("newRowCount").GetInt32());
+        var result = await client.GetFromJsonAsync<JsonElement>("/api/provider/history?source=synthetic-overlap&start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z");
+        Assert.Equal(4, result.GetProperty("recordCount").GetInt32());
+        Assert.Equal("50", result.GetProperty("rawBytes").GetString());
+        Assert.Equal("34.000000000492", result.GetProperty("billedBytes").GetString());
+        var duplicate = await client.PostAsJsonAsync("/api/imports/commit", b);
+        body = await duplicate.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("duplicate").GetBoolean());
+        Assert.Equal(0, body.GetProperty("newRowCount").GetInt32());
+        Assert.Equal(4, body.GetProperty("skippedRowCount").GetInt32());
+        var batches = await client.GetFromJsonAsync<JsonElement>("/api/imports");
+        Assert.Equal(2, batches.GetArrayLength());
+        Assert.Empty(server.Ledger.GetNodes());
+    }
+
     [Fact] public async Task RepresentativeProviderCsvPassesPreviewAndCommitThroughHttp()
     {
         await Login();
