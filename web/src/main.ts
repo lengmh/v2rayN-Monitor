@@ -92,6 +92,14 @@ function updateRange(): void {
 function selectRange(): void {
   try { updateRange(); page = 0; void refresh(true); } catch (error) { fail(errorText(error)); }
 }
+function selectPeriod(next: Period): void {
+  period = next;
+  if (next !== 'custom') {
+    bucket = next === 'day' ? 'hour' : next === 'year' ? 'month' : 'day';
+    el<HTMLSelectElement>('bucket').value = bucket;
+  }
+  selectRange();
+}
 function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
   const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
@@ -283,11 +291,11 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   put('comparison-bucket-page', `共 ${buckets.length.toLocaleString('zh-CN')} 个已记录桶 · 第 ${comparisonBucketPage + 1} / ${pages} 页 · 每页 ${pageSize} 个`);
   el<HTMLButtonElement>('comparison-bucket-previous').disabled = comparisonBucketPage === 0;
   el<HTMLButtonElement>('comparison-bucket-next').disabled = comparisonBucketPage + 1 >= pages;
-  put('comparison-trend-caption', `${bucket === 'hour' ? '小时' : bucket === 'week' ? '周一开始的周' : '月'} · ${settings.timeZoneId}`);
+  put('comparison-trend-caption', `${({ hour: '小时', day: '日', week: '周一开始的周', month: '月', year: '年' })[bucket]} · ${settings.timeZoneId}`);
   put('comparison-metric-label', providerMetric === 'raw' ? '服务商原始量' : '服务商计费量');
   const chart = el('comparison-chart'); chart.replaceChildren(); chart.classList.remove('empty');
   const slots = chartSlots(buckets.map(row => ({ label: row.name, upload: '0', download: '0' })), range, bucket, settings.timeZoneId,
-    Math.max(25, Math.floor((chart.clientWidth || 600) / 12)));
+    Math.max(31, Math.floor((chart.clientWidth || 600) / 12)));
   if (!buckets.length || !slots) {
     chart.classList.add('empty'); chart.append(element('p', !buckets.length ? '没有已记录的时间桶，请调整范围或导入 CSV。' : '当前宽度无法清楚展示全部时间桶。\n请缩小日期范围或选择周/月；完整总量保留，分桶表可翻页查看。'));
   } else {
@@ -452,9 +460,9 @@ function chooseSource(source: string): void {
   if (!source) comparison = false;
   el<HTMLInputElement>('compare-toggle').checked = comparison;
   const select = el<HTMLSelectElement>('bucket');
-  const options: [Bucket, string][] = comparison ? [['hour', '按小时'], ['week', '按周'], ['month', '按月']] :
+  const options: [Bucket, string][] = comparison ? [['hour', '按小时'], ['day', '按日'], ['week', '按周'], ['month', '按月']] :
     [['hour', '按小时'], ['day', '按日'], ['week', '按周'], ['month', '按月'], ['year', '按年']];
-  if (!options.some(([value]) => value === bucket)) bucket = 'hour';
+  if (!options.some(([value]) => value === bucket)) bucket = period === 'day' ? 'hour' : period === 'year' ? 'month' : 'day';
   select.replaceChildren(...options.map(([value, label]) => { const option = element('option', label); option.value = value; return option; }));
   select.value = bucket;
   nodeKey = ''; page = 0; latestHistory = null; latestProvider = null; latestComparison = null; statisticLabels();
@@ -476,11 +484,11 @@ function formResult(id: string, value: string, isError = false): void { put(id, 
 
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) button.addEventListener('click', () => navigate(button.dataset.view!));
 document.querySelector('.brand')?.addEventListener('click', event => { event.preventDefault(); navigate('overview'); });
-for (const button of document.querySelectorAll<HTMLButtonElement>('[data-period]')) button.addEventListener('click', () => { period = button.dataset.period as Period; selectRange(); });
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-period]')) button.addEventListener('click', () => selectPeriod(button.dataset.period as Period));
 el('custom-range').addEventListener('submit', event => { event.preventDefault(); selectRange(); });
 el('previous-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, -1); selectRange(); } });
 el('next-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, 1); selectRange(); } });
-el('today-button').addEventListener('click', () => { if (period === 'custom') period = 'day'; anchor = dateInZone(new Date(), settings.timeZoneId); selectRange(); });
+el('today-button').addEventListener('click', () => { anchor = dateInZone(new Date(), settings.timeZoneId); if (period === 'custom') selectPeriod('day'); else selectRange(); });
 el('node-filter').addEventListener('change', () => { nodeKey = el<HTMLSelectElement>('node-filter').value; page = 0; void refresh(true); });
 el('bucket').addEventListener('change', () => { bucket = el<HTMLSelectElement>('bucket').value as Bucket; page = 0; void refresh(true); });
 el('unit').addEventListener('change', () => { unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
@@ -538,16 +546,22 @@ el('import-form').addEventListener('submit', async event => {
     const preview = await post<ImportPreview>('/api/imports/preview', request);
     if (revision !== importRevision) return;
     importRequest = request;
-    put('preview-details', `来源：${request.source}\n记录：${preview.rowCount.toLocaleString('zh-CN')} 条\n服务商原始量：${formatBytes(preview.rawBytes, unit)}（${exactBytes(preview.rawBytes)}）\n服务商计费量：${formatProviderBytes(preview.billedBytes, unit)}（${exactProviderBytes(preview.billedBytes)}）\n最早记录：${timestamp(preview.firstTime, request.timeZoneId)}\n最晚记录：${timestamp(preview.lastTime, request.timeZoneId)}`);
+    put('preview-details', `来源：${request.source}\n文件记录：${preview.rowCount.toLocaleString('zh-CN')} 条\n本次新增：${preview.newRowCount.toLocaleString('zh-CN')} 条\n跳过已存在：${preview.skippedRowCount.toLocaleString('zh-CN')} 条\n新增原始量：${formatBytes(preview.newRawBytes, unit)}（${exactBytes(preview.newRawBytes)}）\n新增计费量：${formatProviderBytes(preview.newBilledBytes, unit)}（${exactProviderBytes(preview.newBilledBytes)}）\n文件原始量：${formatBytes(preview.rawBytes, unit)}（${exactBytes(preview.rawBytes)}）\n文件计费量：${formatProviderBytes(preview.billedBytes, unit)}（${exactProviderBytes(preview.billedBytes)}）\n最早记录：${timestamp(preview.firstTime, request.timeZoneId)}\n最晚记录：${timestamp(preview.lastTime, request.timeZoneId)}`);
     el('import-warnings').replaceChildren(...(preview.warnings || []).map(warning => element('li', warning)));
-    show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate;
-    formResult('import-result', preview.duplicate ? '这个文件已经导入，不会重复记账。' : '预览完成。请确认来源与时区后导入。');
+    show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate || preview.warnings.length > 0;
+    formResult('import-result', preview.duplicate ? '全部记录已存在，不会重复记账。' : preview.warnings.length ?
+      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : '预览完成。相同来源按重复导出快照比较，保留文件内相同行的出现次数。请确认来源与时区后导入。');
   } catch (error) { if (revision === importRevision) formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('commit-import').addEventListener('click', async () => {
   if (!importRequest) return;
   const request = importRequest, button = el<HTMLButtonElement>('commit-import'); button.disabled = true;
-  try { await post('/api/imports/commit', request); invalidateImport(); formResult('import-result', '导入完成，已保存到独立服务商账本。可在统计来源中选择查看节点历史。'); await loadBatches(); await loadSources(); if (statisticsSource === request.source.trim()) await refresh(true); }
+    try {
+      const result = await post<ImportPreview>('/api/imports/commit', request); invalidateImport();
+      formResult('import-result', `导入完成：新增 ${result.newRowCount.toLocaleString('zh-CN')} 条，跳过 ${result.skippedRowCount.toLocaleString('zh-CN')} 条。${result.duplicate ?
+        '全部记录已存在，未新增批次。' : `新增原始量 ${exactBytes(result.newRawBytes)}，新增计费量 ${exactProviderBytes(result.newBilledBytes)}。已保存到独立服务商账本。`}可在统计来源中选择查看节点历史。`);
+      await loadBatches(); await loadSources(); if (statisticsSource === request.source.trim()) await refresh(true);
+    }
   catch (error) { formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('seed-demo').addEventListener('click', async () => {

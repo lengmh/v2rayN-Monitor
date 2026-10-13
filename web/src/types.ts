@@ -11,7 +11,7 @@ export interface HistoryResult {
   unbucketedUpload?: string; unbucketedDownload?: string;
   gaps?: { start: string; end: string; reason: string; isOpen: boolean }[];
 }
-export interface ImportPreview { hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime: string | null; lastTime: string | null; duplicate: boolean; warnings: string[] }
+export interface ImportPreview { hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime: string | null; lastTime: string | null; duplicate: boolean; warnings: string[]; newRowCount: number; skippedRowCount: number; newRawBytes: string; newBilledBytes: string }
 export interface ImportBatch { source: string; hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime?: string; lastTime?: string; importedAt?: string; timeZoneId?: string }
 export interface ProviderHistory {
   source: string; rawBytes: string; billedBytes: string; recordCount: number;
