@@ -20,7 +20,7 @@ v2rayN 本机采集是主来源，CSV 只是偶尔补充。HTML 为主要管理�
 
 ## 当前阶段
 
-v0.1.1 已正式发布。v0.2.0 两条 Issue 已登记：#15 为内核线、#16 为 CSV 线。S0.3 的当前构建计量路径受阻，S5.1 尚未开始适配实现；证据与下一确认边界见 docs/singbox-capability.md。版本范围：新增 sing-box / AnyTLS 普通单节点支持，并入 CSV 批次撤销与可选本地归档；现有 Xray 支持保留，TrafficMonitor 插件继续 deferred。新增功能按两条独立 Issue/PR 推进，当前核验记录不代表已完成适配或已取得 v0.2.0 正式发布授权。历史发布授权不复用于新版本。验收及未覆盖范围见 docs/STATUS.md，构建和合成测试不能替代未执行的实机验证。
+v0.1.1 已正式发布。v0.2.0 两条 Issue 已登记：#15 为内核线、#16 为 CSV 线。Issue #15 的扩展与 Monitor 预览已实现并通过合成链路；S0.3/S5.1–S5.3 仍缺真实客户端/节点验收，保持 blocked；证据与下一确认边界见 docs/singbox-capability.md。版本范围：新增 sing-box / AnyTLS 普通单节点支持，并入 CSV 批次撤销与可选本地归档；现有 Xray 支持保留，TrafficMonitor 插件继续 deferred。新增功能按两条独立 Issue/PR 推进，当前核验记录不代表已完成适配或已取得 v0.2.0 正式发布授权。历史发布授权不复用于新版本。验收及未覆盖范围见 docs/STATUS.md，构建和合成测试不能替代未执行的实机验证。
 
 ## 公开仓库边界
 
