@@ -106,7 +106,7 @@
       ],
       "acceptance": "明确输出能力等级：逐出站累计、活动配置累计、速度估算或不可用。不能用连接轮询推断已消失的短连接流量；速度乘时间的结果必须标为估算。",
       "stop_rule": "本轮只验证路径，不承诺所有构建与模式。用户未安装或不使用该内核时可 deferred，待 S5 再验证，不阻塞已证明的主内核，也不改以 CSV 作为主来源。",
-      "implementation_note": "2026-10-13 Issue #15：安装二进制隔离实验确认 Clash 累计量包含 direct，V2Ray API 未编入构建。S0.3 未满足可靠逐出站路径门槛，S5.1 尚未开始实现；候选接入方案和确认边界见 docs/singbox-capability.md。"
+      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
     },
     {
       "id": "S0.4",
@@ -451,7 +451,7 @@
       ],
       "acceptance": "可靠模式下原始累计差与数据库总量一致；若仅能估算，页面及导出全程标明估算，不能将其纳入“精确节点计量已通过”。",
       "stop_rule": "不存在可用可靠路径时公开保留限制；不伪造完成，不重写 v2rayN。",
-      "implementation_note": "2026-10-13 Issue #15：安装二进制隔离实验确认 Clash 累计量包含 direct，V2Ray API 未编入构建。S0.3 未满足可靠逐出站路径门槛，S5.1 尚未开始实现；候选接入方案和确认边界见 docs/singbox-capability.md。"
+      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
     },
     {
       "id": "S5.2",
@@ -460,7 +460,7 @@
       "depends_on": [
         "S5.1"
       ],
-      "status": "planned",
+      "status": "blocked",
       "work": "核对 v2rayN 活动 AnyTLS 配置、实际 sing-box 出站、进程代次与统计监听的关联，并验证累计范围是否包含 direct。仅对已证明的普通单节点提供归属；未知出口或无法排除其他流量时明确提示，不把全局量无条件记到当前节点。",
       "outputs": [
         "第二内核归属规则",
@@ -468,7 +468,7 @@
       ],
       "acceptance": "受控 direct 与 proxy 混合流量不会冒充单节点使用量；未知最终出口时显示活动配置或不支持，而不是全归当前选中节点。",
       "stop_rule": "本版不扩展 TUN、任意策略组、多跳链或多实例；无法核实的范围继续明确不支持。",
-      "implementation_note": "2026-10-13 用户确认纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
     },
     {
       "id": "S5.3",
@@ -477,7 +477,7 @@
       "depends_on": [
         "S5.2"
       ],
-      "status": "planned",
+      "status": "blocked",
       "work": "测试 Xray/sing-box 切换、计数代次和来源语义转换。复用账本、API 与图表，不维护第二套统计数据库；适配器误差状态只影响对应来源。",
       "outputs": [
         "跨内核回归",
@@ -485,7 +485,7 @@
       ],
       "acceptance": "跨内核切换不重复入账、不沿用错误单位，不损害既有第一内核历史；所有异常状态在同一页面可解释。",
       "stop_rule": "只修复当前两内核交接问题，不扩为其他客户端通用监控器。",
-      "implementation_note": "2026-10-13 用户确认纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
     },
     {
       "id": "S5.4",

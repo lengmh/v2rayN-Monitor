@@ -1,5 +1,30 @@
 # 初版实现与验证状态
 
+## 2026-10-14：Issue #15 Monitor 适配预览实现
+
+起点 a612ca5；同步 main 的 dc17de3 README 插图后实现 AnyTLS 采集，预览标识 0.2.0-preview.1。
+新增精确客户端 95f68d9 的有效配置比较、有限 V2Ray QueryStats 读取和扩展 SHA256 检查。
+仅读取 proxy 原始 int64，reset=false；不使用 Clash 全局量或原生连接历史补账。
+复用原活动 IndexId、采样前后快照、PID/创建时间/监听绑定及原子账本，API/Schema 未变。
+
+扩展更新为 1.14.1-monitor-test.2，新代次注册真实零计数，空闲即可建立基线。
+源码补丁和构建说明在 extensions/sing-box；实验核心保留原 Windows 构建标签及依赖清单。
+
+Windows 合成父进程 + 真实扩展/Xray 副本 + 生产 WindowsDiscovery + 独立 SQLite 验证通过：
+AnyTLS 单次 proxy 增量上传 162 / 下载 149 bytes 与账本一致；100 次 direct 及绕过核心不增长；
+采集器重开后找回 1,200 短连接上传 194,400 / 下载 178,800 bytes，记为恢复但未分时；
+核心重启、新侧文件未重载和 sing-box → Xray → sing-box 均正确重新建立基线。
+Xray 合成段原始增量为上传 0 / 下载 151 bytes，账本按实际返回值守恒；
+这是切换验证，不补充宣称新的 Xray 双向场景验收。测试夹具曾被核心回环防护拒绝，
+仅在临时服务端放行指定目标；未修改正式路由。
+
+最终 Release 构建零警告零错误，Core 248 / Server 31 / 前端 49 本地回归通过；扩展补丁与编译源码一致性检查通过。
+没有新增 NuGet/npm 依赖，没有数据库迁移。正式客户端/核心/Monitor 进程、配置、选择文件和
+系统代理前后未变；临时进程全部退出。仍未启动真实 v2rayN 加载扩展，
+实际 AnyTLS 的完整 TLS/传输、读数与真实账本、托盘安装/升级/退出待用户批准后验收。
+S0.3/S5.1–S5.3 保留实际接入缺口；CSV #16 planned，插件 deferred，未合并或发布 v0.2.0。
+
+
 ## 2026-10-14：Issue #15 文件式扩展核心合成验证
 
 用户授权测试无需重建 v2rayN 的文件接入路线。在公开 sing-box `1ac1a339` 构建实验 `1.14.1-monitor-test.1`，保留原 Windows 默认标签并增加 V2Ray API；仅为主 config.json 从程序旁有限端点文件启用 proxy 统计，未修改依赖版本或客户端。
