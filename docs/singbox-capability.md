@@ -1,10 +1,10 @@
 # sing-box / AnyTLS 统计能力核验
 
-核验日期：2026-10-13。基线：`32c5f02`。跟踪：[Issue #15](https://github.com/lengmh/v2rayN-Monitor/issues/15)。CSV 批次管理另见 [Issue #16](https://github.com/lengmh/v2rayN-Monitor/issues/16)。
+核验日期：2026-10-13–14。基线：`32c5f02`。跟踪：[Issue #15](https://github.com/lengmh/v2rayN-Monitor/issues/15)。CSV 批次管理另见 [Issue #16](https://github.com/lengmh/v2rayN-Monitor/issues/16)。
 
 ## 当前结论
 
-当前真实配置只启用 Clash API，但安装的 sing-box 1.14.1 也能运行原生 API。原生连接事件在隔离测试中能分类 proxy/direct 并保留短连接最终字节；慢接收实测会在连接未断开时丢失记录，关闭历史还会随 GC 清理且最多保留 1,000 条。尚无已验证的持久逐 proxy 累计和完整断开恢复路径，S0.3 与 S5.1 仍为 blocked；Monitor 的 AnyTLS 采集适配尚未实现，不宣称步骤 1–3 全部完成。
+当前真实配置仍只启用 Clash API，原安装构建未编入 V2Ray API。2026-10-14 的文件式扩展核心原型已在 Windows 合成 AnyTLS 中验证核心进程内逐 proxy 累计、直连排除及不读取期间的累计保留；该路径无需重建 v2rayN。原生事件方案仍有静默漏计与缓存清理限制。扩展尚未安装，真实 v2rayN 加载、节点等价及 Monitor 采集/账本未验收，因此当前正式环境的 S0.3/S5.1 仍 blocked，不能宣称步骤 1–3 全部完成。
 
 已完成两条 Issue 登记、版本核验、固定源码核读、安装二进制的隔离合成实验及用户手动切到 AnyTLS 后的只读实机观察。初次实验时实际核心仍为 Xray；后续实际 AnyTLS 证据见对应章节，不能把早期 Xray 配置当成 AnyTLS 运行证据。本轮原生 API 和并发实验仅使用同二进制副本、合成认证及回环目标，真实节点、路由、配置和运行核心未改变。
 
@@ -28,7 +28,7 @@
 | Clash `/traffic` | 每个一秒周期的累计差 | 全局，包含 direct | 不当作累计计数；无法补齐离线周期，也不能排除 direct |
 | Clash `/connections` 的 `uploadTotal` / `downloadTotal` | 原始整数累计 bytes；连接结束后保留 | 全局，包含 direct | 不能无条件归给活动 AnyTLS 节点 |
 | Clash 活动连接列表 | 当前活动连接及各自计数 | 可显示链路，但已结束短连接不在列表 | 不通过轮询推断完整节点累计量 |
-| V2Ray API | 源码提供按 outbound 计数与不清零读取 | 可按 `proxy` 统计；需构建和有效配置启用 | 当前安装构建不可用，尚无该路径实机证据 |
+| V2Ray API | 按 outbound 的进程内累计 bytes；不清零读取 | 可只统计 `proxy`；需构建和配置启用 | 原安装构建不可用；文件式扩展候选已通过 Windows 合成验证，实际客户端/节点未验收 |
 | 原生 `SubscribeStatus` | 全局整数累计 bytes 与周期增量 | 与 Clash 相同，包含 direct | 不能把总量全部算给活动节点 |
 | 原生 `SubscribeConnections` | 创建/更新/关闭事件及出站、链路、最终字节 | 可分类已观察连接；历史缓存会被清理，慢接收会丢事件 | 候选分类路径，尚非持久逐 proxy 累计；诊断对账仅在静止状态验证 |
 
@@ -104,15 +104,36 @@
 
 固定客户端启动参数由源码生成，没有已确认的可编辑附加参数入口。专用临时目录内准备了只作用于主 sing-box 的局部客户端补丁草案，约束附加文件仅为带认证的回环 API 服务；当前已安装客户端不具备该草案入口。补丁未编译、应用或提交，不提供用户直接修改整份配置模板的指令。长期设置/UI、正式接入和后续 Monitor 的双配置文件/进程绑定核验仍待实现。
 
+## 2026-10-14：文件式扩展核心原型
+
+固定客户端 `95f68d9` 的 `CoreInfoManager` 按 `sing-box-client`、`sing-box` 顺序查找可执行文件。为保留 v2rayN 原配置生成流程，实验在公开 sing-box 固定提交 `1ac1a339` 增加有限的统计文件入口，并保留原 Windows 默认标签、增加 `with_v2ray_api`；Go 1.26.8 构建成功，版本明确标为 `1.14.1-monitor-test.1`，依赖版本未改。此核心是自行构建的实验版本，不是原安装核心的同 SHA256 副本，未宣称定制二进制全部源码与公开树等价。
+
+拟安装仅新增 `bin/sing_box/sing-box-client.exe` 和旁边的 `monitor-stats.json`，保留原 `sing-box.exe` 与 v2rayN 主程序。原型仅在扩展文件名、单一主 `config.json` 且没有配置目录参数时读附加文件；附加文件只允许 `listen` 回环地址和非零端口，启用统计并固定只计 `proxy`。没有文件时统计不启用；未知字段、非回环地址、现有 V2Ray API 或缺少唯一 proxy 明确报错。测速/其他配置文件不读取此文件，主配置不写回。
+
+| Windows 合成场景 | proxy 专用计数 | 验证 |
+|---|---:|---|
+| 本地 AnyTLS proxy 请求 | 上传 11,958 / 下载 9,733 bytes | 与核心全局增量相等，实际链路为 proxy |
+| 核心内 direct 请求 | 0 / 0 bytes | 全局增加 11,958 / 9,733 bytes，实际链路为 direct |
+| 绕过核心 | 0 / 0 bytes | 全局也不增加 |
+| 不查询期间 1,200 个 proxy 短连接 | 上传 214,800 / 下载 157,200 bytes | 8 并发，全量保留，超过原生历史缓存边界 |
+| 不查询期间 1,200 个 direct 短连接 | 0 / 0 bytes | 全局增加 214,800 / 157,200 bytes |
+| 不查询期间 2,000 个等大小混合请求 | 上传 179,000 / 下载 131,000 bytes | proxy/direct 各 1,000 个，全局为两倍 |
+
+查询始终使用兼容 V2Ray 的 StatsService、`reset=false`；各批次不查询期间没有统计 RPC，短连接结束后仍可取得累计，重复新查询进程不清零。计数仍是核心进程内存状态，重启从零开始；新代次必须建立新基线，不能据此宣称跨核心重启补回旧量。
+
+同核心规范化比较确认除新增 `experimental.v2ray_api` 外 DNS、route、outbounds、inbounds、Clash 等字段一致，主配置源文件内容和修改时间未变。统计、Clash、入站监听同属扩展进程；仅有系统目录 conhost 控制台宿主，没有另一个代理子进程，停止后监听全部关闭。移开临时扩展文件后，同顺序规则选择原核心并成功运行合成 AnyTLS，原核心保持不变。文件选择测试是固定源码规则复现，没有启动第二份真实 v2rayN，不能代替真实客户端更新/退出/重载验收。
+
+定向 Go 检查与合成运行测试通过。全部主动流量为本地合成 AnyTLS/HTTP，外网请求 0，未复制真实节点配置或认证。前后真实配置、选择、系统代理、监听归属及客户端/核心/Monitor 进程代次未变；所有临时核心已退出，安装目录未新增实验文件。
+
+实验核心、示例端点文件、源码差异、许可证和摘要仅在专用临时目录的审阅包中，未作为正式资产发布。真实客户端加载、全部 TLS/传输等价、Monitor 发现/采集/事务/跨内核切换、托盘安装/卸载/升级及其他协议/TUN 均未由本轮验证。
+
 ## 下一步接入方案与确认边界
 
-要保留现有路由并实现可靠节点累计量，需要额外提供按 outbound 的累计统计能力。可优先核验同版本含 `with_v2ray_api` 的核心构建，并为客户端确定持久启用 `stats.outbounds=["proxy"]` 的接入点；所有统计查询使用 `reset=false`。
+已验证的候选是文件式扩展核心 + V2Ray 逐 proxy 累计。下一节点先将其接入 Monitor 的只读发现、回环监听/进程代次核验、`reset=false` 读取及原子账本；保留 Xray 和核心切换基线。扩展的临时副本结果可以作为实现依据，不替代实际客户端/节点验收。
 
-这条候选路径尚未完成构建、配置接入或实机验证。当前客户端没有核实过的仅追加统计设置入口，因此接入设计必须同时说明生成规则、入站/DNS/路由保留、监听绑定、备份与恢复方式，不能以完整模板或单次改写生成配置代替。
+实际安装前检查客户端版本、已存在的优先核心文件、统计端口及当前文件占用；保留原核心和客户端设置，记录两个新增文件及摘要。必须经用户批准再安装和重新加载真实核心。回退是退出扩展核心后移开新增文件并重新加载原核心；客户端/核心升级后的优先文件选择与兼容性仍需核对，托盘安装流程尚未实现。
 
-当前无需因核验而先更换核心。已完成同二进制副本的 proxy/direct、原生事件和慢接收实验。原生 API 是额外候选入口，但静默丢失、缓存清理及持续流量对账尚未解决，不能因其可运行而宣称严格逐 proxy 累计门槛已通过。若保留该门槛，仍需审阅持久计数接入或额外核心构建方案。若用户选择与 v2rayN 一致的全局量按活动节点归属口径，应先在 Issue 明确混入 direct 的限制，并更新验收条件，不能宣称该口径等同 Xray 的 proxy 计量。替换已安装核心、改动客户端设置、切换节点及重启真实核心仍分别按具体操作授权。
-
-如果保持当前构建和配置，Issue #15 保留 blocked；不会改用速度积分、活动连接轮询或全局量冒充精确节点累计。CSV Issue #16 保持 planned，插件继续 deferred。
+旧客户端启动参数补丁仅为历史草案，不再作为必须重建 v2rayN 的依据。原生事件方案仍不能保证累计完整；不采用速度积分、活动连接轮询或混合全局量冒充 proxy 累计。当前正式安装没有新增 API，S0.3/S5.1 在实际接入和验收前保持 blocked；CSV #16 planned，插件 deferred。
 
 ## 固定源码
 
@@ -128,5 +149,7 @@
 - [事件队列满时丢弃](https://github.com/SagerNet/sing/blob/v0.9.4/common/observable/subscriber.go)
 - [GC 清理回调](https://github.com/SagerNet/sing/blob/v0.9.4/common/cleanup/cleanup.go)
 - [客户端核心启动参数](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/Manager/CoreManager.cs)
+- [客户端核心文件优先顺序](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/Manager/CoreInfoManager.cs)
+- [核心读配置与合并入口](https://github.com/SagerNet/sing-box/blob/1ac1a339cb1223e9c70eae14c44411c75033c02d/cmd/sing-box/cmd_run.go)
 
 公开记录仅包含版本、字段、合成实验数值与接口结论。真实节点名、地址、认证、IndexId、完整配置和凭据哈希不进入仓库或 Issue。
