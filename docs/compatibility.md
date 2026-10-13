@@ -10,8 +10,8 @@ v0.1.0 目标为 Windows x64 + v2rayN **7.25.1** + Xray 普通单节点。2026-1
 | v2rayN 7.25.1 + Xray 普通单节点 | 只读发现 / 原始累计量 / 按活动配置归属 | 固定源码 + 合成回归；用户报告 `a3f2d80` 的重复配置切换失败，新规则的逐项实机记录未补充 |
 | VMess / VLESS / Trojan / Shadowsocks / SOCKS / HTTP | 仅对应单 proxy 出站映射 | 解析器合成回归；实机待验收 |
 | V2free 7.25.1 的 Hysteria2 + Xray | 按精确 fork 生成规则匹配服务器和 transport auth | 用户报告 `a3f2d80` 普通权限 Monitor 采集提升权限客户端、首次基线、连续记账、Monitor 重启恢复及字节守恒通过 |
-| V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；当前采集器未实现 | 实际活动核心、版本及统计接口待核实 |
-| sing-box | 未实现；Issue #15 接入路径待确认 | 安装 1.14.1 的隔离合成实验确认 Clash 全局累计含 direct，V2Ray API 未编入；S0.3 blocked，见 [能力核验](singbox-capability.md) |
+| V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；当前采集器未实现 | 实际核心/版本、基础活动配置与 Clash 监听只读核验；真实原生 API 未启用，完整 TLS/传输和新采集器未验收 |
+| sing-box | 未实现；Issue #15 接入路径待确认 | 安装 1.14.1 副本确认 Clash/原生总量含 direct、原生事件可分类但慢接收会静默丢失，关闭缓存会清理；V2Ray API 未编入。严格计量仍 blocked，见 [能力核验](singbox-capability.md) |
 | TUN / 策略组 / 多跳链 / 自定义配置 / 多实例 | 拒绝精确归属 | 不支持 |
 | 服务商六列 CSV | 精确十进制计费量、预览、独立账本、同来源导出快照按出现次数增量去重 | 合成输入/事务回归；真实 CSV 未导入开发库或上传；用户已整体认可相关修复并授权发布，未补充逐项真实 CSV 提交记录 |
 | TrafficMonitor / WebView2 | 未实现，也不依赖 | deferred |
