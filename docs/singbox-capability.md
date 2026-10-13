@@ -153,3 +153,30 @@ AnyTLS 切换后作只读核验。确认活动 ProfileItem 类型为 AnyTLS，�
 - [核心读配置与合并入口](https://github.com/SagerNet/sing-box/blob/1ac1a339cb1223e9c70eae14c44411c75033c02d/cmd/sing-box/cmd_run.go)
 
 公开记录仅包含版本、字段、合成实验数值与接口结论。真实节点名、地址、认证、IndexId、完整配置和凭据哈希不进入仓库或 Issue。
+
+## Monitor 0.2.0-preview.1 接入
+
+起点 a612ca5；同步 main 的 dc17de3 README 插图后实现 AnyTLS 采集，预览标识 0.2.0-preview.1。
+新增精确客户端 95f68d9 的有效配置比较、有限 V2Ray QueryStats 读取和扩展 SHA256 检查。
+仅读取 proxy 原始 int64，reset=false；不使用 Clash 全局量或原生连接历史补账。
+复用原活动 IndexId、采样前后快照、PID/创建时间/监听绑定及原子账本，API/Schema 未变。
+
+扩展更新为 1.14.1-monitor-test.2，新代次注册真实零计数，空闲即可建立基线。
+源码补丁和构建说明在 extensions/sing-box；实验核心保留原 Windows 构建标签及依赖清单。
+
+Windows 合成父进程 + 真实扩展/Xray 副本 + 生产 WindowsDiscovery + 独立 SQLite 验证通过：
+AnyTLS 单次 proxy 增量上传 162 / 下载 149 bytes 与账本一致；100 次 direct 及绕过核心不增长；
+采集器重开后找回 1,200 短连接上传 194,400 / 下载 178,800 bytes，记为恢复但未分时；
+核心重启、新侧文件未重载和 sing-box → Xray → sing-box 均正确重新建立基线。
+Xray 合成段原始增量为上传 0 / 下载 151 bytes，账本按实际返回值守恒；
+这是切换验证，不补充宣称新的 Xray 双向场景验收。测试夹具曾被核心回环防护拒绝，
+仅在临时服务端放行指定目标；未修改正式路由。
+
+最终 Release 构建零警告零错误，Core 248 / Server 31 / 前端 49 本地回归通过；扩展补丁与编译源码一致性检查通过。
+没有新增 NuGet/npm 依赖，没有数据库迁移。正式客户端/核心/Monitor 进程、配置、选择文件和
+系统代理前后未变；临时进程全部退出。仍未启动真实 v2rayN 加载扩展，
+实际 AnyTLS 的完整 TLS/传输、读数与真实账本、托盘安装/升级/退出待用户批准后验收。
+S0.3/S5.1–S5.3 保留实际接入缺口；CSV #16 planned，插件 deferred，未合并或发布 v0.2.0。
+
+
+[扩展源码补丁与构建说明](../extensions/sing-box/README.md)。
