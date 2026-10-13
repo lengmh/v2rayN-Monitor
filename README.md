@@ -1,3 +1,5 @@
+![v2rayN Monitor](./docs/images/readme-header.svg)
+
 # v2rayN Monitor
 
 以 **v2rayN 本机流量**为主来源的 Windows 托盘统计工具。关闭浏览器后仍持续采集；历史独立保存在本机 SQLite，支持按节点查看日、周、月、年趋势。
