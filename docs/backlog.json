@@ -106,7 +106,7 @@
       ],
       "acceptance": "明确输出能力等级：逐出站累计、活动配置累计、速度估算或不可用。不能用连接轮询推断已消失的短连接流量；速度乘时间的结果必须标为估算。",
       "stop_rule": "本轮只验证路径，不承诺所有构建与模式。用户未安装或不使用该内核时可 deferred，待 S5 再验证，不阻塞已证明的主内核，也不改以 CSV 作为主来源。",
-      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，用户已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S0.4",
@@ -451,7 +451,7 @@
       ],
       "acceptance": "可靠模式下原始累计差与数据库总量一致；若仅能估算，页面及导出全程标明估算，不能将其纳入“精确节点计量已通过”。",
       "stop_rule": "不存在可用可靠路径时公开保留限制；不伪造完成，不重写 v2rayN。",
-      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，用户已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S5.2",
@@ -468,7 +468,7 @@
       ],
       "acceptance": "受控 direct 与 proxy 混合流量不会冒充单节点使用量；未知最终出口时显示活动配置或不支持，而不是全归当前选中节点。",
       "stop_rule": "本版不扩展 TUN、任意策略组、多跳链或多实例；无法核实的范围继续明确不支持。",
-      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，用户已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S5.3",
@@ -485,7 +485,7 @@
       ],
       "acceptance": "跨内核切换不重复入账、不沿用错误单位，不损害既有第一内核历史；所有异常状态在同一页面可解释。",
       "stop_rule": "只修复当前两内核交接问题，不扩为其他客户端通用监控器。",
-      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，用户已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S5.4",
@@ -516,7 +516,7 @@
       "stop_rule": "交付预览及精确提交 CI；真实预览替换须授权，不宣称完整复杂配置计量已通过。",
       "issue": 15,
       "pull_request": 17,
-      "implementation_note": "2026-10-14 接手 df888c0；test.2 已实际加载，preview.1 unsupported_mode 且验证账本无游标/流量。preview.2 局部修复及隔离验证中，真实记账仍未验收。"
+      "implementation_note": "2026-10-14 c8ea870 的双平台 CI 与隔离回归通过；用户退出旧预览后已启动真实 preview.2，沿用独立验证目录。首接无回填、持续字节/游标守恒及4轮 reset=false 参考 RPC 范围核对通过；未取得同刻 RPC 精确匹配。真实受控 proxy/direct、切换与页面目视验收未补齐，仍 in_progress。见 docs/STATUS.md。"
     },
     {
       "id": "S5.6",
