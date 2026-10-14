@@ -529,6 +529,7 @@
       "acceptance": "未知出站不阻断独立已核实范围；不依赖可丢事件、活动连接轮询、速率积分或 group.Now() 补精确累计。增量/游标同批原子提交；必要 Schema 先隔离验证，真实迁移另行授权。",
       "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
       "issue": 18,
+      "pull_request": 20,
       "implementation_note": "2026-10-14 已开始独立批量 RPC 读取检查点：路由 tag 的完整计数与缺失/重复/无效原因分别返回；原单 proxy 接口复用且保持范围。纯回环真实 test.2 副本验证路由 tag 分离、并发短连接和重复只读查询。生产发现/账本未切换，实际成员归属、多范围身份与批量原子记账未实现；Schema 迁移仅有方向，未执行。见 docs/STATUS.md 与 docs/singbox-extension-scope.md。"
     },
     {
