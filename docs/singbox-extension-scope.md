@@ -7,7 +7,7 @@
 | 任务 | Issue / PR | 计量范围 | 当前边界 |
 |---|---|---|---|
 | S5.5 | #15 / Draft PR #17 | test.2 的路由直接匹配 `proxy` 的累计 | preview.2 代码/隔离回归/CI通过；真实首接基线与持续被动守恒通过，受控实机及页面验收待补；其他出站未知 |
-| S5.6 | #18 / Draft PR #20 | 多出站、策略组/urltest 的实际成员 | in_progress；第一批实现路由 tag 批量 RPC 读取，成员归属和多游标账本尚未实现 |
+| S5.6 | #18 / Draft PR #20 | 多出站、策略组/urltest 的实际成员 | in_progress；批量 RPC 与成员核心原型已有隔离证据，生产成员读取和多游标账本未实现 |
 | S5.7 | #19 / 后续独立 PR | 单次业务总量、链/各跳与自定义配置身份 | planned；实际生效来源和必要迁移先隔离验证 |
 
 S5.5 使用已核实的 test.2，生成配置不写回。只对唯一 AnyTLS `proxy` 比较所选 ProfileItem 的端点、认证、TLS 及默认值，再核对父子进程、标准参数、监听、二进制摘要和文件代次。其他出站不参与 IndexId 证明，也不会按当前选中节点归账。当前仍拒绝目标 `proxy` 的 detour、TUN、非空 endpoints、已有自定义 V2Ray API，以及未核实连接字段。
@@ -46,6 +46,18 @@ test.2 在路由层按匹配的 outbound tag 包装连接。路由匹配 selecto
 后续迁移拟增加独立计量范围表，并将游标主键改为 scope_key：范围表明确保存真实 instance_id、计量 basis、outbound 身份与可空的 IndexId 关联；旧 Xray / routed-proxy 范围保留既有节点键、分钟记录与未分时历史。业务维度与组/链维度不得混入同一总量查询。缺口及连续性失效也要按范围处理，未知某一范围不能清空其他已核实范围的游标。
 
 这是可审阅的迁移方向，不是已执行的迁移。落地前须提供完整 DDL、v1 → 新版映射与回滚步骤，使用合成旧库验证字节/节点键保留、多范围首次基线、部分不可用、重开恢复及批次失败回滚；真实旧账本迁移另取具体授权。本批不改变 user_version、Schema 或任何真实数据库。
+
+## S5.6 第二批：核心实际成员原型
+
+test.3 候选使用 [member-stats.patch](../extensions/sing-box/member-stats.patch)，叠加 test.2 补丁，依旧固定公开源码 `1ac1a339`、Go 1.26.8、Windows 默认标签加 with_v2ray_api。只在隔离配置显式启用 `stats.monitor_members`；文件式 sidecar 和生产 Monitor 白名单未改动。
+
+成员证据来自实际返回连接，ConnectionManager 从最终采用的 TCP/UDP 连接绑定后才开始复制业务字节；直接 handler 分支绑定实际转交的叶成员。嵌套组保留叶证据，并行拨号的未采用连接不会绑定；已有连接的归属冻结，不随后续选择重标。读写路径直接累计，关闭的短连接不依赖事件历史或消费者队列。
+
+原路由统计继续使用 `outbound>>>`，新成员统计使用 `monitor>>>member>>>`；`monitor>>>business>>>` 是已知代理的单次业务量，direct 单列 excluded，链/未知/未绑定前的字节留 unknown。未注册成员、非候选类型和有 outbound Dependencies 的叶不会混给已知成员。Monitor 的现有批量 RPC 接口仍只解析路由维度；读取新维度和多范围账本是下一批，不能仅从候选核心通过推断生产已支持。
+
+本地回归包含 4 个顶级 Go 测试、15 个子用例；真实候选副本验证 selector 的旧 TCP/UDP、嵌套组、8 并发 1,200 短连接、切换期间 200 请求、urltest 旧 TCP/新成员、direct 排除和链留 unknown。另用未改动同摘要 test.2 服务端，对照 AnyTLS/TLS 与 VMess：旧连接跨切换，8 并发的 1,200 AnyTLS / 200 VMess 短连接逐原始业务整数 bytes 守恒；候选核心重启所有新累计真实归零。不是 Windows 实际节点或 Monitor 重开/账本验收。
+
+首轮 UDP 夹具只接受 SOCKS IPv4 地址，遇到合法的其他地址形式断开；失败记录保留。只修正临时服务的地址解析，在新目录完成重跑。原始源码归档 + 两层补丁的 1,558 个文件与测试源码一致，重建二进制摘要与联测候选一致；go.mod/go.sum 未变。专用核心 CI 等待配置授权，现有 Monitor CI 仅核对 Monitor，不作为 Go 补丁验收。
 
 ## 实机边界
 

@@ -1,0 +1,506 @@
+--- /dev/null
++++ b/adapter/monitor.go
+@@ -0,0 +1,93 @@
++package adapter
++
++import (
++	"context"
++	"net"
++
++	"github.com/sagernet/sing/common"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// Optional context hook; existing trackers and builds without member statistics are unchanged.
++type MonitorContextTracker interface {
++	MonitorContext(context.Context, Outbound) context.Context
++}
++
++type MonitorMeter struct {
++	Bind     func(Outbound)
++	Upload   N.CountFunc
++	Download N.CountFunc
++}
++
++type monitorMeterKey struct{}
++
++func WithMonitorMeter(ctx context.Context, meter *MonitorMeter) context.Context {
++	return context.WithValue(ctx, monitorMeterKey{}, meter)
++}
++
++func MonitorMeterFromContext(ctx context.Context) *MonitorMeter {
++	meter, _ := ctx.Value(monitorMeterKey{}).(*MonitorMeter)
++	return meter
++}
++
++func BindMonitorOutbound(ctx context.Context, outbound Outbound) {
++	if meter := MonitorMeterFromContext(ctx); meter != nil {
++		if _, group := outbound.(OutboundGroup); !group {
++			meter.Bind(outbound)
++		}
++	}
++}
++
++type monitorOutbound interface{ MonitorOutbound() Outbound }
++
++type monitorConn struct {
++	net.Conn
++	outbound Outbound
++}
++
++func (c *monitorConn) MonitorOutbound() Outbound { return c.outbound }
++func (c *monitorConn) Upstream() any             { return c.Conn }
++func (c *monitorConn) ReaderReplaceable() bool   { return true }
++func (c *monitorConn) WriterReplaceable() bool   { return true }
++
++type monitorPacketConn struct {
++	net.PacketConn
++	outbound Outbound
++}
++
++func (c *monitorPacketConn) MonitorOutbound() Outbound { return c.outbound }
++func (c *monitorPacketConn) Upstream() any             { return c.PacketConn }
++func (c *monitorPacketConn) ReaderReplaceable() bool   { return true }
++func (c *monitorPacketConn) WriterReplaceable() bool   { return true }
++
++// Attach evidence to the returned connection, not shared dial context: a losing parallel
++// dial must not bind the business stream that uses another successfully returned connection.
++func MonitorConnection(ctx context.Context, conn net.Conn, selected Outbound) net.Conn {
++	if MonitorMeterFromContext(ctx) == nil {
++		return conn
++	}
++	if _, group := selected.(OutboundGroup); group {
++		return conn
++	}
++	return &monitorConn{Conn: conn, outbound: selected}
++}
++
++func MonitorPacketConnection(ctx context.Context, conn net.PacketConn, selected Outbound) net.PacketConn {
++	if MonitorMeterFromContext(ctx) == nil {
++		return conn
++	}
++	if _, group := selected.(OutboundGroup); group {
++		return conn
++	}
++	return &monitorPacketConn{PacketConn: conn, outbound: selected}
++}
++
++func BindMonitorConnection(ctx context.Context, conn any) {
++	if meter := MonitorMeterFromContext(ctx); meter != nil {
++		if chosen, ok := common.Cast[monitorOutbound](conn); ok {
++			meter.Bind(chosen.MonitorOutbound())
++		} else {
++			meter.Bind(nil) // Unproved attribution stays unknown; it is never a current-selection guess.
++		}
++	}
++}
+--- a/option/experimental.go
++++ b/option/experimental.go
+@@ -50,4 +50,5 @@
+-	Enabled   bool     `json:"enabled,omitempty"`
+-	Inbounds  []string `json:"inbounds,omitempty"`
+-	Outbounds []string `json:"outbounds,omitempty"`
+-	Users     []string `json:"users,omitempty"`
++	Enabled        bool     `json:"enabled,omitempty"`
++	Inbounds       []string `json:"inbounds,omitempty"`
++	Outbounds      []string `json:"outbounds,omitempty"`
++	Users          []string `json:"users,omitempty"`
++	MonitorMembers []string `json:"monitor_members,omitempty"`
+--- a/experimental/v2rayapi/stats.go
++++ b/experimental/v2rayapi/stats.go
+@@ -31,6 +31,7 @@
+-	createdAt time.Time
+-	inbounds  map[string]bool
+-	outbounds map[string]bool
+-	users     map[string]bool
+-	access    sync.Mutex
+-	counters  map[string]*atomic.Int64
++	createdAt      time.Time
++	inbounds       map[string]bool
++	outbounds      map[string]bool
++	users          map[string]bool
++	access         sync.Mutex
++	counters       map[string]*atomic.Int64
++	monitorMembers map[string]bool
+@@ -59,0 +61,12 @@
++	monitorMembers := make(map[string]bool)
++	for _, member := range options.MonitorMembers {
++		monitorMembers[member] = true
++		counters["monitor>>>member>>>"+member+">>>traffic>>>uplink"] = new(atomic.Int64)
++		counters["monitor>>>member>>>"+member+">>>traffic>>>downlink"] = new(atomic.Int64)
++	}
++	if len(monitorMembers) > 0 {
++		for _, dimension := range []string{"business", "excluded", "unknown"} {
++			counters["monitor>>>"+dimension+">>>traffic>>>uplink"] = new(atomic.Int64)
++			counters["monitor>>>"+dimension+">>>traffic>>>downlink"] = new(atomic.Int64)
++		}
++	}
+@@ -61,5 +74,6 @@
+-		createdAt: time.Now(),
+-		inbounds:  inbounds,
+-		outbounds: outbounds,
+-		users:     users,
+-		counters:  counters,
++		createdAt:      time.Now(),
++		inbounds:       inbounds,
++		outbounds:      outbounds,
++		users:          users,
++		counters:       counters,
++		monitorMembers: monitorMembers,
+@@ -69,0 +84,3 @@
++	if meter := adapter.MonitorMeterFromContext(ctx); meter != nil {
++		conn = bufio.NewCounterConn(conn, []N.CountFunc{meter.Upload}, []N.CountFunc{meter.Download})
++	}
+@@ -98,0 +116,3 @@
++	if meter := adapter.MonitorMeterFromContext(ctx); meter != nil {
++		conn = bufio.NewCounterPacketConn(conn, []N.CountFunc{meter.Upload}, []N.CountFunc{meter.Download})
++	}
+--- /dev/null
++++ b/experimental/v2rayapi/monitor_members.go
+@@ -0,0 +1,93 @@
++package v2rayapi
++
++import (
++	"context"
++	"sync"
++	"sync/atomic"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++)
++
++func (s *StatsService) MonitorContext(ctx context.Context, matched adapter.Outbound) context.Context {
++	if len(s.monitorMembers) == 0 {
++		return ctx
++	}
++	meter := &monitorMemberMeter{service: s}
++	if _, group := matched.(adapter.OutboundGroup); !group {
++		meter.bind(matched)
++	}
++	return adapter.WithMonitorMeter(ctx, &adapter.MonitorMeter{
++		Bind:     meter.bind,
++		Upload:   func(n int64) { meter.count(n, true) },
++		Download: func(n int64) { meter.count(n, false) },
++	})
++}
++
++type monitorCounterPair struct{ upload, download *atomic.Int64 }
++
++type monitorMemberMeter struct {
++	access  sync.Mutex
++	service *StatsService
++	bound   bool
++	member  monitorCounterPair
++	total   monitorCounterPair
++}
++
++func (m *monitorMemberMeter) bind(outbound adapter.Outbound) {
++	m.access.Lock()
++	defer m.access.Unlock()
++	if !m.bound {
++		m.bindLocked(outbound)
++	}
++}
++
++func (m *monitorMemberMeter) bindLocked(outbound adapter.Outbound) {
++	dimension := "unknown"
++	member := ""
++	// A leaf with outbound dependencies is a chain, not a proven independent member.
++	if outbound != nil && len(outbound.Dependencies()) == 0 {
++		switch outbound.Type() {
++		case C.TypeDirect:
++			dimension = "excluded"
++		case C.TypeSOCKS, C.TypeHTTP, C.TypeShadowsocks, C.TypeVMess, C.TypeVLESS, C.TypeTrojan, C.TypeAnyTLS, C.TypeHysteria2, C.TypeTUIC:
++			if m.service.monitorMembers[outbound.Tag()] {
++				dimension = "business"
++				member = outbound.Tag()
++			}
++		}
++	}
++	m.service.access.Lock()
++	pair := func(prefix string) monitorCounterPair {
++		return monitorCounterPair{
++			m.service.counters[prefix+">>>traffic>>>uplink"],
++			m.service.counters[prefix+">>>traffic>>>downlink"],
++		}
++	}
++	m.total = pair("monitor>>>" + dimension)
++	if member != "" {
++		m.member = pair("monitor>>>member>>>" + member)
++	}
++	m.service.access.Unlock()
++	m.bound = true
++}
++
++func (m *monitorMemberMeter) count(n int64, upload bool) {
++	m.access.Lock()
++	defer m.access.Unlock()
++	// Unexpected bytes before resolution freeze as unknown, not retroactively reassigned.
++	if !m.bound {
++		m.bindLocked(nil)
++	}
++	if upload {
++		if m.member.upload != nil {
++			m.member.upload.Add(n)
++		}
++		m.total.upload.Add(n)
++	} else {
++		if m.member.download != nil {
++			m.member.download.Add(n)
++		}
++		m.total.download.Add(n)
++	}
++}
+--- a/route/route.go
++++ b/route/route.go
+@@ -170,0 +171,3 @@
++		if monitor, ok := tracker.(adapter.MonitorContextTracker); ok {
++			ctx = monitor.MonitorContext(ctx, selectedOutbound)
++		}
+@@ -302,0 +306,3 @@
++		if monitor, ok := tracker.(adapter.MonitorContextTracker); ok {
++			ctx = monitor.MonitorContext(ctx, selectedOutbound)
++		}
+--- a/route/conn.go
++++ b/route/conn.go
+@@ -121,0 +122 @@
++	adapter.BindMonitorConnection(ctx, remoteConn)
+@@ -196,0 +198 @@
++		adapter.BindMonitorConnection(ctx, remoteConn)
+@@ -220,0 +223 @@
++	adapter.BindMonitorConnection(ctx, remotePacketConn)
+--- a/protocol/group/selector.go
++++ b/protocol/group/selector.go
+@@ -148 +148,2 @@
+-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
++	selected := s.selected.Load()
++	conn, err := selected.DialContext(ctx, network, destination)
+@@ -152 +153 @@
+-	return s.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
++	return s.interruptGroup.NewConn(adapter.MonitorConnection(ctx, conn, selected), interrupt.IsExternalConnectionFromContext(ctx)), nil
+@@ -156 +157,2 @@
+-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
++	selected := s.selected.Load()
++	conn, err := selected.ListenPacket(ctx, destination)
+@@ -160 +162 @@
+-	return s.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
++	return s.interruptGroup.NewPacketConn(adapter.MonitorPacketConnection(ctx, conn, selected), interrupt.IsExternalConnectionFromContext(ctx)), nil
+@@ -166,0 +169 @@
++		adapter.BindMonitorOutbound(ctx, selected)
+@@ -176,0 +180 @@
++		adapter.BindMonitorOutbound(ctx, selected)
+--- a/protocol/group/urltest.go
++++ b/protocol/group/urltest.go
+@@ -163 +163 @@
+-		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
++		return s.group.interruptGroup.NewConn(adapter.MonitorConnection(ctx, conn, outbound), interrupt.IsExternalConnectionFromContext(ctx)), nil
+@@ -181 +181 @@
+-		return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
++		return s.group.interruptGroup.NewPacketConn(adapter.MonitorPacketConnection(ctx, conn, outbound), interrupt.IsExternalConnectionFromContext(ctx)), nil
+--- a/cmd/sing-box/cmd_monitor_stats_test.go
++++ b/cmd/sing-box/cmd_monitor_stats_test.go
+@@ -3,0 +4 @@
++	"bytes"
+@@ -4,0 +6,6 @@
++	"github.com/sagernet/sing-box/adapter"
++	OA "github.com/sagernet/sing-box/adapter/outbound"
++	C "github.com/sagernet/sing-box/constant"
++	api "github.com/sagernet/sing-box/experimental/v2rayapi"
++	M "github.com/sagernet/sing/common/metadata"
++	"net"
+@@ -6,0 +14 @@
++	"sync"
+@@ -7,0 +16 @@
++	"time"
+@@ -67,0 +77,191 @@
++
++// These are synthetic connection-path counters, never client/profile identity acceptance.
++type monitorSyntheticOutbound struct{ OA.Adapter }
++
++func (o *monitorSyntheticOutbound) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	panic("not a test dial")
++}
++func (o *monitorSyntheticOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	panic("not a test listen")
++}
++
++type monitorSyntheticGroup struct{ monitorSyntheticOutbound }
++
++func (g *monitorSyntheticGroup) Now() string   { panic("instantaneous group selection must not be read") }
++func (g *monitorSyntheticGroup) All() []string { return []string{"a", "b"} }
++
++type monitorSyntheticConn struct{ *bytes.Reader }
++
++func (c *monitorSyntheticConn) Write(p []byte) (int, error)      { return len(p), nil }
++func (c *monitorSyntheticConn) Close() error                     { return nil }
++func (c *monitorSyntheticConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
++func (c *monitorSyntheticConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
++func (c *monitorSyntheticConn) SetDeadline(time.Time) error      { return nil }
++func (c *monitorSyntheticConn) SetReadDeadline(time.Time) error  { return nil }
++func (c *monitorSyntheticConn) SetWriteDeadline(time.Time) error { return nil }
++
++type monitorSyntheticPacket struct{ net.PacketConn }
++
++func monitorConnForTest() net.Conn { return &monitorSyntheticConn{bytes.NewReader(make([]byte, 100))} }
++func monitorLeaf(tag, kind string, dependencies ...string) adapter.Outbound {
++	return &monitorSyntheticOutbound{OA.NewAdapter(kind, tag, []string{"tcp", "udp"}, dependencies)}
++}
++func monitorGroupForTest() adapter.Outbound {
++	return &monitorSyntheticGroup{monitorSyntheticOutbound{OA.NewAdapter(C.TypeSelector, "g", []string{"tcp", "udp"}, []string{"a", "b"})}}
++}
++func monitorServiceForTest() *api.StatsService {
++	return api.NewStatsService(option.V2RayStatsServiceOptions{Enabled: true, Outbounds: []string{"g"}, MonitorMembers: []string{"a", "b"}})
++}
++func monitorCountsForTest(t *testing.T, s *api.StatsService) map[string]int64 {
++	t.Helper()
++	response, err := s.QueryStats(context.Background(), &api.QueryStatsRequest{Reset_: false})
++	if err != nil {
++		t.Fatal(err)
++	}
++	counts := make(map[string]int64)
++	for _, stat := range response.Stat {
++		counts[stat.Name] = stat.Value
++	}
++	return counts
++}
++func monitorCheckPair(t *testing.T, counts map[string]int64, prefix string, up, down int64) {
++	t.Helper()
++	if counts[prefix+">>>traffic>>>uplink"] != up || counts[prefix+">>>traffic>>>downlink"] != down {
++		t.Fatalf("%s pair mismatch: %v", prefix, counts)
++	}
++}
++func monitorExercise(t *testing.T, conn net.Conn) {
++	t.Helper()
++	if n, err := conn.Read(make([]byte, 3)); n != 3 || err != nil {
++		t.Fatal("synthetic read", n, err)
++	}
++	if n, err := conn.Write(make([]byte, 2)); n != 2 || err != nil {
++		t.Fatal("synthetic write", n, err)
++	}
++}
++
++func TestMonitorMemberBinding(t *testing.T) {
++	t.Run("old_connection_and_no_Now", func(t *testing.T) {
++		s := monitorServiceForTest()
++		g := monitorGroupForTest()
++		ctx := s.MonitorContext(context.Background(), g)
++		inbound := s.RoutedConnection(ctx, monitorConnForTest(), adapter.InboundContext{}, nil, g)
++		chosen := adapter.MonitorConnection(ctx, monitorConnForTest(), monitorLeaf("a", C.TypeSOCKS))
++		chosen = adapter.MonitorConnection(ctx, chosen, g) // Nested group preserves the returned leaf.
++		adapter.BindMonitorConnection(ctx, chosen)
++		monitorExercise(t, inbound)
++		adapter.BindMonitorOutbound(ctx, monitorLeaf("b", C.TypeSOCKS))
++		monitorExercise(t, inbound)
++		counts := monitorCountsForTest(t, s)
++		monitorCheckPair(t, counts, "monitor>>>member>>>a", 6, 4)
++		monitorCheckPair(t, counts, "monitor>>>member>>>b", 0, 0)
++		monitorCheckPair(t, counts, "monitor>>>business", 6, 4)
++		monitorCheckPair(t, counts, "outbound>>>g", 6, 4)
++		monitorCheckPair(t, counts, "monitor>>>unknown", 0, 0)
++	})
++	t.Run("returned_winner_not_first_successful_attempt", func(t *testing.T) {
++		s := monitorServiceForTest()
++		g := monitorGroupForTest()
++		ctx := s.MonitorContext(context.Background(), g)
++		_ = adapter.MonitorConnection(ctx, monitorConnForTest(), monitorLeaf("a", C.TypeSOCKS))
++		winner := adapter.MonitorConnection(ctx, monitorConnForTest(), monitorLeaf("b", C.TypeSOCKS))
++		adapter.BindMonitorConnection(ctx, winner)
++		inbound := s.RoutedConnection(ctx, monitorConnForTest(), adapter.InboundContext{}, nil, g)
++		monitorExercise(t, inbound)
++		counts := monitorCountsForTest(t, s)
++		monitorCheckPair(t, counts, "monitor>>>member>>>a", 0, 0)
++		monitorCheckPair(t, counts, "monitor>>>member>>>b", 3, 2)
++	})
++	t.Run("packet_connection_evidence", func(t *testing.T) {
++		s := monitorServiceForTest()
++		g := monitorGroupForTest()
++		ctx := s.MonitorContext(context.Background(), g)
++		packet := adapter.MonitorPacketConnection(ctx, &monitorSyntheticPacket{}, monitorLeaf("b", C.TypeSOCKS))
++		packet = adapter.MonitorPacketConnection(ctx, packet, g)
++		adapter.BindMonitorConnection(ctx, packet)
++		meter := adapter.MonitorMeterFromContext(ctx)
++		meter.Upload(3)
++		meter.Download(2)
++		monitorCheckPair(t, monitorCountsForTest(t, s), "monitor>>>member>>>b", 3, 2)
++	})
++	cases := []struct {
++		name      string
++		leaf      adapter.Outbound
++		dimension string
++	}{
++		{"direct_excluded", monitorLeaf("direct", C.TypeDirect), "excluded"},
++		{"unregistered_unknown", monitorLeaf("unregistered", C.TypeSOCKS), "unknown"},
++		{"chain_unknown", monitorLeaf("a", C.TypeSOCKS, "b"), "unknown"},
++		{"unresolved_unknown", nil, "unknown"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			s := monitorServiceForTest()
++			g := monitorGroupForTest()
++			ctx := s.MonitorContext(context.Background(), g)
++			adapter.BindMonitorOutbound(ctx, tc.leaf)
++			monitorExercise(t, s.RoutedConnection(ctx, monitorConnForTest(), adapter.InboundContext{}, nil, g))
++			counts := monitorCountsForTest(t, s)
++			monitorCheckPair(t, counts, "monitor>>>"+tc.dimension, 3, 2)
++			monitorCheckPair(t, counts, "monitor>>>business", 0, 0)
++			monitorCheckPair(t, counts, "monitor>>>member>>>a", 0, 0)
++			monitorCheckPair(t, counts, "monitor>>>member>>>b", 0, 0)
++		})
++	}
++	t.Run("early_bytes_stay_unknown", func(t *testing.T) {
++		s := monitorServiceForTest()
++		g := monitorGroupForTest()
++		ctx := s.MonitorContext(context.Background(), g)
++		inbound := s.RoutedConnection(ctx, monitorConnForTest(), adapter.InboundContext{}, nil, g)
++		monitorExercise(t, inbound)
++		adapter.BindMonitorOutbound(ctx, monitorLeaf("a", C.TypeSOCKS))
++		monitorExercise(t, inbound)
++		counts := monitorCountsForTest(t, s)
++		monitorCheckPair(t, counts, "monitor>>>unknown", 6, 4)
++		monitorCheckPair(t, counts, "monitor>>>business", 0, 0)
++	})
++}
++
++func TestMonitorMemberConcurrentIndependentConnections(t *testing.T) {
++	s := monitorServiceForTest()
++	g := monitorGroupForTest()
++	var workers sync.WaitGroup
++	for worker := 0; worker < 8; worker++ {
++		workers.Add(1)
++		go func(worker int) {
++			defer workers.Done()
++			tag := "a"
++			if worker%2 != 0 {
++				tag = "b"
++			}
++			for i := 0; i < 100; i++ {
++				ctx := s.MonitorContext(context.Background(), g)
++				adapter.BindMonitorOutbound(ctx, monitorLeaf(tag, C.TypeSOCKS))
++				conn := s.RoutedConnection(ctx, monitorConnForTest(), adapter.InboundContext{}, nil, g)
++				monitorExercise(t, conn)
++			}
++		}(worker)
++	}
++	workers.Wait()
++	counts := monitorCountsForTest(t, s)
++	monitorCheckPair(t, counts, "monitor>>>member>>>a", 1200, 800)
++	monitorCheckPair(t, counts, "monitor>>>member>>>b", 1200, 800)
++	monitorCheckPair(t, counts, "monitor>>>business", 2400, 1600)
++	monitorCheckPair(t, counts, "monitor>>>unknown", 0, 0)
++}
++
++func TestMonitorMembersDisabledPreservesOriginalCounters(t *testing.T) {
++	s := api.NewStatsService(option.V2RayStatsServiceOptions{Enabled: true, Outbounds: []string{"g"}})
++	g := monitorGroupForTest()
++	original := context.Background()
++	ctx := s.MonitorContext(original, g)
++	if ctx != original || adapter.MonitorMeterFromContext(ctx) != nil {
++		t.Fatal("disabled hook changed context")
++	}
++	monitorExercise(t, s.RoutedConnection(ctx, monitorConnForTest(), adapter.InboundContext{}, nil, g))
++	counts := monitorCountsForTest(t, s)
++	if len(counts) != 2 {
++		t.Fatal("member counters enabled without opt-in", counts)
++	}
++	monitorCheckPair(t, counts, "outbound>>>g", 3, 2)
++}
