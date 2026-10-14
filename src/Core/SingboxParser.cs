@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections.ObjectModel;
 using System.Text.Json;
 
 namespace V2rayNMonitor.Core;
@@ -82,6 +83,55 @@ public static class SingboxParser
             return true;
         }
         catch (JsonException) { return false; }
+    }
+
+    /// <summary>
+    /// Projects candidates from a configuration bound to an already verified routed-proxy snapshot.
+    /// This does not verify a running core, enable collection, or map other members to subscriptions.
+    /// </summary>
+    public static bool TryReadMemberCatalog(XraySnapshot snapshot, ReadOnlyMemory<byte> configurationJson,
+        out SingboxMemberCatalog? catalog, out string reason)
+    {
+        catalog = null;
+        reason = "snapshot_changed";
+        if (snapshot.CoreName != "sing-box" || string.IsNullOrEmpty(snapshot.InstanceId)
+            || !snapshot.Generation.StartsWith(XrayParser.Hash(configurationJson.Span) + ":", StringComparison.Ordinal)) return false;
+        reason = "unsupported_configuration";
+        try
+        {
+            using var doc = JsonDocument.Parse(configurationJson);
+            var root = doc.RootElement;
+            if (!UniqueKeys(root) || !Empty(Read(root, "endpoints"))) return false;
+            var inbounds = Read(root, "inbounds");
+            if (inbounds.ValueKind == JsonValueKind.Array && inbounds.EnumerateArray().Any(x => Text(x, "type") == "tun")) return false;
+            var outbounds = Read(root, "outbounds");
+            if (outbounds.ValueKind != JsonValueKind.Array) return false;
+            var entries = outbounds.EnumerateArray().ToArray();
+            if (entries.Any(x => Text(x, "tag").Length == 0 || Text(x, "type").Length == 0)
+                || entries.Select(x => Text(x, "tag")).Distinct(StringComparer.Ordinal).Count() != entries.Length) return false;
+            var candidates = new Dictionary<string, SingboxMemberIdentity>(StringComparer.Ordinal);
+            var unavailable = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var entry in entries)
+            {
+                var tag = Text(entry, "tag");
+                var type = Text(entry, "type");
+                var unavailableReason = tag.Contains(">>>", StringComparison.Ordinal) ? "invalid_statistics_tag"
+                    : !Empty(Read(entry, "detour")) ? "dependent_outbound"
+                    : type is "selector" or "urltest" ? "group_not_member"
+                    : type == "direct" ? "excluded_outbound"
+                    : type is not ("socks" or "http" or "shadowsocks" or "vmess" or "vless" or "trojan" or "anytls" or "hysteria2" or "tuic")
+                        ? "unsupported_member_type" : null;
+                if (unavailableReason is not null) unavailable.Add(tag, unavailableReason);
+                else candidates.Add(tag, new(tag, type, tag == "proxy" && type == "anytls"
+                    && !string.IsNullOrEmpty(snapshot.NodeId) ? snapshot.NodeId : null));
+            }
+            catalog = new(snapshot.InstanceId, snapshot.Generation, snapshot.ProcessIdentity,
+                new ReadOnlyDictionary<string, SingboxMemberIdentity>(candidates),
+                new ReadOnlyDictionary<string, string>(unavailable));
+            reason = "ready";
+            return true;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { return false; }
     }
 
     public static bool MatchesSelectedConnection(IReadOnlyDictionary<string, string?> profile,

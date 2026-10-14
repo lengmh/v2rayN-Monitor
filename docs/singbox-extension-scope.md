@@ -53,11 +53,21 @@ test.3 候选使用 [member-stats.patch](../extensions/sing-box/member-stats.pat
 
 成员证据来自实际返回连接，ConnectionManager 从最终采用的 TCP/UDP 连接绑定后才开始复制业务字节；直接 handler 分支绑定实际转交的叶成员。嵌套组保留叶证据，并行拨号的未采用连接不会绑定；已有连接的归属冻结，不随后续选择重标。读写路径直接累计，关闭的短连接不依赖事件历史或消费者队列。
 
-原路由统计继续使用 `outbound>>>`，新成员统计使用 `monitor>>>member>>>`；`monitor>>>business>>>` 是已知代理的单次业务量，direct 单列 excluded，链/未知/未绑定前的字节留 unknown。未注册成员、非候选类型和有 outbound Dependencies 的叶不会混给已知成员。Monitor 的现有批量 RPC 接口仍只解析路由维度；读取新维度和多范围账本是下一批，不能仅从候选核心通过推断生产已支持。
+原路由统计继续使用 `outbound>>>`，新成员统计使用 `monitor>>>member>>>`；`monitor>>>business>>>` 是已知代理的单次业务量，direct 单列 excluded，链/未知/未绑定前的字节留 unknown。未注册成员、非候选类型和有 outbound Dependencies 的叶不会混给已知成员。第三批另交付新维度读取接口，生产入口与多范围账本仍未接入，不能仅从候选核心通过推断生产已支持。
 
 本地回归包含 4 个顶级 Go 测试、15 个子用例；真实候选副本验证 selector 的旧 TCP/UDP、嵌套组、8 并发 1,200 短连接、切换期间 200 请求、urltest 旧 TCP/新成员、direct 排除和链留 unknown。另用未改动同摘要 test.2 服务端，对照 AnyTLS/TLS 与 VMess：旧连接跨切换，8 并发的 1,200 AnyTLS / 200 VMess 短连接逐原始业务整数 bytes 守恒；候选核心重启所有新累计真实归零。不是 Windows 实际节点或 Monitor 重开/账本验收。
 
 首轮 UDP 夹具只接受 SOCKS IPv4 地址，遇到合法的其他地址形式断开；失败记录保留。只修正临时服务的地址解析，在新目录完成重跑。原始源码归档 + 两层补丁的 1,558 个文件与测试源码一致，重建二进制摘要与联测候选一致；go.mod/go.sum 未变。新增独立核心CI，固定源码归档摘要及Go1.26.8，应用补丁后回归并构建Windows候选；具体结果见 STATUS。现有 Monitor CI 仅核对 Monitor，不作为 Go 补丁验收，CI 不部署新核心或迁移账本。
+
+## S5.6 第三批：成员读取与配置绑定身份目录
+
+`ReadMembersAsync` / `TryReadMembersResponse` 使用单次相同的只读 QueryStats；`V2RayMemberStatistics` 分别保存 `Members`、`UnavailableMembers`、`Totals`、`UnavailableTotals`。Totals 的键仅为 business / excluded / unknown，不与成员或路由组相加。完全不存在的计数仍是 missing_counter，proto3 省略 value 的实际计数才是零。旧 test.2 路由计数不能作为成员证据；任何不能可靠解析的 wire 仍拒绝整个响应。空成员列表允许仅检查三总量，原路由 API 仍要求非空 tag。
+
+`TryReadMemberCatalog` 的输入必须是独立核实的快照和对应配置字节；校验 sing-box 及配置代次匹配后，投影目录的 InstanceId / Generation / ProcessIdentity 与候选 tag / protocol。既有 AnyTLS proxy 的 IndexId 可沿用该核实快照，其余候选保持空 IndexId，哪怕名称或连接字段相同也不匹配订阅。selector/urltest 不当成员，direct 排除，detour/未支持类型/统计分隔符 tag 留不可用；TUN、endpoints 和重复 tag/字段拒绝目录。目录没有持久账本键，不伪造实例后缀，不保留端点、口令或完整配置。候选存在不证明成员统计已启用或计数可用，也不替代 Windows 进程/监听、完整连接字段与前后快照核实。
+
+test.3 的 `stats.monitor_members` 是显式 tag 数组，不是布尔开关。纯回环新读取器联测使用 `["fixture-a","fixture-b"]`：旧长连接跨组切换保留 A，A/B 每方向 114/97 bytes，business 211、excluded 42，而 route-group 为 253；只在流量停止后比较，不宣称 RPC 跨维度同刻原子。两个新读取器并发重读稳定，核心重启改变代次并真实归零；test.2 路由组 17 bytes 可读，新维度全部 missing_counter。身份目录使用合成快照，不能包装为完整生产多出站发现。首轮夹具误用 bool 的失败保留，修正夹具后在新目录通过。
+
+本批 WindowsDiscovery 仍调用单 proxy API，现装 test.2、sidecar、二进制白名单、v1 Schema、账本与页面均不变。完整多出站自动身份及批量持久采样仍待后续，下一批先完成完整 DDL/映射/回滚方案与隔离账本验证；真实账本不自动迁移。
 
 ## 实机边界
 

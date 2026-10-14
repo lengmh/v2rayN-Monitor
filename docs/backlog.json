@@ -530,7 +530,7 @@
       "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
       "issue": 18,
       "pull_request": 20,
-      "implementation_note": "2026-10-14 第一批批量路由 RPC 已交付。第二批 test.3 显式启用的实际成员原型通过本地 Go 回归、真实核心回环 selector TCP/UDP/嵌套/并发短连接/urltest 旧TCP、AnyTLS/TLS 与 VMess 未改动服务端业务字节对照、核心重启零计数及两层补丁重构建一致性。原路由/sidecar/生产白名单和账本不变，新维度读取、身份与批量原子账本未实现。新增独立Go CI，固定源码/摘要/Go的Windows回归与构建，精确提交结果见STATUS；不能沿用 Monitor CI 作为核心证据。Schema 仅有迁移方向。见 docs/STATUS.md 与 docs/singbox-extension-scope.md。"
+      "implementation_note": "2026-10-14 批量路由 RPC、test.3 核心实际成员原型及独立 Go CI 已交付。第三批新增成员/三个独立总量读取及配置绑定身份目录，9 项新增回归、真实 test.3/test.2 副本的旧连接跨切换、direct 排除、重开读取器/核心和旧版本缺失不补零通过。目录使用既有核实快照，仅 proxy 关联 IndexId，其余候选独立 tag；联测快照为合成，不代表完整 Windows 多出站身份核实。生产入口、sidecar、白名单、Schema、API/页面及账本保持原范围。下一批先完成完整迁移方案及隔离多范围账本验证，真实迁移另取授权。见 docs/STATUS.md 与 docs/singbox-extension-scope.md。"
     },
     {
       "id": "S5.7",

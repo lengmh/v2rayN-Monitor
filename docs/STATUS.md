@@ -1,5 +1,21 @@
 # 初版实现与验证状态
 
+## 2026-10-14：S5.6 / PR #20 成员读取与配置绑定身份目录
+
+起点为 `e1f868bfe2c2aee4ab7fd2bc2a782015e0c25df4`，工作树干净、本地/远端一致，PR #20 保持 Open / Draft。本批范围为成员读取与身份接口。本批不切换 WindowsDiscovery 生产入口，不改变核心补丁、test.2 白名单、运行文件、依赖、Schema 或真实数据库。
+
+新增 `V2RayStatistics.ReadMembersAsync` / `TryReadMembersResponse`，单次 `reset=false` RPC 读取 `monitor>>>member>>>{tag}` 和 business / excluded / unknown 三个独立维度；成员、各总量及其不可用原因分别返回，不拿路由 tag 补成员，不跨维度求和。与原路由读取复用相同 HTTP/2、数值回环、65,536 bytes 上限及严格 wire/int64 解析；缺失、重复、越界各自保持不可用，坏帧拒绝整个响应。空成员列表只读三种总量，原路由及单 proxy API 行为保留。
+
+新增 `SingboxParser.TryReadMemberCatalog`，只从已独立核实的 sing-box 快照及匹配配置代次投影候选身份。目录保存真实 instance、配置代次、核心代次和独立 tag / protocol；仅既有核实路径的 AnyTLS `proxy` 关联快照 IndexId，其他出站不靠名称、相同连接字段或组选择关联订阅。组、direct、detour、未支持类型和不能编码为统计名的 tag 单列不可用；TUN、endpoints、重复 tag / JSON 字段拒绝目录。候选目录不证明统计已启用，也不替代进程/监听、完整连接字段、采样前后稳定性或其他 ProfileItem 的身份核实；不会生成伪造 instance_id 或新账本键。
+
+实际本地命令与结果：复用已核实便携 .NET SDK 10.0.401，`dotnet restore ... --source <既有本地缓存>`、Release `dotnet build ... --no-restore`、Core / Server `dotnet test ... --no-build --no-restore` 全部通过；构建零警告零错误，Core 274 / Server 32。既有回归文件新增 9 项覆盖维度分离、同名成员/总量、int64/真实零值、局部不可用、test.2 不回退补零、坏帧、单次只读 RPC、身份绑定及保留未知。前端未改，本地不重跑前端或浏览器。
+
+另外使用本批生产 Core 读取器、新进程及已核对摘要的 test.3 / test.2 副本进行纯回环 SOCKS/echo 联测：test.3 空闲成员及三总量真实为零；旧 A 连接跨 selector 切换后仍计 A，A / B 每方向 114 / 97 bytes 与服务端 payload 相符，business 每方向 211、direct excluded 42，路由组每方向 253，不把组计数冒充成员或再次相加。两个并发新读取器重复 `reset=false` 结果稳定；核心重启改变目录核心代次，累计真实归零。test.2 的路由组每方向 17 bytes 可读，但成员及新总量全部 `missing_counter`。身份目录在此联测中来自合成快照，不升级为生产 WindowsDiscovery 或真实订阅多出站映射验收。
+
+首轮临时夹具将 `monitor_members` 写成 bool，核心解码明确要求 tag 数组，启动退出 1；保留日志，仅修正临时夹具为 `["fixture-a","fixture-b"]`，在新目录重跑通过。没有为失败修改生产代码或吞掉断言。全部隔离核心已退出，证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-issue18-member-reader-20261014`，主要记录为 `build.log`、`core-tests.log`、`server-tests.log`、`integration2-result.json`。对应提交的远端 CI 独立核对，不沿用旧绿灯。
+
+S5.6 保持 in_progress：本批交付新读取接口及配置绑定身份目录，生产采样、完整多出站发现/身份、持久多范围及批量原子账本仍未接入，API/页面仍是原 routed-proxy 范围。下一批先完成可审阅的多范围迁移方案和隔离账本验证；真实迁移、运行文件替换、核心重载和节点切换仍需具体授权。S5.7 / #19 保持 planned。
+
 ## 2026-10-14：S5.6 / PR #20 独立扩展 CI
 
 接手起点为 `80c33396396487e3717d4948edd13f78a3a12877`，工作树干净、本地/远端一致，PR #20 仍 Open / Draft，基础 PR #17 未合并。独立扩展工作流范围已确定，本轮只新增独立扩展工作流及可复用构建脚本，不改变现有 Monitor CI、依赖版本、核心补丁、生产白名单、Schema 或运行程序。
