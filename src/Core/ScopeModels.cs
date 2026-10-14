@@ -15,7 +15,10 @@ public sealed record ScopeBatch(string InstanceId, string SessionId, string Gene
 public sealed record ScopeCommit(string Status, IReadOnlyDictionary<long, string> Scopes);
 public sealed record ScopeInfo(long Id, string InstanceId, MeasurementScope Scope);
 public sealed record ScopeQuery(string Basis, DateTimeOffset Start, DateTimeOffset End, string TimeZoneId,
-    string Bucket = "day", long? ScopeId = null, int Page = 0, int PageSize = 50);
+    string Bucket = "day", long? ScopeId = null, int Page = 0, int PageSize = 50)
+{
+    public string? ScopeName { get; init; }
+}
 public sealed record ScopeTrafficRow(string Basis, long ScopeId, string Name, string Start, string End,
     string Upload, string Download, string Quality, bool PartialCoverage);
 public sealed record ScopeTotal(long ScopeId, string Name, string Upload, string Download,

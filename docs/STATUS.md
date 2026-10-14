@@ -1,5 +1,21 @@
 # 初版实现与验证状态
 
+## 2026-10-15：S5.6 第七批 / Windows opt-in 源码接入
+
+起点 `1284f0c4afee9ddd81b3896cd1c9794e6dafdfad`；第六批提交的 Monitor PR/push `38624549751` / `38624536312` 及独立扩展 PR `38624548405` 全部通过。先完成到Windows接入处，实际部署/迁移另按具体范围。没有替换实际运行文件、修改真实 sidecar、重载核心、启动真实预览或迁移真实库。
+
+新增显式 `--scope-ledger`：同一数据目录仍受原 mutex 限制，默认启动保持原 v1/test.2 路径；新模式只创建全新 v2 或打开已验证 v2，已有 v1 拒绝且不打开 provider 初始化器。迁移执行器独立，不随正常启动调用。WindowsDiscovery 新模式复用原只读 ProfileItem/连接参数、客户端版本、WMI/原生进程代次、父子/标准命令、监听所属 PID、文件稳定性及采样前后 generation guard。仍要求可核实的独立 AnyTLS proxy 锚点，TUN/endpoints/proxy 链/自定义 API 不放宽；其他独立候选按配置摘要+tag 分账，不猜订阅 IndexId。
+
+ScopeCollector 将完整配置目录投影为成员及 business/excluded/unknown 独立范围，未启用/缺失的累计保持 unavailable。采集循环根据已核实完整目录明确退休旧范围，提交后才 acknowledge guard；整帧/RPC/发现失败保留缺口和连续性边界，首次无身份的缺口保持 NULL scope/collector origin，后续完整目录成功只关闭此类 collector 缺口，legacy 缺口不被关闭。正常 API 默认当前主 basis，另有显式单 basis `/api/scope-history`；CSV 带 basis，名称筛选不合并身份。页面展示成员口径和 partial 状态，不跨维度相加；完整维度切换器及新模式实时速率未交付。
+
+test.3 的文件式 sidecar 原来不能启用成员，本批新增第三层 member-sidecar.patch 及 test.4，仍固定公开源码/归档/Go 1.26.8/Windows 标签/依赖。只有明确的 monitor_members tag 数组启用成员；不允许节点/路由覆盖，原 listen-only 不开启新维度。默认 test.2 白名单不变；opt-in 只接受本地已验证 test.4 SHA256 `B1C6F3AA48F21AE070EF283D10AE946C189421F7C9F498CCAA5657D2B0E7E15E`。源码重构建、Go 5 顶级/22 子用例、依赖清单不变及真实核心副本 sidecar→HTTP/2 读取→合成绑定 v2 首接零基线通过，所有隔离子进程已退出；不升级为真实 v2rayN/Windows 身份验收，也不自动接受不同摘要的 CI EXE。
+
+本地整方案 Release build 最终零警告零错误，Core 309 / Server 34 / 前端 52 项全部通过，已包含末次备份父目录门禁、CSV basis/scope_key 及遗留缺口 origin 的全量复验。新增 6 项 Core 投影/sidecar/前后稳定边界/局部缺失/持久化/Xray 回归、2 项 API/启动门禁和1项成员 DOM 回归。源代码/计划/diff、候选与源码摘要在本轮清单核对，远端精确提交 CI 另行记录，不沿用旧绿灯。
+
+失败记录保留：编译先暴露 out 参数 lambda 捕获和跨平台 test seam 的 CA1416，修为本地变量及显式原生调用边界，未禁用警告；Server 合成夹具在活动 SQLite 文件上使用 File.ReadAllBytes 触发共享冲突，改为正常停止后核对并恢复测试生命周期；前端隔离副本缺三个源码夹具且新增状态夹具漏 null 速率，补齐夹具后52项全过。依赖 cache lock 的摘要不同只因根 preview.1/preview.2 版本，逐项核对全部依赖/直接版本完全相同后复用，不安装或升级依赖。子进程曾继承 NODE_TLS_REJECT_UNAUTHORIZED=0，末次前端验证仅在该子进程解除此值，并关闭 npm 更新提示，未修改全局环境。
+
+证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-windows-scope-20261015`：build*.log、Core/Server TRX、web-tests-final.log、core/artifacts/build-provenance.json、probe/result.json 与隔离核心日志、最终 checkpoint/CI；候选未部署。S5.6 in_progress，S5.7 planned。Windows 源码接入已交付，下一步为经具体授权的实机接入与受控验收；新库优先，真实历史迁移另行确认，不合并或发布。
+
 ## 2026-10-15：S5.6 第六批 / 受控离线迁移执行器
 
 起点 `817b72c1b6c10f8aea650e4c88005a50f388f5bf`，工作树干净，PR #20 Open / Draft。先完成到Windows源码接入，真实部署/迁移仍保留具体授权边界。本批新增 `ScopeLedgerMigration.Migrate(historyPath, backupPath)`，不由正常启动或现有 Server 调用。原 v1 Ledger 行为不改。

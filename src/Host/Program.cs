@@ -23,8 +23,11 @@ internal static class Program
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
         using var mutex = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created);
         if (!created) { MessageBox.Show("v2rayN Monitor 已在此数据目录运行，请从系统托盘打开。", "v2rayN Monitor"); return; }
-        try { Application.Run(new TrayContext(root, demo)); }
-        catch (Exception) { MessageBox.Show("启动失败。请确认数据目录可写、磁盘空间足够且应用文件完整。历史数据库不会被自动删除。", "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        var scopeMode = args.Contains("--scope-ledger", StringComparer.OrdinalIgnoreCase);
+        try { Application.Run(new TrayContext(root, demo, scopeMode)); }
+        catch (Exception) { MessageBox.Show(scopeMode
+            ? "多范围启动失败。请使用全新目录或已受控迁移的 v2 账本；不会自动升级 v1。请检查目录权限、磁盘空间及应用文件。原有历史保留。"
+            : "启动失败。请确认数据目录可写、磁盘空间足够且应用文件完整。历史数据库不会被自动删除。", "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { mutex.ReleaseMutex(); }
     }
 }
@@ -37,10 +40,11 @@ internal sealed class TrayContext : ApplicationContext
     private readonly CancellationTokenSource stop = new();
     private readonly Task collectTask;
     private readonly string directory;
-    public TrayContext(string dataDir, bool demo)
+    public TrayContext(string dataDir, bool demo, bool scopeMode = false)
     {
         directory = dataDir;
-        server = MonitorServer.StartAsync(dataDir, Path.Combine(AppContext.BaseDirectory, "wwwroot"), demo).GetAwaiter().GetResult();
+        server = MonitorServer.StartAsync(dataDir, Path.Combine(AppContext.BaseDirectory, "wwwroot"), demo,
+            useScopeLedger: scopeMode).GetAwaiter().GetResult();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开统计页面", null, (_, _) => Open());
         menu.Items.Add("选择 v2rayN 数据目录…", null, (_, _) => ChooseDirectory());
@@ -98,6 +102,11 @@ internal sealed class TrayContext : ApplicationContext
     private async Task CollectAsync()
     {
         using var discovery = new WindowsDiscovery();
+        if (server.Scopes is { } scopes)
+        {
+            await CollectScopesAsync(discovery, scopes);
+            return;
+        }
         CounterSample? previous = null;
         while (!stop.IsCancellationRequested)
         {
@@ -145,6 +154,48 @@ internal sealed class TrayContext : ApplicationContext
                     discovery.AcknowledgePersistence();
                 }
                 catch (Exception) { /* Failed writes do not advance the durable cursor or acknowledge the guard. */ }
+            }
+            try { await Task.Delay(TimeSpan.FromSeconds(1), stop.Token); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+    private async Task CollectScopesAsync(WindowsDiscovery discovery, ScopeLedger ledger)
+    {
+        var basis = "actual_member";
+        while (!stop.IsCancellationRequested)
+        {
+            try
+            {
+                var reading = await discovery.ReadScopesAsync(server.Settings.V2rayNPath, stop.Token);
+                if (reading.Batch is { } batch)
+                {
+                    var result = ScopeCollector.Commit(ledger, batch);
+                    discovery.AcknowledgePersistence();
+                    var unavailable = result.Scopes.Values.Count(x => x == "unavailable");
+                    basis = batch.Readings.Any(x => x.Scope.Basis == "actual_member") ? "actual_member" : "legacy_proxy";
+                    var baseline = result.Scopes.Values.All(x => x is "baseline" or "reset");
+                    server.SetStatus(new(unavailable != 0 ? "partial" : baseline ? "baseline" : "collecting",
+                        reading.Message + (unavailable == 0 ? "" : $" {unavailable} 个范围计数未知，未补零。"),
+                        reading.CurrentNode, batch.At, CollectionBasis: basis));
+                }
+                else
+                {
+                    ledger.RecordGap(DateTimeOffset.UtcNow, reading.State, reading.InvalidateContinuity);
+                    discovery.AcknowledgePersistence();
+                    server.SetStatus(new(reading.State, reading.Message, reading.CurrentNode,
+                        CollectionBasis: basis));
+                }
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+            catch (Exception)
+            {
+                try
+                {
+                    ledger.RecordGap(DateTimeOffset.UtcNow, "collector_error", discovery.RequiresBaseline);
+                    discovery.AcknowledgePersistence();
+                }
+                catch (Exception) { /* Failed persistence must not acknowledge the generation guard. */ }
+                server.SetStatus(new("error", "多范围采集或原子写入失败，已有历史保留。", CollectionBasis: basis));
             }
             try { await Task.Delay(TimeSpan.FromSeconds(1), stop.Token); }
             catch (OperationCanceledException) { break; }

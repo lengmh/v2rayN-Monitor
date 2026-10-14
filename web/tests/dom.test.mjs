@@ -58,6 +58,19 @@ test('historical scope warning survives pagination and the capped gap details', 
   assert.ok(get('quality-notice').textContent.includes('组和其他代理的流量未知'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
+test('opt-in member basis stays explicit without adding aggregate dimensions', async t => {
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'partial', message: '实际成员维度，缺失不补零。', currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false, collectionBasis: 'actual_member' }),
+    '/api/history': () => Response.json({ ...history, basis: 'actual_member', gapCount: 1,
+      gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:00:00Z', reason: 'unsupported_mode', isOpen: true, origin: 'legacy' }] })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.ok(get('status-dot').classList.contains('partial'));
+  assert.ok(get('quality-notice').textContent.includes('实际成员维度'));
+  assert.ok(get('quality-notice').textContent.includes('business、excluded、unknown'));
+  assert.ok(get('quality-notice').textContent.includes('历史遗留开放缺口'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
 test('backend node labels are inserted as text, not HTML', async t => {
   const name = '<img src=x onerror=alert(1)>';
   const { w, get } = await fixture(t, { '/api/history': () => Response.json({ ...history, nodes: [{ ...history.nodes[0], name }], records: [{ ...history.records[0], nodeName: name }] }) });

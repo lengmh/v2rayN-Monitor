@@ -32,6 +32,7 @@ public sealed class WindowsDiscovery : IDisposable
     private readonly XrayGenerationGuard guard = new();
     private readonly SemaphoreSlim gate = new(1, 1);
     internal const string ApprovedSingboxSha256 = "C053F7C9D82C7FC241E60045ADFB399A44F4FDEB4E12CEF91C5F95244E3301BA";
+    internal const string ApprovedMemberSingboxSha256 = "B1C6F3AA48F21AE070EF283D10AE946C189421F7C9F498CCAA5657D2B0E7E15E";
     private string? verifiedExtension;
 
     // The single collection loop calls this only after Ledger.Accept/RecordGap commits.
@@ -95,6 +96,80 @@ public sealed class WindowsDiscovery : IDisposable
         finally { gate.Release(); }
     }
 
+    public async Task<ScopeCollectorReading> ReadScopesAsync(string dataRoot, CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows()) return new(null, "unsupported_platform", "多范围发现只支持 Windows。");
+        if (string.IsNullOrWhiteSpace(dataRoot))
+        {
+            guard.InvalidateContinuity();
+            return new(null, "needs_directory", "请选择 v2rayN 数据目录。", InvalidateContinuity: true);
+        }
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ScopeCapture CaptureMembers()
+            {
+                // This delegate is invoked by a portable testable pipeline; keep its native boundary explicit.
+                if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+                var snapshot = Capture(dataRoot, true, out var catalog, out var enabled);
+                return new(snapshot, catalog, enabled);
+            }
+            return await ReadScopesBoundAsync(CaptureMembers, async (capture, token) =>
+            {
+                try
+                {
+                    return capture.Snapshot.CoreName == "sing-box"
+                        ? (await V2RayStatistics.ReadMembersAsync(client, capture.Snapshot.MetricsEndpoint,
+                            capture.Catalog!.Candidates.Keys.ToArray(), token).ConfigureAwait(false), null)
+                        : (null, await ReadXrayCounters(capture.Snapshot.MetricsEndpoint, token).ConfigureAwait(false));
+                }
+                catch (IOException) { throw new HttpRequestException("Statistics response interrupted."); }
+            },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (DiscoveryException e)
+        { guard.InvalidateContinuity(); return new(null, e.State, e.SafeMessage, InvalidateContinuity: true); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        { return new(null, "collector_stopped", "采集已停止。", InvalidateContinuity: guard.RequiresBaseline); }
+        catch (Exception e) when (e is OperationCanceledException or HttpRequestException)
+        { return new(null, "interface_unavailable", "统计接口暂时不可用，未知不能记为零。", InvalidateContinuity: guard.RequiresBaseline); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or SqliteException
+            or ManagementException or Win32Exception or ArgumentException or InvalidOperationException or System.Security.SecurityException)
+        { guard.InvalidateContinuity(); return new(null, "unavailable", "无法核实进程、配置或身份，本次保留缺口。", InvalidateContinuity: true); }
+        finally { gate.Release(); }
+    }
+
+    // The test seam supplies synthetic captures/counters; native process discovery is not bypassed in production.
+    internal async Task<ScopeCollectorReading> ReadScopesBoundAsync(Func<ScopeCapture> capture,
+        Func<ScopeCapture, CancellationToken, Task<(V2RayMemberStatistics? Members, XrayCounters? Legacy)>> read,
+        CancellationToken cancellationToken)
+    {
+        var before = capture();
+        if (!guard.Observe(before.Snapshot, out var reason))
+            return new(null, reason, "配置、核心或身份尚未稳定。", before.Snapshot.NodeName, guard.RequiresBaseline);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+        var counters = await read(before, timeout.Token).ConfigureAwait(false);
+        var at = DateTimeOffset.UtcNow;
+        var after = capture();
+        if (!guard.Accept(before.Snapshot, after.Snapshot, out reason))
+            return new(null, reason, "采样前后核心、配置或身份变化，本次保留缺口。", after.Snapshot.NodeName, true);
+        ScopeBatch batch;
+        if (after.Snapshot.CoreName == "sing-box")
+        {
+            // An unusable whole RPC remains a complete directory of unavailable scopes.
+            var stats = counters.Members ?? new V2RayMemberStatistics(new Dictionary<string, XrayCounters>(),
+                new Dictionary<string, string>(), new Dictionary<string, XrayCounters>(), new Dictionary<string, string>());
+            batch = ScopeCollector.Project(after, stats, at, guard.RequiresBaseline);
+        }
+        else if (counters.Legacy is { } legacy)
+            batch = ScopeCollector.ProjectLegacy(after.Snapshot, legacy, at, guard.RequiresBaseline);
+        else return new(null, "missing_counters", "proxy 计数不可用。", after.Snapshot.NodeName, guard.RequiresBaseline);
+        return new(batch, "connected", after.Snapshot.CoreName == "sing-box"
+            ? "实际成员维度；business、excluded、unknown 单独保存，不相加。"
+            : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。", after.Snapshot.NodeName, guard.RequiresBaseline);
+    }
+
     private async Task<XrayCounters?> ReadXrayCounters(Uri endpoint, CancellationToken cancellationToken)
     {
         using var response = await client.GetAsync(endpoint, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
@@ -113,8 +188,13 @@ public sealed class WindowsDiscovery : IDisposable
     }
 
     [SupportedOSPlatform("windows")]
-    private XraySnapshot Capture(string root)
+    private XraySnapshot Capture(string root) => Capture(root, false, out _, out _);
+
+    [SupportedOSPlatform("windows")]
+    private XraySnapshot Capture(string root, bool memberMode, out SingboxMemberCatalog? catalog,
+        out IReadOnlyList<string> enabledMembers)
     {
+        catalog = null; enabledMembers = [];
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         if (!Path.IsPathFullyQualified(root)) throw Fail("needs_directory", "请选择 v2rayN 数据目录的完整路径。");
         var guiPath = Path.Combine(root, "guiConfigs", "guiNConfig.json");
@@ -133,7 +213,7 @@ public sealed class WindowsDiscovery : IDisposable
         byte[]? statisticsBytes = null;
         if (singbox && File.Exists(statisticsPath))
             statisticsBytes = ReadStableFile(statisticsPath, 4096, out statisticsStamp);
-        var node = ReadProfile(databasePath, selection.IndexId, guiBytes, configBytes, out var configuration, statisticsBytes);
+        var node = ReadProfile(databasePath, selection.IndexId, guiBytes, configBytes, out var configuration, statisticsBytes, memberMode);
         var processes = ReadProcesses();
         var parents = processes.Where(p => p.Name.Equals("v2rayN.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
         // An unreadable candidate cannot be silently discarded in favour of a readable one.
@@ -165,7 +245,7 @@ public sealed class WindowsDiscovery : IDisposable
         var coreStartedAt = core.StartedAt!.Value;
         var parentStartedAt = parent.StartedAt!.Value;
         var listenerIdentity = ReadListenerIdentity(configuration!.MetricsEndpoint, core.Pid);
-        if (singbox) VerifyExtension(core);
+        if (singbox) VerifyExtension(core, memberMode);
         if (Stamp(guiPath) != guiStamp || Stamp(configPath) != configStamp
             || (singbox && Stamp(statisticsPath) != statisticsStamp))
             throw Fail("snapshot_changed", "配置在读取过程中发生变化；本次采样保留为缺口。");
@@ -175,18 +255,28 @@ public sealed class WindowsDiscovery : IDisposable
         var generation = XrayParser.Hash(configBytes) + ":" + configStamp.WrittenAt.UtcTicks.ToString(CultureInfo.InvariantCulture);
         if (singbox) generation += ":" + XrayParser.Hash(statisticsBytes!) + ":" + statisticsStamp!.WrittenAt.UtcTicks;
         var writtenAt = singbox && statisticsStamp!.WrittenAt > configStamp.WrittenAt ? statisticsStamp.WrittenAt : configStamp.WrittenAt;
-        return new(instanceId, selection.IndexId, node, processIdentity, generation, coreStartedAt,
+        var snapshot = new XraySnapshot(instanceId, selection.IndexId, node, processIdentity, generation, coreStartedAt,
             writtenAt, listenerIdentity, configuration.MetricsEndpoint, configuration.CoreName, configuration.Scope);
+        if (singbox && memberMode)
+        {
+            if (!SingboxParser.TryReadMemberCatalog(snapshot, configBytes, out catalog, out _) ||
+                !SingboxParser.TryReadMemberStatisticsSettings(statisticsBytes!, out _, out enabledMembers))
+                throw Fail("unsupported_member_configuration", "成员目录或 sidecar 范围无法核实；不猜测归属。");
+            var candidates = catalog!.Candidates;
+            if (enabledMembers.Any(x => !candidates.ContainsKey(x)))
+                throw Fail("unsupported_member_configuration", "成员目录或 sidecar 范围无法核实；不猜测归属。");
+        }
+        return snapshot;
     }
 
-    private void VerifyExtension(ProcessInfo core)
+    private void VerifyExtension(ProcessInfo core, bool memberMode = false)
     {
         var stamp = Stamp(core.ExecutablePath);
-        var identity = string.Join('|', core.Pid, core.StartedAt!.Value.UtcTicks, core.ExecutablePath, stamp);
+        var identity = string.Join('|', core.Pid, core.StartedAt!.Value.UtcTicks, core.ExecutablePath, stamp, memberMode);
         if (identity == verifiedExtension) return;
         using var stream = new FileStream(core.ExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
-        if (hash != ApprovedSingboxSha256 || Stamp(core.ExecutablePath) != stamp)
+        if (hash != (memberMode ? ApprovedMemberSingboxSha256 : ApprovedSingboxSha256) || Stamp(core.ExecutablePath) != stamp)
             throw Fail("unsupported_core", "sing-box 扩展与此预览已核实的构建不一致；当前流量保持未知。");
         verifiedExtension = identity;
     }
@@ -196,7 +286,7 @@ public sealed class WindowsDiscovery : IDisposable
         || name.Equals("sing-box-client.exe", StringComparison.OrdinalIgnoreCase);
 
     internal static string ReadProfile(string path, string indexId, byte[] guiBytes, byte[] configBytes,
-        out XrayEffectiveConfiguration configuration, byte[]? statisticsBytes = null)
+        out XrayEffectiveConfiguration configuration, byte[]? statisticsBytes = null, bool allowMemberStatistics = false)
     {
         configuration = null!;
         if (!File.Exists(path)) throw Fail("missing_database", "所选目录中没有 guiConfigs/guiNDB.db。");
@@ -235,7 +325,7 @@ public sealed class WindowsDiscovery : IDisposable
             // Classify the selected protocol before parsing Xray-only fields so AnyTLS does
             // not misleadingly ask the user to enable Xray metrics in a sing-box config.
             var parsed = type == 11
-                ? SingboxParser.TryReadConfiguration(configBytes, statisticsBytes!, out var parsedConfiguration, out var configurationReason)
+                ? SingboxParser.TryReadConfiguration(configBytes, statisticsBytes!, out var parsedConfiguration, out var configurationReason, allowMemberStatistics)
                 : XrayParser.TryReadConfiguration(configBytes, out parsedConfiguration, out configurationReason);
             if (!parsed)
                 throw configurationReason == "invalid_statistics_configuration"
