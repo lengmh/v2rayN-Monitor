@@ -1,12 +1,12 @@
 # 多范围账本 v2 迁移提案
 
-状态为 proposal，仅用于 #18 / S5.6 的审阅与隔离验证。生产 `Ledger` 仍使用 v1，本文件和 [SQL](scope-ledger-v2.sql) 不由应用加载，也未执行真实迁移。提出 Schema 不等于批准真实账本变更。
+已有文件的迁移仍为 proposal。#18 / S5.6 第五批新增独立 `ScopeLedger`，将同一 [SQL](scope-ledger-v2.sql) 嵌入 Core，仅用于显式创建全新空 v2 文件。现有 `Ledger`、Host 和 Server 仍走 v1，不调用新版，也没有真实迁移。实现新库和批量记账不等于批准真实账本变更。
 
 ## 目标与选择
 
 同一真实实例需要保存多个成员的独立游标，也需要保存 business、excluded、unknown 等独立维度。v1 的 `cursors.instance_id` 主键无法表示这些范围。v2 使用范围表和以 `scope_id` 为主键的游标，保留真实 `instance_id`，不添加伪造实例后缀。
 
-实际启动路径将本机记录保存到 `history.db`，服务商记录保存到独立的 `provider.db`，见 `MonitorServer` 构造顺序。本提案只迁移 `history.db`。新增 `measurement_scopes`、`scope_cursors`、`scope_batches`、`scope_minutes`、`scope_unallocated`、`scope_gaps`，复制旧本机历史到明确的 `legacy_proxy` 范围。旧五表保留，便于核对与失败恢复；v2 后续本机写入只进入新表，不能同时向新旧表写入或从两套表累计同一历史。这个选择会暂时增加历史占用，未来清理另行评估，本批不删除旧表。`provider.db` 不执行本迁移 SQL、不更改版本标记或计费列。
+实际启动路径将本机记录保存到 `history.db`，服务商记录保存到独立的 `provider.db`，见 `MonitorServer` 构造顺序。本提案只迁移 `history.db`。新增 `measurement_scopes`、`scope_cursors`、`scope_batches`、`scope_minutes`、`scope_unallocated`、`scope_gaps`，复制旧本机历史到明确的 `legacy_proxy` 范围。旧五表保留，便于核对与失败恢复；v2 字节、游标和缺口只写新表，不能同时向新旧表记账或从两套表累计同一历史。`nodes` 作为外键身份目录，只允许插入新的已核实关联，不改写旧行；新版名称以 `measurement_scopes.name` 为准。这个选择会暂时增加历史占用，未来清理另行评估，本批不删除旧表。`provider.db` 不执行本迁移 SQL、不更改版本标记或计费列。
 
 v1 没有保存核心类型或计量 basis。不能从节点名称、协议猜测旧量是 Xray、routed-proxy、实际成员或全量业务；全部标记 `legacy_proxy`，说明为「历史活动配置 proxy，具体核心维度未存储」。旧 history node key 和 IndexId 原样保留，不强行升级证据。
 
@@ -85,11 +85,22 @@ v1 没有保存核心类型或计量 basis。不能从节点名称、协议猜�
 
 ## 查询与页面前置
 
-新版查询须显式选择一个 basis，默认旧 API 仅查 legacy_proxy。节点明细、范围筛选、CSV 导出与质量标记一起携带 scope/basis；同名不同身份保留独立条目。actual_member 可以在同一维度内汇总互斥成员；business 单独作为核心已核实代理业务量。不能把 legacy_proxy、business、actual_member 或 routed_outbound 相加当全部使用量，不能再把 excluded 或 unknown 加入已知代理业务。
+新版查询须显式选择一个 basis，未来兼容的旧 API 仅查 legacy_proxy；当前旧 API 仍使用未改动的 v1 Ledger。节点明细、范围筛选、CSV 导出与质量标记一起携带 scope/basis；同名不同身份保留独立条目。actual_member 可以在同一维度内汇总互斥成员；business 单独作为核心已核实代理业务量。不能把 legacy_proxy、business、actual_member 或 routed_outbound 相加当全部使用量，不能再把 excluded 或 unknown 加入已知代理业务。
 
 identity_kind=outbound 的跨配置范围不承诺逻辑节点延续；没有证据时不能自动合并到同名成员。恢复量只有完全包含查询区间才进入确定总量，部分重叠单列且不按比例摊分；缺口披露不能被明细分页裁掉。
 
-实现生产查询、旧 API 兼容、跨午夜/时区及分页仍是后续验收，不由本批 SQL 或临时记账原型替代。
+第五批已实现独立 Core 查询及分页，时间分桶复用 `Ledger.BucketLabel`；生产 API、CSV 导出、页面和完整实机查询仍待接入，不由 SQL 或临时记账原型替代。
+
+## 独立 v2 Core 使用契约
+
+- `ScopeLedger.CreateNew(path)` 用 `FileMode.CreateNew` 保留全新文件，任何已有路径均拒绝，包括空文件和 v1 历史。随后复用 v1 空库初始化器并在单个事务执行同一 SQL；失败保留文件，不自动删除或覆盖。
+- `new ScopeLedger(path)` 只打开已有 v2 文件。先核对版本、六张新表及索引的完整 DDL、完整性和外键；不自动建表或升级。DDL 不匹配时拒绝打开，不静默补结构。
+- `ScopeBatch` 绑定真实 instance、session、generation 和 UTC 观察时间。`Readings` 是完整当前目录；每个条目提供完整非负 int64 对或安全类别的不可用原因，不能同时提供两者。身份需要调用方的独立发现证据，Core 的结构校验不替代 Windows 发现。
+- 同一 basis 的同一 counter tag 不能绑定两个范围身份，防止把一个原始计数重复记到账本；actual_member 与 routed_outbound 即使 tag 相同也保持独立维度，不互相替代或相加。
+- 每个已注册但未出现在目录的范围都必须在 `RetiredScopeIds` 明确列出，包括从未获得计数的范围以及此前已退休的范围。跨实例 ID、重复 ID、仍在采集的 ID 或漏列均拒绝整批。重新出现的范围以失效游标建新基线。
+- 缺失期间发现 session/generation 改变也会持久失效连续性；即使后来回到原代次，也不恢复不确定量。同一实例的批次时间和完整规范化指纹一起保存，目录顺序不影响完整重复判定。
+- `ScopeQuery` 必填一个 basis，可选择一个 scope ID。字节以十进制字符串输出，合计采用 BigInteger；分页只裁明细，不裁合计、分桶、范围合计或缺口。开放缺口在查询到其后时间时仍披露，legacy NULL 缺口保持未归属。
+- 正式 v1 预检、backup、映射核对和受控迁移执行器仍未实现。不能绕过上述已有文件门禁，手动改版本号或直接执行 SQL 来代替迁移。
 
 ## 回滚与恢复
 

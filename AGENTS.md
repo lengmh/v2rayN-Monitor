@@ -22,7 +22,7 @@ v2rayN 本机采集是主来源，CSV 只是偶尔补充。HTML 为主要管理�
 
 v0.1.1 已正式发布。v0.2.0 的 #15 为内核线、#16 为 CSV 线。test.2 已实际加载；用户退出旧预览后，PR #17 / S5.5 的 preview.2 已在原独立验证目录运行，复杂配置中的独立 routed-proxy 首接基线、持续持久化及被动字节守恒通过，其他出站仍未知。受控 proxy/direct、切换、重开及真实页面验收未补齐，S0.3/S5.1–S5.3 保持 blocked，S5.5 in_progress。#18 / S5.6 跟踪多出站及策略组实际成员，#19 / S5.7 跟踪代理链和自定义配置，各自独立 PR，扩展功能未排正式发布。v0.2.0 原普通单节点与 CSV 批次管理范围保留；Xray 不移除，CSV #16 planned，插件 deferred。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、运行文件替换、核心重载、节点切换和真实账本迁移需具体授权，不重复确认已完成的同范围动作。历史发布授权不复用于新版本，构建及合成测试不替代实机验证。
 
-#18 / S5.6 已交付路由/成员 RPC、核心原型、配置绑定候选目录与独立 CI；第四批的完整 v2 提案 SQL/映射/backup/回滚步骤和临时多范围原型通过双库合成 19 组验证。生产仍只采 proxy，test.3 未部署，完整 Windows 身份、正式 v2 Ledger/生产采样/查询/页面未接入。提案在 docs/proposals，原型/合成库仅 TempFiles，独立 provider.db 不参与 history.db 迁移；旧历史标 legacy_proxy，不推断未存储维度。禁止伪造 instance_id 后缀；下一批实现受控 v2 Ledger 及正式回归，真实账本不自动迁移。#19 继续 planned。
+#18 / S5.6 已交付路由/成员 RPC、核心原型、配置绑定候选目录与独立 CI；第四批的 v2 提案和临时原型通过双库合成 19 组验证。第五批新增独立 ScopeLedger：全新文件显式初始化、完整目录/退休核对、批量原子记账、范围缺口和单 basis 查询/分页，复用 docs/proposals 的 SQL，正式回归见 STATUS。已有文件不自动升级；nodes 仅插入新核实关联，不改旧行。生产仍只采 proxy，test.3 未部署，完整 Windows 身份、受控 v1 迁移执行器、生产采样/API/页面待接入。原型/合成库及日志仅 TempFiles，provider.db 独立，旧量仅映射 legacy_proxy。禁止伪造 instance_id 后缀；下一批先补正式迁移执行器及合成 backup/逐行核对，再接生产，真实迁移另取授权。#19 继续 planned。
 
 ## 公开仓库边界
 
