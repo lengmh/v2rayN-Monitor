@@ -14,7 +14,7 @@ public sealed class ScopeLedger : IDisposable
     private readonly object gate = new();
     private readonly SqliteConnection connection;
     private bool disposed;
-    private static readonly string SchemaSql = ReadSchema();
+    internal static readonly string SchemaSql = ReadSchema();
 
     public ScopeLedger(string dbPath)
     {

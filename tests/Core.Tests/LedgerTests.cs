@@ -988,6 +988,124 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("20", ledger.Query(ScopeAll("routed_outbound")).Upload);
     }
 
+    [Fact]
+    public void ScopeMigrationBacksUpAndPreservesHistoryWhileInvalidatingLegacyContinuity()
+    {
+        using (var old = new Ledger(Database))
+        {
+            old.Accept(Sample(0, 100, 200));
+            old.Accept(Sample(1, 110, 220));
+            old.Accept(Sample(61, 160, 280));
+            old.RecordGap(Epoch.AddSeconds(62), "interface_unavailable");
+        }
+        RunSql("UPDATE minutes SET upload=9007199254740993,approximate=1,synthetic=1;");
+        var backup = Path.Combine(directory, "before-v2.db");
+        var provider = Path.Combine(directory, "provider.db");
+        using (var imports = new ProviderImports(provider))
+            imports.Commit(new("Synthetic provider", "UTC",
+                "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic node,0.125,9007199254740993,1125899906842624.125,synthetic,2024-02-28 23:59:00\n"));
+        var providerBytes = File.ReadAllBytes(provider);
+        var migration = ScopeLedgerMigration.Migrate(Database, backup);
+        Assert.Equal(1, migration.LegacyScopes);
+        Assert.Equal(providerBytes, File.ReadAllBytes(provider));
+        Assert.Throws<InvalidOperationException>(() => new Ledger(Database));
+        using var original = new Ledger(backup);
+        using var migrated = new ScopeLedger(Database);
+        var result = migrated.Query(ScopeAll("legacy_proxy"));
+        Assert.Equal(original.Query(All()).Upload, result.Upload);
+        Assert.Equal(original.Query(All()).RecoveredUpload, result.RecoveredUpload);
+        Assert.Equal(original.Query(All()).RecordCount, result.RecordCount);
+        Assert.Contains(result.Gaps, x => x.ScopeId is null && x.Origin == "legacy" && x.IsOpen);
+        var legacy = new MeasurementScope("legacy_proxy", "legacy_node", "instance/node", "Synthetic node", "node");
+        migrated.Accept(Batch(63, new ScopeReading(legacy, 900, 1200)));
+        Assert.Equal(result.Upload, migrated.Query(ScopeAll("legacy_proxy")).Upload);
+        Assert.Contains(migrated.Query(ScopeAll("legacy_proxy")).Gaps, x => x.Origin == "legacy" && x.IsOpen);
+    }
+
+    [Fact]
+    public void ScopeMigrationSupportsEmptyV1AndDoesNotReplaceExistingBackupOrAcceptV2()
+    {
+        using (new Ledger(Database)) { }
+        var backup = Path.Combine(directory, "before.db");
+        File.WriteAllText(backup, "Synthetic backup already exists");
+        Assert.Throws<IOException>(() => ScopeLedgerMigration.Migrate(Database, backup));
+        Assert.Equal("Synthetic backup already exists", File.ReadAllText(backup));
+        using (var old = new Ledger(Database)) Assert.Empty(old.GetNodes());
+        var freshBackup = Path.Combine(directory, "fresh-backup.db");
+        Assert.Equal(0, ScopeLedgerMigration.Migrate(Database, freshBackup).LegacyScopes);
+        Assert.Throws<InvalidOperationException>(() => ScopeLedgerMigration.Migrate(Database, Path.Combine(directory, "second.db")));
+        Assert.False(File.Exists(Path.Combine(directory, "second.db")));
+    }
+
+    [Theory]
+    [InlineData("UPDATE cursors SET upload=1.5;")]
+    [InlineData("UPDATE cursors SET interrupted=2;")]
+    [InlineData("UPDATE cursors SET instance_id='wrong-instance';")]
+    [InlineData("INSERT INTO gaps VALUES(999,0,1,'orphan','synthetic',0);")]
+    [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
+    [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    public void ScopeMigrationPreflightRejectsUnsupportedHistoryBeforeCreatingBackup(string mutation)
+    {
+        using (var old = new Ledger(Database)) old.Accept(Sample(0, 10));
+        RunSql(mutation);
+        var before = File.ReadAllBytes(Database);
+        var backup = Path.Combine(directory, "rejected-backup.db");
+        Assert.Throws<InvalidOperationException>(() => ScopeLedgerMigration.Migrate(Database, backup));
+        Assert.False(File.Exists(backup));
+        Assert.Equal(before, File.ReadAllBytes(Database));
+    }
+
+    [Theory]
+    [InlineData("INSERT INTO scope_minutes VALUES(0,999,0,0,0,0);")]
+    [InlineData("UPDATE scope_minutes SET upload=upload+1;")]
+    public void ScopeMigrationRollsBackDdlAndVersionAfterSqlOrVerificationFailure(string injectedSql)
+    {
+        using (var old = new Ledger(Database))
+        {
+            old.Accept(Sample(0, 100));
+            old.Accept(Sample(1, 110));
+        }
+        var backupPath = Path.Combine(directory, "synthetic-backup.db");
+        using var source = new SqliteConnection($"Data Source={Database};Pooling=False");
+        source.Open();
+        using var backup = new SqliteConnection($"Data Source={backupPath};Pooling=False");
+        backup.Open();
+        source.BackupDatabase(backup);
+        using (var command = source.CreateCommand()) { command.CommandText = "PRAGMA foreign_keys=ON;"; command.ExecuteNonQuery(); }
+        using var stream = typeof(ScopeLedger).Assembly.GetManifestResourceStream("V2rayNMonitor.Core.ScopeLedgerV2.sql")!;
+        using var reader = new StreamReader(stream);
+        var sql = reader.ReadToEnd() + "\n" + injectedSql;
+        var apply = typeof(ScopeLedgerMigration).GetMethod("Apply",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        Assert.Throws<System.Reflection.TargetInvocationException>(() => apply.Invoke(null, [source, backup, sql]));
+        using var check = source.CreateCommand();
+        check.CommandText = "PRAGMA user_version;";
+        Assert.Equal(1L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'scope_%' OR name='measurement_scopes';";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "SELECT upload FROM minutes;";
+        Assert.Equal(10L, check.ExecuteScalar());
+    }
+
+    [Fact]
+    public void ScopeMigrationRejectsAChangedSnapshotRatherThanMigratingPastTheBackup()
+    {
+        using (var old = new Ledger(Database)) old.Accept(Sample(0, 100));
+        using var source = new SqliteConnection($"Data Source={Database};Pooling=False");
+        source.Open();
+        using var backup = new SqliteConnection($"Data Source={Path.Combine(directory, "synthetic-backup.db")};Pooling=False");
+        backup.Open();
+        source.BackupDatabase(backup);
+        using (var update = source.CreateCommand()) { update.CommandText = "UPDATE cursors SET upload=150;"; update.ExecuteNonQuery(); }
+        using var stream = typeof(ScopeLedger).Assembly.GetManifestResourceStream("V2rayNMonitor.Core.ScopeLedgerV2.sql")!;
+        using var reader = new StreamReader(stream);
+        var apply = typeof(ScopeLedgerMigration).GetMethod("Apply",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        Assert.Throws<System.Reflection.TargetInvocationException>(() => apply.Invoke(null, [source, backup, reader.ReadToEnd()]));
+        using var check = source.CreateCommand(); check.CommandText = "PRAGMA user_version;";
+        Assert.Equal(1L, check.ExecuteScalar());
+    }
+
     private void RunSql(string sql)
     {
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Database, Pooling = false }.ToString());

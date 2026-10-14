@@ -1,5 +1,5 @@
 -- S5.6 schema/mapping source, embedded by opt-in ScopeLedger.CreateNew for NEW EMPTY files.
--- Existing-file migration remains a proposal; no production Host/Server entry point calls it.
+-- Explicit offline ScopeLedgerMigration uses this same source; normal startup never migrates v1.
 -- Caller must verify a supported v1 database, take a SQLite backup, enable
 -- foreign_keys, begin ONE write transaction, and validate before committing.
 -- No BEGIN/COMMIT here: failed validation must roll back DDL and user_version.
