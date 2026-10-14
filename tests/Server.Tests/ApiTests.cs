@@ -23,6 +23,57 @@ public sealed class ApiTests : IAsyncLifetime
         var response = await client.PostAsJsonAsync("/api/session", new { token });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
+    [Fact] public async Task OptInScopeApiKeepsDimensionsSeparateAndExportCarriesBasis()
+    {
+        await server.DisposeAsync();
+        client.Dispose();
+        V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/scope-history")).StatusCode);
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var member = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "synthetic-id", " =Synthetic member", "synthetic-id", "proxy");
+        var business = new V2rayNMonitor.Core.MeasurementScope("business", "aggregate", "business", "Synthetic business");
+        var scopes = server.Scopes!;
+        scopes.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at,
+            [new(member, 0, 0), new(business, 0, 0)], []));
+        scopes.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at.AddSeconds(1),
+            [new(member, 9007199254740993, 7), new(business, 9007199254740999, 20)], []));
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("actual_member", history.GetProperty("basis").GetString());
+        Assert.Equal("9007199254740993", history.GetProperty("upload").GetString());
+        var filtered = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeName=" + Uri.EscapeDataString(" =Synthetic member"));
+        Assert.Equal("9007199254740993", filtered.GetProperty("upload").GetString());
+        var aggregate = await client.GetFromJsonAsync<JsonElement>("/api/scope-history" + query + "&basis=business");
+        Assert.Equal("business", aggregate.GetProperty("basis").GetString());
+        Assert.Equal("9007199254740999", aggregate.GetProperty("upload").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/scope-history" + query)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/scope-history" + query + "&basis=all")).StatusCode);
+        var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
+        Assert.StartsWith("scope:", nodes[0].GetProperty("key").GetString());
+        Assert.False(nodes[0].TryGetProperty("identityValue", out _)); // No configuration digest/IndexId leaked by the public list.
+        var csv = await client.GetStringAsync("/api/export" + query);
+        Assert.Contains("quality,basis,scope_key", csv);
+        Assert.Contains("\"actual_member\"", csv);
+        Assert.Contains("\"scope:", csv);
+        Assert.Contains("' =Synthetic member", csv);
+        Assert.Contains("9007199254740993", csv);
+    }
+
+    [Fact] public async Task ScopeStartupDoesNotAutomaticallyMigrateOrTouchProviderDatabase()
+    {
+        await server.DisposeAsync();
+        var history = File.ReadAllBytes(Path.Combine(root, "history.db"));
+        var provider = File.ReadAllBytes(Path.Combine(root, "provider.db"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true));
+        Assert.Equal(history, File.ReadAllBytes(Path.Combine(root, "history.db")));
+        Assert.Equal(provider, File.ReadAllBytes(Path.Combine(root, "provider.db")));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
+    }
+
     [Fact] public async Task ReadAndWriteApisRequireSession()
     {
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/status")).StatusCode);

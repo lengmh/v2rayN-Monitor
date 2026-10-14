@@ -1031,7 +1031,7 @@ public sealed class LedgerTests : IDisposable
         Assert.Throws<IOException>(() => ScopeLedgerMigration.Migrate(Database, backup));
         Assert.Equal("Synthetic backup already exists", File.ReadAllText(backup));
         using (var old = new Ledger(Database)) Assert.Empty(old.GetNodes());
-        var freshBackup = Path.Combine(directory, "fresh-backup.db");
+        var freshBackup = Path.Combine(directory, "new-backup-directory", "fresh-backup.db");
         Assert.Equal(0, ScopeLedgerMigration.Migrate(Database, freshBackup).LegacyScopes);
         Assert.Throws<InvalidOperationException>(() => ScopeLedgerMigration.Migrate(Database, Path.Combine(directory, "second.db")));
         Assert.False(File.Exists(Path.Combine(directory, "second.db")));

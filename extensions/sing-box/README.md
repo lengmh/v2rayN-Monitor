@@ -13,7 +13,7 @@ Issue #15 的实验核心 `1.14.1-monitor-test.2`，针对公开 sing-box
 - 新核心先注册两个真实零计数，便于空闲基线；累计仍在当前核心内存中，重启需新基线。
 - 计数按路由匹配 tag；selector/urltest 选中 proxy 也不进入 proxy 累计。preview.2 可在其他出站存在时独立采集 routed-proxy，并明确披露未知范围；全量/成员统计另见 [扩展计划](../../docs/singbox-extension-scope.md)。
 
-Monitor 当前只接受经核实的实验文件 SHA256：
+Monitor 默认 v1 路径只接受经核实的 test.2 文件 SHA256：
 
 `C053F7C9D82C7FC241E60045ADFB399A44F4FDEB4E12CEF91C5F95244E3301BA`
 
@@ -69,11 +69,21 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 
 本地定向回归与真实核心隔离证据：旧 TCP/UDP 连接跨 selector 切换、嵌套组、1,200 短连接及切换期间并发、urltest 旧连接/新成员、direct 排除、链留 unknown；另用未改动 test.2 服务端对照 AnyTLS/TLS 和 VMess 的原始业务字节，核心重启恢复真实零。合成 TLS 使用合成证书和 insecure，不是实际节点 TLS/证书验收。完整源码重构建与测试二进制 SHA256 相同，详见本轮本机证据及 [扩展范围](../../docs/singbox-extension-scope.md)。
 
-本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，只描述这个本地实验构建，不自动授权安装或扩展 Monitor 白名单。Monitor 尚未读取新成员维度、映射多出站或写多范围账本。现有远端 Monitor CI 不编译 Go 补丁，不能用它的绿灯替代核心验证。
+test.3 本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，只描述这个本地实验构建，不自动授权安装。第二批当时尚未接入 Monitor；后续成员读取、v2 账本与 Windows opt-in 源码进度见下文和 STATUS。Monitor CI 不编译 Go 补丁，不能用它的绿灯替代核心验证。
+
+## test.4：显式 sidecar 成员开关与 Windows 接入（未部署）
+
+第七批在前两层上叠加 [member-sidecar.patch](member-sidecar.patch)，候选为 `1.14.1-monitor-test.4`。sidecar 仍不允许写节点、路由或配置覆盖；新增唯一可选字段 `monitor_members`，值为明确的成员 tag 数组。缺省时保留原 listen-only 路由计数，不启用成员统计；拒绝重复、空、统计分隔符、未注册 tag、direct 或策略组 tag。
+
+合成示例为 `{"listen":"127.0.0.1:10814","monitor_members":["proxy","fixture-member"]}`。实际端口和 tag 必须另行核实，不得直接复制示例到实际客户端。未知或未启用的成员计数保持 unavailable，不补零。Monitor opt-in 目录仍要求既有可核实的独立 AnyTLS proxy；proxy 外的独立成员按配置摘要/tag 保存，不猜订阅 IndexId。
+
+本地已核实的 test.4 SHA256 为 `B1C6F3AA48F21AE070EF283D10AE946C189421F7C9F498CCAA5657D2B0E7E15E`。只有新增 `--scope-ledger` 源码入口接受此候选；默认入口的 test.2 白名单不变。Go 5 个顶级测试/22 个子用例及真实核心隔离启动→sidecar→只读成员 RPC→v2 首接零基线通过；该联测使用合成 Windows 绑定，不是实际 v2rayN 身份或实机全量验收。
+
+新模式必须使用新建 v2 验证目录或经授权离线迁移的 v2 文件。已有 v1 正常启动明确拒绝，不自动迁移；实际核心文件替换、sidecar 更新、重载、预览启动和真实迁移仍需具体授权。候选文件和过程证据仅 TempFiles；CI 构建可能有不同的 Go build ID/二进制摘要，不自动把 CI 产物加入白名单。
 
 ## 独立扩展 CI
 
-2026-10-14 用户授权新增 [扩展工作流](../../.github/workflows/sing-box-extension.yml)，不改现有 Monitor CI。Windows runner 使用固定 Go 1.26.8，下载上述固定提交的公开源码归档，要求 SHA256 为 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`；按序应用两层补丁，执行 `^TestMonitor` 并核实四个必需测试确实通过，再构建 test.3。保留原 Windows 标签和依赖版本，`-mod=readonly`；构建前后核对 go.mod/go.sum 摘要，禁止自动切换工具链。`.gitattributes` 固定补丁为 LF，防止 Windows checkout 的 CRLF 转换破坏补丁上下文和摘要。
+2026-10-14 用户授权新增 [扩展工作流](../../.github/workflows/sing-box-extension.yml)，不改现有 Monitor CI。第七批构建脚本扩展为按序应用 monitor/member-stats/member-sidecar 三层补丁，核实五个必需顶级测试后构建 test.4；工作流配置不变。Windows runner 仍固定 Go 1.26.8、公开源码提交及归档 SHA256 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`，保留原 Windows 标签/依赖版本/`-mod=readonly` 和 go.mod/go.sum 摘要核对，不自动切换工具链。`.gitattributes` 固定补丁 LF。
 
 复用同一 [构建脚本](build-ci.ps1) 的本地命令如下；需已有固定 Go 环境，输出目录必须尚不存在。可通过 `-SourceArchive` 指定本地已下载归档，仍执行同一摘要校验。
 
@@ -81,4 +91,4 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 ./extensions/sing-box/build-ci.ps1 -OutputRoot 'F:\AI playground\TempFiles\本轮独立构建目录'
 ```
 
-工作流只在扩展目录或工作流自身改动时触发 push / PR 检查。候选 artifact 包含 EXE、原始源码归档、两层补丁、GPLv3 LICENSE、说明及构建脚本；`build-provenance.json` 记录实际 checkout、CI 提交/运行 ID、源码/补丁/二进制摘要、Go 版本、标签和构建参数。PR 的 checkout 可能是合并测试提交，不能把它误写为 PR HEAD。artifact 不是正式 Release，也不自动部署或更新 Monitor 白名单。远端实际结果以 [STATUS](../../docs/STATUS.md) 和具体运行记录为准，核心回归/构建不替代此前回环联测或实机验收。
+工作流只在扩展目录或工作流自身改动时触发 push / PR 检查。候选 artifact 包含 EXE、原始源码归档、三层补丁、GPLv3 LICENSE、说明及构建脚本；`build-provenance.json` 记录实际 checkout、CI 提交/运行 ID、源码/补丁/二进制摘要、Go 版本、标签和构建参数。PR checkout 可能是合并测试提交，不是 PR HEAD。artifact 不是正式 Release，不自动部署或更新白名单。远端结果以 [STATUS](../../docs/STATUS.md) 和具体运行记录为准，核心回归/构建不替代实机验收。

@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $revision = '1ac1a339cb1223e9c70eae14c44411c75033c02d'
 $archiveSha256 = '8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537'
-$version = '1.14.1-monitor-test.3'
+$version = '1.14.1-monitor-test.4'
 $sourceUrl = "https://codeload.github.com/SagerNet/sing-box/tar.gz/$revision"
 $output = [IO.Path]::GetFullPath($OutputRoot)
 if (Test-Path -LiteralPath $output) { throw 'OutputRoot must be a new directory.' }
@@ -42,7 +42,7 @@ foreach ($name in @('go.mod', 'go.sum')) {
 $patchHashes = @{}
 Push-Location -LiteralPath $source
 try {
-    foreach ($name in @('monitor.patch', 'member-stats.patch')) {
+    foreach ($name in @('monitor.patch', 'member-stats.patch', 'member-sidecar.patch')) {
         $patch = Join-Path $PSScriptRoot $name
         $patchHashes[$name] = (Get-FileHash -LiteralPath $patch -Algorithm SHA256).Hash.ToLowerInvariant()
         & git apply --check --unidiff-zero $patch
@@ -57,7 +57,7 @@ try {
         Tee-Object -FilePath (Join-Path $output 'go-tests.log')
     if ($LASTEXITCODE -ne 0) { throw 'Core regression failed.' }
     $requiredTests = @('TestMonitorStatsEndpoint', 'TestMonitorMemberBinding',
-        'TestMonitorMemberConcurrentIndependentConnections', 'TestMonitorMembersDisabledPreservesOriginalCounters')
+        'TestMonitorMemberConcurrentIndependentConnections', 'TestMonitorMembersDisabledPreservesOriginalCounters', 'TestMonitorMemberSidecar')
     $testLog = Get-Content -LiteralPath (Join-Path $output 'go-tests.log') -Raw -Encoding utf8
     foreach ($name in $requiredTests) {
         if ($testLog -notmatch "(?m)^--- PASS: $name ") { throw "Required test did not pass: $name" }

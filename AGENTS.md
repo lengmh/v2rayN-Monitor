@@ -22,7 +22,7 @@ v2rayN 本机采集是主来源，CSV 只是偶尔补充。HTML 为主要管理�
 
 v0.1.1 已正式发布。v0.2.0 的 #15 为内核线、#16 为 CSV 线。test.2 已实际加载；用户退出旧预览后，PR #17 / S5.5 的 preview.2 已在原独立验证目录运行，复杂配置中的独立 routed-proxy 首接基线、持续持久化及被动字节守恒通过，其他出站仍未知。受控 proxy/direct、切换、重开及真实页面验收未补齐，S0.3/S5.1–S5.3 保持 blocked，S5.5 in_progress。#18 / S5.6 跟踪多出站及策略组实际成员，#19 / S5.7 跟踪代理链和自定义配置，各自独立 PR，扩展功能未排正式发布。v0.2.0 原普通单节点与 CSV 批次管理范围保留；Xray 不移除，CSV #16 planned，插件 deferred。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、运行文件替换、核心重载、节点切换和真实账本迁移需具体授权，不重复确认已完成的同范围动作。历史发布授权不复用于新版本，构建及合成测试不替代实机验证。
 
-#18 / S5.6 已交付路由/成员 RPC、核心原型、候选目录、独立 CI 和独立 ScopeLedger。第六批新增显式离线迁移执行器：全新 SQLite backup、支持 v1 预检、事务内原库/快照及全部映射逐行核对、失败 DDL/版本回滚；v2/迁移共 29 项定向回归通过，具体提交/CI见 STATUS。正常启动不自动升级；nodes 只插入新关联，不改旧行，provider.db 独立，旧量为 legacy_proxy。用户授权继续到 Windows opt-in 源码接入，下一批补成员 sidecar、前后稳定发现及批量采集/API；实际程序仍未切换，部署和真实迁移另取具体授权。临时产物仅 TempFiles；禁止伪造 instance_id。#19 planned。
+#18 / S5.6 第七批已接入 Windows --scope-ledger 源码：显式v2新库/离线迁移、原只读身份/监听/前后稳定guard、完整目录/退休/原子批次、单basis API/导出及成员口径页面。test.4新增第三层sidecar成员开关，本地SHA见README/STATUS，Go5/22、Core309/Server34/前端52及真实核心副本首接零基线通过，副本绑定为合成，精确CI另见STATUS。默认v1/test.2不变、v1正常启动不迁移，nodes只插入新关联、provider独立、旧量legacy_proxy。仍要求独立AnyTLS proxy锚点，其他成员只配置/tag身份，不猜IndexId。候选/预览未部署，实际运行文件、sidecar、重载、Windows实机接入和真实迁移均需具体授权；页面完整维度切换/新模式速率未完成。临时产物仅TempFiles，禁止伪造instance_id。#19 planned。
 
 ## 公开仓库边界
 

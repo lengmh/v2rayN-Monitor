@@ -57,6 +57,7 @@ public static class ScopeLedgerMigration
         using (var source = Open(history, SqliteOpenMode.ReadOnly))
         {
             Preflight(source, null);
+            CheckedParents(backup);
             Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
             CheckedParents(backup);
             using (new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
@@ -203,7 +204,7 @@ public static class ScopeLedgerMigration
     private static void CheckedParents(string path)
     {
         for (var directory = new DirectoryInfo(Path.GetDirectoryName(path)!); directory is not null; directory = directory.Parent)
-            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+            if (directory.Exists && (directory.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new ArgumentException("Migration paths must not traverse directory links.");
     }
     private static SqliteConnection Open(string path, SqliteOpenMode mode)

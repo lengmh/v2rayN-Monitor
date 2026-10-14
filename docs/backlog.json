@@ -530,7 +530,7 @@
       "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
       "issue": 18,
       "pull_request": 20,
-      "implementation_note": "路由/成员 RPC、test.3 核心原型、独立 CI 与候选目录已交付；独立 ScopeLedger 的新库门禁、完整目录退休、原子批次和单 basis 查询/分页已有正式回归。第六批新增显式离线 v1→v2 迁移执行器，SQLite backup、事务内原库/快照及完整映射逐行核对、失败 DDL/user_version 回滚：新增 11 项，v2/迁移共 29 项定向通过。正常启动不自动升级；nodes 仅插入新关联，provider.db 独立。用户授权继续到 Windows opt-in 源码接入，sidecar/Windows 批量发现及采集/API 是下一批；不自动部署或迁移真实库。具体提交/CI及边界见 STATUS 和扩展范围。"
+      "implementation_note": "独立 v2 Ledger/显式离线迁移执行器已交付；第七批 Windows --scope-ledger 前后稳定发现、完整目录退休、原子采样、单 basis API/导出和成员口径页面已源码接入。test.4 第三层 sidecar 补丁、Go 5/22、真实副本首接零基线通过，绑定为合成；Core309/Server34/前端52及精确 CI见 STATUS。仍以独立 AnyTLS proxy 为锚，其他成员不猜 IndexId。默认v1/test.2不变、已有库不自动升级、provider独立；部署/sidecar修改/重载/实际预览和真实迁移均未执行。完整维度切换/新模式速率与Windows实机验收未完成，停在具体授权边界。"
     },
     {
       "id": "S5.7",

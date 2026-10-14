@@ -948,5 +948,122 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal("13", ledger.Query(All).Upload); Assert.Equal("24", ledger.Query(All).Download);
     }
 
+    private static ScopeCapture ScopeFixture(IReadOnlyList<string>? enabled = null, XraySnapshot? snapshot = null)
+    {
+        var bound = snapshot ?? MemberSnapshot();
+        Assert.True(SingboxParser.TryReadMemberCatalog(bound, Bytes(MemberConfiguration), out var catalog, out _));
+        return new(bound, catalog, enabled ?? ["proxy", "other"]);
+    }
+    private static V2RayMemberStatistics ScopeCounters(long proxy = 0, long other = 0) =>
+        new(new Dictionary<string, XrayCounters> { ["proxy"] = new(proxy, 0), ["other"] = new(other, 0) },
+            new Dictionary<string, string>(), new Dictionary<string, XrayCounters>
+            { ["business"] = new(proxy + other, 0), ["excluded"] = new(7, 0), ["unknown"] = new(9, 0) },
+            new Dictionary<string, string>());
+
+    [Fact]
+    public void ScopeSidecarIsStrictAndLegacyParserDoesNotSilentlyEnableMembers()
+    {
+        var json = Bytes("""{"listen":"127.0.0.1:10814","monitor_members":["proxy","other"]}""");
+        Assert.True(SingboxParser.TryReadMemberStatisticsSettings(json, out var endpoint, out var members));
+        Assert.Equal(10814, endpoint!.Port); Assert.Equal(["proxy", "other"], members);
+        Assert.False(SingboxParser.TryReadStatisticsEndpoint(json, out _));
+        foreach (var invalid in new[] {
+            """{"listen":"0.0.0.0:10814","monitor_members":["proxy"]}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":["proxy","proxy"]}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":["bad>>>tag"]}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":null}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":[] }""",
+            """{"listen":"127.0.0.1:10814","route":{}}""" })
+            Assert.False(SingboxParser.TryReadMemberStatisticsSettings(Bytes(invalid), out _, out _));
+    }
+
+    [Fact]
+    public void ScopeProjectionUsesVerifiedIndexOnlyForProxyAndPreservesAllDimensions()
+    {
+        var capture = ScopeFixture(["proxy"]);
+        var batch = ScopeCollector.Project(capture, ScopeCounters(10, 20), Start);
+        Assert.Equal(5, batch.Readings.Count);
+        var proxy = Assert.Single(batch.Readings, x => x.Scope.OutboundTag == "proxy");
+        Assert.Equal("A", proxy.Scope.NodeId);
+        Assert.Equal("index_id", proxy.Scope.IdentityKind);
+        var other = Assert.Single(batch.Readings, x => x.Scope.OutboundTag == "other");
+        Assert.Null(other.Scope.NodeId); Assert.Null(other.Upload);
+        Assert.Equal("member_statistics_disabled", other.UnavailableReason);
+        Assert.Equal("outbound", other.Scope.IdentityKind);
+        Assert.Contains(XrayParser.Hash(Bytes(MemberConfiguration)), other.Scope.IdentityValue);
+        Assert.Equal(30, Assert.Single(batch.Readings, x => x.Scope.Basis == "business").Upload);
+        Assert.Equal(7, Assert.Single(batch.Readings, x => x.Scope.Basis == "excluded").Upload);
+        Assert.Equal(9, Assert.Single(batch.Readings, x => x.Scope.Basis == "unknown").Upload);
+        Assert.DoesNotContain("Synthetic-Credential", JsonSerializer.Serialize(batch));
+        Assert.Throws<ArgumentException>(() => ScopeCollector.Project(ScopeFixture(["group"]), ScopeCounters(), Start));
+    }
+
+    [Fact]
+    public async Task ScopeWindowsBoundaryRejectsChangedCoreBeforeAnyBatchCanBeCommitted()
+    {
+        using var discovery = new WindowsDiscovery();
+        var first = ScopeFixture();
+        var second = ScopeFixture(snapshot: first.Snapshot with { ProcessIdentity = "core-2" });
+        var calls = 0;
+        var reading = await discovery.ReadScopesBoundAsync(() => calls++ == 0 ? first : second,
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?)>((ScopeCounters(100, 200), null)), CancellationToken.None);
+        Assert.Null(reading.Batch);
+        Assert.True(reading.InvalidateContinuity);
+        Assert.True(discovery.RequiresBaseline);
+    }
+
+    [Fact]
+    public async Task ScopeWindowsPipelineAndLedgerHandlePartialCountersAndPersistenceAcknowledgment()
+    {
+        using var discovery = new WindowsDiscovery();
+        using var ledger = ScopeLedger.CreateNew(History);
+        var capture = ScopeFixture();
+        var first = await discovery.ReadScopesBoundAsync(() => capture,
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?)>((ScopeCounters(100, 200), null)), CancellationToken.None);
+        ScopeCollector.Commit(ledger, first.Batch! with { At = Start });
+        discovery.AcknowledgePersistence();
+        var partial = ScopeCounters(110, 220) with
+        { Members = new Dictionary<string, XrayCounters> { ["proxy"] = new(110, 0) }, UnavailableMembers = new Dictionary<string, string> { ["other"] = "missing_counter" } };
+        var next = await discovery.ReadScopesBoundAsync(() => capture,
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?)>((partial, null)), CancellationToken.None);
+        ScopeCollector.Commit(ledger, next.Batch! with { At = Start.AddSeconds(1) });
+        var query = new ScopeQuery("actual_member", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC");
+        Assert.Equal("10", ledger.Query(query).Upload);
+        Assert.Contains(ledger.Query(query).Gaps, x => x.IsOpen && x.Reason == "missing_counter");
+        Assert.False(discovery.RequiresBaseline);
+    }
+
+    [Fact]
+    public void ScopeCollectorGapInvalidationAndWholeMissingRpcDoNotFabricateZeroOrRecovery()
+    {
+        using var ledger = ScopeLedger.CreateNew(History);
+        ledger.RecordGap(Start.AddSeconds(-1), "unavailable", true);
+        ScopeCollector.Commit(ledger, ScopeCollector.Project(ScopeFixture(), ScopeCounters(100, 200), Start));
+        ledger.RecordGap(Start.AddSeconds(1), "mapping_changed", true);
+        ScopeCollector.Commit(ledger, ScopeCollector.Project(ScopeFixture(), ScopeCounters(500, 600), Start.AddSeconds(2)));
+        var query = new ScopeQuery("actual_member", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC");
+        Assert.Equal("0", ledger.Query(query).Upload);
+        Assert.All(ledger.Query(query).Gaps, x => Assert.False(x.IsOpen));
+        var missing = new V2RayMemberStatistics(new Dictionary<string, XrayCounters>(), new Dictionary<string, string>(),
+            new Dictionary<string, XrayCounters>(), new Dictionary<string, string>());
+        var batch = ScopeCollector.Project(ScopeFixture(), missing, Start.AddSeconds(3));
+        Assert.All(batch.Readings, x => { Assert.Null(x.Upload); Assert.Null(x.Download); Assert.NotNull(x.UnavailableReason); });
+        ScopeCollector.Commit(ledger, batch);
+        Assert.Equal("0", ledger.Query(query).Upload);
+        Assert.Throws<ArgumentException>(() => ScopeCollector.Commit(ledger,
+            ScopeCollector.Project(ScopeFixture(), ScopeCounters(900, 900), Start.AddSeconds(2.5))));
+    }
+
+    [Fact]
+    public void ScopeXrayProjectionPreservesLegacyBasisAndIntegerCounters()
+    {
+        var batch = ScopeCollector.ProjectLegacy(Snapshot(), new(9007199254740993, 7), Start, true);
+        var reading = Assert.Single(batch.Readings);
+        Assert.Equal("legacy_proxy", reading.Scope.Basis);
+        Assert.Equal("legacy_node", reading.Scope.IdentityKind);
+        Assert.True(reading.InvalidateContinuity);
+        Assert.Equal(9007199254740993, reading.Upload);
+    }
+
     public void Dispose() { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
 }
