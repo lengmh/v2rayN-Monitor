@@ -2,7 +2,7 @@
 
 ## 2026-10-14：S5.6 / PR #20 核心实际成员原型
 
-起点为 `1782621a7bce2e9496bcfb60aa07e7c4b5581f8f`；开始时工作树干净、本地与远端一致，PR #20 Open / Draft，基础仍为未合并的 PR #17。下一检查点范围已确定。本批不改变 Monitor 生产代码、Schema、依赖或运行程序。
+起点为 `1782621a7bce2e9496bcfb60aa07e7c4b5581f8f`，实现提交为 `bfc1e404d73cf1ae7b6eed34030e614ef721c530`；开始时工作树干净、本地与远端一致，PR #20 Open / Draft，基础仍为未合并的 PR #17。下一检查点范围已确定。本批不改变 Monitor 生产代码、Schema、依赖或运行程序。
 
 新增 `extensions/sing-box/member-stats.patch`，叠加既有 test.2 的 `monitor.patch`；候选为 `1.14.1-monitor-test.3`。保留固定上游 `1ac1a339`、Go 1.26.8、Windows 默认标签加 with_v2ray_api、原 go.mod/go.sum。只在隔离配置显式启用 `stats.monitor_members`，现有 sidecar 仍只允许 listen、默认仍仅启用 routed-proxy；Monitor 白名单没有添加候选摘要。
 
@@ -18,7 +18,7 @@
 
 证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-issue18-members-20261014`：`integration2/result.json`、`anytls-vmess-integration/result.json`、`pristine-build-verification.json` 和 `verification-report.md`。所有隔离核心子进程均退出；普通权限生产发现核实实际客户端、核心、Monitor 的进程代次与原包前后不变，connected / routed_proxy、37 出站（含 4 组）未采集。没有新核心部署、实际节点切换/核心重载、运行库读取或迁移。
 
-S5.6 仍 in_progress，S5.7 / #19 planned。生产新成员维度读取、可靠多出站身份、完整迁移 DDL 与批量原子账本尚未实现，Monitor 重开/多范围账本与实机全量未验收。现有远端 CI 只验证 Monitor，不编译 Go 补丁；专用扩展工作流尚未配置，本批不修改CI。精确提交的既有 Monitor CI 后续另行核对，不借其绿灯宣称核心 CI 已通过。
+S5.6 仍 in_progress，S5.7 / #19 planned。生产新成员维度读取、可靠多出站身份、完整迁移 DDL 与批量原子账本尚未实现，Monitor 重开/多范围账本与实机全量未验收。实现提交的既有 Monitor PR CI `38545023200` 双平台成功，Core 265 / Server 32 / 前端 51，Linux 合成浏览器 15；它不编译 Go 补丁，不能借其绿灯宣称核心 CI 已通过。专用扩展工作流尚未配置，本批不修改CI。后续文档提交的 Monitor CI 另行核对，不替换本地已经复现并测试的候选核心。
 
 ## 2026-10-14：S5.6 / Issue #18 批量路由 tag RPC 接口
 
