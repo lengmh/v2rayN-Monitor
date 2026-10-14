@@ -2,15 +2,17 @@
 
 ## 2026-10-14：S5.6 / Issue #18 批量路由 tag RPC 接口
 
-起点为 `b832892b5da5e2d9eef1439d65880f6bbd05e6ec`；开始时本地与远端一致、工作树干净，#15 仍 Open、PR #17 仍 Open / Draft，未合并。用户确认 API 接入和独立 proxy 读取已通过，并授权开始后续范围；这些已通过项不因 #18/#19 尚未完成而撤销。新分支为 `feat/issue18-singbox-batch-stats`，以 PR #17 分支为基础走独立 Draft PR，不把本批变更混入 #17。
+起点为 `b832892b5da5e2d9eef1439d65880f6bbd05e6ec`；开始时本地与远端一致、工作树干净，#15 仍 Open、PR #17 仍 Open / Draft，未合并。用户确认 API 接入和独立 proxy 读取已通过，并授权开始后续范围；这些已通过项不因 #18/#19 尚未完成而撤销。新分支为 `feat/issue18-singbox-batch-stats`，代码提交 `235adff79570d77c137613414dd49893ff5a575c`，以 PR #17 分支为基础走独立 Draft PR #20，不把本批变更混入 #17。
 
 恢复现场和隔离验证前后，普通权限生产发现均核实实际客户端/核心的路径、父子关系和创建代次；实际 Monitor 仍为此前 CI 包的 preview.2，进程代次不变，采集状态为 connected、routed_proxy，37 个出站未采集，其中 4 个组。本轮不替换真实运行文件、不改生成配置/路由/节点、不重载核心、不访问真实凭据或迁移账本。
 
 新增 `ReadOutboundsAsync` / `TryReadOutboundsResponse`，一次数值回环 HTTP/2 `QueryStats`、reset=false，保持兼容服务名和 65,536 bytes 响应上限。每个请求 tag 的完整上下行累计独立保存；缺失、重复或超出非负 int64 范围的 tag 独立列为不可用，不补零、不丢弃其他完整 tag。不能可靠解析的 wire、压缩/截断/超限帧或 RPC 失败仍拒绝整个响应。原单 proxy API 复用解析并保持原采集范围。
 
-本地最终 Release 构建零警告零错误，Core 265 / Server 32 全部通过；新增 7 项回归覆盖多 tag 分离、组维度不推断成员、缺失/重复/无效的局部不可用、实际 proto3 零值、大小写、整数边界、坏帧、请求参数与只读 RPC。前端未修改，本地未重跑前端或浏览器；精确提交 CI 另行核对，不沿用 #17 绿灯。计划与 diff 检查通过。
+本地最终 Release 构建零警告零错误，Core 265 / Server 32 全部通过；新增 7 项回归覆盖多 tag 分离、组维度不推断成员、缺失/重复/无效的局部不可用、实际 proto3 零值、大小写、整数边界、坏帧、请求参数与只读 RPC。前端未修改，本地未重跑前端或浏览器。代码 `235adff` 的 PR CI `38534398732` 双平台成功：Core 265 / Server 32 / 前端 51，Linux 15 项合成浏览器通过；没有沿用 #17 绿灯。计划与 diff 检查通过。
 
-真实 test.2 同摘要副本使用显式原生 V2Ray API、纯回环 SOCKS / echo 和合成路由验证，生产批量读取器得到 4 个独立 tag 的零基线及未注册 tag 的 missing_counter。单次 proxy / other / group / direct 分别增加每方向 17 / 29 / 19 / 23 bytes，仅对应 tag 增长；64 次并发 proxy 和 100 次 other 短连接分别增加每方向 1,984 / 3,700 bytes。路由组选择 proxy 只增长组 tag；重复 reset=false 查询稳定，每次新建读取器进程仍保留核心累计。隔离核心均已退出。首轮合成服务因默认监听队列 5 小于并发 8 出现连接拒绝；依据核心日志与 Python 标准库修正临时队列，在新目录完成重跑，失败证据保留。
+真实 test.2 同摘要副本使用显式原生 V2Ray API、纯回环 SOCKS / echo 和合成路由验证，生产批量读取器得到 4 个独立 tag 的零基线及未注册 tag 的 missing_counter。单次 proxy / other / group / direct 分别增加每方向 17 / 29 / 19 / 23 bytes，仅对应 tag 增长；8 并发的 64 次 proxy 和 100 次 other 短连接分别增加每方向 1,984 / 3,700 bytes。路由组选择 proxy 只增长组 tag；重复 reset=false 查询稳定，每次新建读取器进程仍保留核心累计。隔离核心均已退出。首轮合成服务因默认监听队列 5 小于并发 8 出现连接拒绝；依据核心日志与 Python 标准库修正临时队列，在新目录完成重跑，失败证据保留。
+
+已下载并核对上述精确 CI 的 Windows 预览包，ZIP SHA256 为 `9f544f2387ee2f861acce035bea233af47e2e9d388531dbf9b55e10dee529d0b`，与 CI 摘要一致；ProductVersion 为 `0.2.0-preview.2+94bd20e4194d16f8daefa205482f9c41d165f123`，后缀与 CI 日志中的合并测试 checkout 一致，不是 PR HEAD。包不含运行数据库、CSV、生成配置或扩展核心；解压至本轮 `preview/monitor-235adff`，未启动或部署，当前运行包不变。本次后续文档提交不替换这个已核实的代码产物，其 CI 另行核对。
 
 证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-issue18-batch-20261014`，最终真实核心副本结果见 `attempt3-final/real-core-batch-result.json`。这只证明批量路由 tag 取数，不是组实际成员、Windows 自动全量接入、多范围账本或真实节点验收。现装 test.2 仍只为 proxy 启用文件式统计；生产 WindowsDiscovery、账本、API 和页面范围未扩大。
 
