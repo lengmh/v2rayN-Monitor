@@ -1,5 +1,21 @@
 # 初版实现与验证状态
 
+## S5.6 / PR #20 多范围迁移提案与隔离验证
+
+接手起点为 `e8a6c22aa0c291a7d1365e421cfd0ce0c741145a`，工作树干净、本地/远端一致，PR #20 仍 Open / Draft。该提交的 Monitor PR / push CI `38588487034` / `38588478588` 双平台及独立核心 CI `38588487693` 已通过，分别为 Core 274 / Server 32 / 前端 51、Linux 浏览器 15，以及 Go 4 个顶级测试 / 15 个子用例。用户授权继续迁移方案和隔离账本验证。本轮不修改生产源码、依赖、CI、运行程序或真实 Schema。
+
+新增 [v2 迁移提案](proposals/scope-ledger-v2.md) 与完整 [提案 SQL](proposals/scope-ledger-v2.sql)，均不由应用加载。针对 v1 未保存 basis 的事实，旧记录映射为 legacy_proxy，不推断核心或实际成员；原 node_key、时间、整数 bytes、quality 和标记逐字段保留。旧 NULL-node 缺口维持 NULL scope / legacy origin，不分摊给成员，也不被单个成员成功采样全局关闭。旧累计游标保留审计值但连续性失效，新范围首接只建基线。scope_id 为本库范围标识，真实 instance_id 不改；独立 outbound 用配置内容身份与 tag 区分，已核实 IndexId 才关联原节点。
+
+提案新增范围表及独立游标、分钟、未分时、缺口和批次时间/指纹表，旧五表留作核对，新版本机读写只用新表。查询明确选一个 basis，不能把历史 proxy、成员、业务或路由组相加。单个事务保存字节、全部游标、缺口、范围元数据与批次标记；缺失某范围不清空其他游标，批次倒退/冲突或任何写入/溢出失败全回滚。实际启动的服务商库为独立 provider.db，迁移只针对 history.db，服务商量及精确 TEXT 十进制保持独立。本批修正了最初临时夹具把两类记录放同库的结构假设，最终证据只认真实双库布局。
+
+使用已核实便携 .NET SDK 10.0.401、既有离线 NuGet 缓存、生产 Ledger / ProviderImports 与项目 Microsoft.Data.Sqlite 创建全新合成双库，在 TempFiles 编译独立原型执行同一提案 SQL。最终构建零警告零错误，19 组场景通过：空 v1 / 历史逐行及大 int64 保留，独立服务商文件/精确小数不变，非法版本/结构/字节/实例/缺口/标记拒绝；DDL/INSERT 中途及 user_version 已设后的核对失败都回滚；同名成员首接不回填，局部缺失/重开恢复/范围缺口隔离，核心新累计更大仍基线，A→B→A 和范围退休不恢复不确定量，完整重复/倒退/冲突批次处理，前项成功后后项失败全回滚（含名称、注册、缺口、游标），跨分钟余数守恒、真实累加溢出拒绝、可表示分片不误报中间溢出、BigInteger 查询、部分恢复不摊分，迁移旧游标及已核实 IndexId 新维度独立基线，新 SQL 类型/外键/basis 约束，以及旧 Ledger 拒绝 v2 / 独立路径 backup 恢复 v1。
+
+初轮合成 CSV 使用 ISO 时间而非解析器要求的 `yyyy-MM-dd HH:mm:ss`，在初始化夹具时失败；第二轮验证器误按 rowid 比较重建的分钟记录，逐业务主键对照确认所有字段相同且失败事务已回滚。本批保留失败日志，只改临时夹具/验证器，未放宽生产解析或迁移 SQL。最终分别创建 history/provider 后在 `attempt5-final` 完整通过；中间单库结果不作为最终双库证据。
+
+本机证据位于 `F:\AI playground\TempFiles\v2rayn-monitor-scope-ledger-proposal-20261014`，最终为 `attempt5-final/result.json`、`attempt5-final.log`、`build5.log`，临时源码在 `harness/`；JSON 记录实测 SQL SHA256。新测试/运行产物不进入仓库。本地计划、链接、diff 与 SQL/结果摘要检查后再提交；远端 CI 仅证明本批文档/既有程序回归，不会执行临时迁移原型，不能替代本地 SQL 证据。
+
+S5.6 仍 in_progress，S5.7 planned。本批已给出完整 DDL、逐行映射、迁移前 SQLite backup、失败回滚和已提交后的恢复边界：写入 v2 新历史后不能宣称自动无损降级。下一批将方案实现为受控的 v2 Ledger 并补正式回归；生产版本门禁、完整目录退休核对、采集循环、API/页面、真实进程重开、断电恢复与实机仍待后续。真实数据库迁移、替换运行文件、重载核心或切换节点需具体授权，不自动执行。
+
 ## 2026-10-14：S5.6 / PR #20 成员读取与配置绑定身份目录
 
 起点为 `e1f868bfe2c2aee4ab7fd2bc2a782015e0c25df4`，工作树干净、本地/远端一致，PR #20 保持 Open / Draft。用户授权继续成员读取与身份接口。本批不切换 WindowsDiscovery 生产入口，不改变核心补丁、test.2 白名单、运行文件、依赖、Schema 或真实数据库。
