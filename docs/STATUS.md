@@ -8,7 +8,11 @@
 
 本地复用既有 Go 与模块缓存离线执行同一脚本，4 个顶级测试 / 15 个子用例通过，重新构建的 test.3 SHA256 与原隔离联测候选完全一致：`547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`。PowerShell 语法、错误归档摘要拒绝、已有证据目录拒绝、计划一致性与 diff 检查通过。证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-extension-ci-20261014`。
 
-工作流提交为 `c2318858f719038d6717d362c4306ecb5909bafa`。首轮扩展 PR CI `38567534724` / push CI `38567526662` 在 `monitor.patch` 应用阶段失败，尚未执行 Go 回归；固定源码摘要与 Go 安装已通过。本地同一源码的 LF 补丁校验通过，CRLF 补丁复现远端完全相同的 `experimental/v2rayapi/stats.go:60` 错误。仅在 `.gitattributes` 增加 `*.patch text eol=lf`，避免 Windows checkout 转换补丁，不修改两层补丁或采用忽略上下文的绕过。失败记录保留；修正后的精确提交核心 CI 及产物待核对，不沿用此前 Monitor 绿灯。
+工作流提交为 `c2318858f719038d6717d362c4306ecb5909bafa`。首轮扩展 PR CI `38567534724` / push CI `38567526662` 在 `monitor.patch` 应用阶段失败，尚未执行 Go 回归；固定源码摘要与 Go 安装已通过。本地同一源码的 LF 补丁校验通过，CRLF 补丁复现远端完全相同的 `experimental/v2rayapi/stats.go:60` 错误。修正提交 `0f9c7989d5e33cedfc94d6995a78b7324e8b4260` 在 `.gitattributes` 增加 `*.patch text eol=lf`，避免 Windows checkout 转换补丁；工作流也覆盖属性文件改动，不修改两层补丁或采用忽略上下文的绕过。模拟 Windows checkout 的隔离副本重新检出补丁后，补丁字节与原文件一致，离线回归及构建通过，原候选摘要不变。失败记录保留。
+
+修正提交的扩展 PR CI `38568671399` 成功：实际执行 4 个顶级测试 / 15 个子用例，构建 test.3 并上传带源码/许可/provenance 的候选。独立 Monitor PR CI `38568671443` 双平台成功，Core 265 / Server 32 / 前端 51，Linux 浏览器 15；两条证据独立记录。同提交扩展 push CI `38568665588` 第一次在 Go 模块下载阶段遇到 proxy.golang.org HTTP/2 `INTERNAL_ERROR`，不是测试断言失败；已仅申请失败 job 重跑，不修改依赖版本、下载校验或测试设置。重跑及后续文档提交的检查以对应远端运行结果为准，不用成功 PR 运行隐去失败记录。
+
+已下载并核对扩展 PR CI 的 artifact `11896719141`：ZIP SHA256 为 `3fd200cbbbc9cce836a29579ce16d10f8c03da4a3a3cff888c2ca05864960449`，与 GitHub artifact digest 一致；原始源码归档及两层补丁摘要与固定来源一致。实际 checkout / GITHUB_SHA 为合并测试提交 `164048cde0c4d05abf13b3800d727b12bbe70166`，PR HEAD 则是 `0f9c798`，未混淆两者。CI EXE SHA256 为 `630dd18d4977435b7c05963ed21d2fbe16ca54def2dd3545279d73846ceb53b1`，与自身 provenance 一致，但不同于本地联测候选。两份 EXE 大小均为 81,980,928 bytes；Go 工具链/依赖/构建元数据相同，逐字节仅 Go build ID 内 40 bytes 不同，遮蔽该 ID 后其余字节完全一致。不宣称两份 EXE 的 SHA256 相同，也不替换原已联测候选或扩展 Monitor 白名单。详情见本轮 `core-ci-artifact-verification.json`、`build-id-comparison.json`、`fixed-extension-ci.log` 和 `fixed-monitor-ci.log`。
 
 本轮没有部署、替换运行文件、重载核心、切换真实节点或迁移真实账本。S5.6 继续 in_progress；新成员读取、多范围身份、完整迁移方案及批量原子账本尚待下一批，S5.7 / #19 保持 planned。
 
