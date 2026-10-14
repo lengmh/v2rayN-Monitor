@@ -419,6 +419,204 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal(1, handler.Requests);
     }
 
+    [Fact]
+    public void V2RayMembersKeepMemberRouteAndAggregateDimensionsSeparate()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>member>>>business>>>traffic>>>uplink", 11),
+            ("monitor>>>member>>>business>>>traffic>>>downlink", 12),
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", long.MaxValue),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", null),
+            ("monitor>>>business>>>traffic>>>uplink", 21),
+            ("monitor>>>business>>>traffic>>>downlink", 22),
+            ("monitor>>>excluded>>>traffic>>>uplink", 31),
+            ("monitor>>>excluded>>>traffic>>>downlink", 32),
+            ("monitor>>>unknown>>>traffic>>>uplink", null),
+            ("monitor>>>unknown>>>traffic>>>downlink", 42),
+            ("outbound>>>proxy>>>traffic>>>uplink", 901),
+            ("outbound>>>proxy>>>traffic>>>downlink", 902));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(frame, ["business", "proxy"], out var result));
+        Assert.Equal("actual_member", result!.Basis);
+        Assert.Equal(new XrayCounters(11, 12), result.Members["business"]);
+        Assert.Equal(new XrayCounters(long.MaxValue, 0), result.Members["proxy"]);
+        Assert.Equal(new XrayCounters(21, 22), result.Totals["business"]);
+        Assert.Equal(new XrayCounters(31, 32), result.Totals["excluded"]);
+        Assert.Equal(new XrayCounters(0, 42), result.Totals["unknown"]);
+        Assert.Empty(result.UnavailableMembers);
+        Assert.Empty(result.UnavailableTotals);
+        Assert.True(V2RayStatistics.TryReadResponse(frame, out var legacy));
+        Assert.Equal(new XrayCounters(901, 902), legacy);
+    }
+
+    [Fact]
+    public void V2RayMembersPreserveIndependentPairsWhenMembersOrTotalsAreUnavailable()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>member>>>good>>>traffic>>>uplink", 1),
+            ("monitor>>>member>>>good>>>traffic>>>downlink", 2),
+            ("monitor>>>member>>>missing>>>traffic>>>uplink", 3),
+            ("monitor>>>member>>>duplicate>>>traffic>>>uplink", 4),
+            ("monitor>>>member>>>duplicate>>>traffic>>>uplink", 4),
+            ("monitor>>>member>>>duplicate>>>traffic>>>downlink", 5),
+            ("monitor>>>member>>>invalid>>>traffic>>>uplink", ulong.MaxValue),
+            ("monitor>>>member>>>invalid>>>traffic>>>downlink", 6),
+            ("monitor>>>business>>>traffic>>>uplink", 7),
+            ("monitor>>>business>>>traffic>>>downlink", 8),
+            ("monitor>>>excluded>>>traffic>>>uplink", 9),
+            ("monitor>>>excluded>>>traffic>>>uplink", 9),
+            ("monitor>>>excluded>>>traffic>>>downlink", 10),
+            ("monitor>>>unknown>>>traffic>>>uplink", ulong.MaxValue),
+            ("monitor>>>unknown>>>traffic>>>downlink", 11));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(frame,
+            ["good", "missing", "absent", "duplicate", "invalid"], out var result));
+        Assert.Equal(new XrayCounters(1, 2), Assert.Single(result!.Members).Value);
+        Assert.Equal("missing_counter", result.UnavailableMembers["missing"]);
+        Assert.Equal("missing_counter", result.UnavailableMembers["absent"]);
+        Assert.Equal("duplicate_counter", result.UnavailableMembers["duplicate"]);
+        Assert.Equal("invalid_counter", result.UnavailableMembers["invalid"]);
+        Assert.Equal(new XrayCounters(7, 8), Assert.Single(result.Totals).Value);
+        Assert.Equal("duplicate_counter", result.UnavailableTotals["excluded"]);
+        Assert.Equal("invalid_counter", result.UnavailableTotals["unknown"]);
+    }
+
+    [Fact]
+    public void V2RayMembersDoNotTreatTest2RouteCountersAsMemberEvidenceOrIdleZero()
+    {
+        var routeOnly = StatisticsFrame(
+            ("outbound>>>proxy>>>traffic>>>uplink", 100),
+            ("outbound>>>proxy>>>traffic>>>downlink", 200));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(routeOnly, ["proxy"], out var result));
+        Assert.Empty(result!.Members);
+        Assert.Empty(result.Totals);
+        Assert.Equal("missing_counter", result.UnavailableMembers["proxy"]);
+        Assert.Equal(3, result.UnavailableTotals.Count);
+        Assert.All(result.UnavailableTotals.Values, value => Assert.Equal("missing_counter", value));
+    }
+
+    [Fact]
+    public void V2RayMembersRejectMalformedWireWithoutPartialResults()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 1),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 2));
+        var compressed = frame.ToArray(); compressed[0] = 1;
+        var unknownWire = frame.ToArray(); unknownWire[5] = 0x0f;
+        foreach (var invalid in new[] { compressed, frame[..^1], unknownWire, new byte[65537] })
+        {
+            Assert.False(V2RayStatistics.TryReadMembersResponse(invalid, ["proxy"], out var result));
+            Assert.Null(result);
+        }
+    }
+
+    [Fact]
+    public void V2RayMembersAllowTotalsOnlyAndRejectAmbiguousTags()
+    {
+        Assert.True(V2RayStatistics.TryReadMembersResponse(StatisticsFrame(), [], out var totalsOnly));
+        Assert.Empty(totalsOnly!.Members);
+        Assert.Empty(totalsOnly.UnavailableMembers);
+        Assert.Equal(3, totalsOnly.UnavailableTotals.Count);
+        foreach (var tags in new[] { new[] { "" }, new[] { "proxy", "proxy" }, new[] { "a>>>b" } })
+            Assert.Throws<ArgumentException>(() => V2RayStatistics.TryReadMembersResponse(StatisticsFrame(), tags, out _));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(StatisticsFrame(), ["proxy", "Proxy"], out var distinct));
+        Assert.Equal(2, distinct!.UnavailableMembers.Count);
+    }
+
+    [Fact]
+    public async Task V2RayMembersUseOneReadOnlyRpcAndKeepRequestFailuresUnavailable()
+    {
+        using var handler = new StatisticsHandler(StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 10),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 20)));
+        using var client = new HttpClient(handler);
+        var result = await V2RayStatistics.ReadMembersAsync(client, new Uri("http://127.0.0.1:10814/"),
+            ["proxy", "other"], CancellationToken.None);
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(new XrayCounters(10, 20), result!.Members["proxy"]);
+        Assert.Equal("missing_counter", result.UnavailableMembers["other"]);
+        await Assert.ThrowsAsync<ArgumentException>(() => V2RayStatistics.ReadMembersAsync(client,
+            new Uri("http://localhost:10814/"), ["proxy"], CancellationToken.None));
+        Assert.Equal(1, handler.Requests);
+        using var failedHandler = new StatisticsHandler(StatisticsFrame(), status: "13");
+        using var failedClient = new HttpClient(failedHandler);
+        await Assert.ThrowsAsync<HttpRequestException>(() => V2RayStatistics.ReadMembersAsync(failedClient,
+            new Uri("http://127.0.0.1:10814/"), ["proxy"], CancellationToken.None));
+    }
+
+    private const string MemberConfiguration = """
+        {"inbounds":[{"type":"mixed","tag":"in"}],"outbounds":[
+        {"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},
+        {"tag":"other","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},
+        {"tag":"direct","type":"direct"},
+        {"tag":"group","type":"selector","outbounds":["proxy","other","direct"],"default":"other"},
+        {"tag":"auto","type":"urltest","outbounds":["proxy","other"]},
+        {"tag":"chain","type":"socks","detour":"proxy"},
+        {"tag":"unsupported","type":"synthetic-unsupported"},
+        {"tag":"invalid>>>tag","type":"socks"}]}
+        """;
+
+    private static XraySnapshot MemberSnapshot(string configuration = MemberConfiguration)
+        => Snapshot(generation: XrayParser.Hash(Bytes(configuration)) + ":synthetic-config-and-sidecar-generation")
+            with { CoreName = "sing-box" };
+
+    [Fact]
+    public void SingboxMemberCatalogPreservesIndependentIdentityAndOnlyVerifiedProxyIndexId()
+    {
+        var snapshot = MemberSnapshot();
+        Assert.True(SingboxParser.TryReadMemberCatalog(snapshot, Bytes(MemberConfiguration), out var catalog, out var reason));
+        Assert.Equal("ready", reason);
+        Assert.Equal(snapshot.InstanceId, catalog!.InstanceId);
+        Assert.Equal(snapshot.Generation, catalog.Generation);
+        Assert.Equal(snapshot.ProcessIdentity, catalog.ProcessIdentity);
+        Assert.Equal(2, catalog.Candidates.Count);
+        Assert.Equal(new SingboxMemberIdentity("proxy", "anytls", "A"), catalog.Candidates["proxy"]);
+        Assert.Null(catalog.Candidates["other"].IndexId); // Even an identical endpoint/credential is not another IndexId proof.
+        Assert.Equal("group_not_member", catalog.UnavailableOutbounds["group"]);
+        Assert.Equal("group_not_member", catalog.UnavailableOutbounds["auto"]);
+        Assert.Equal("excluded_outbound", catalog.UnavailableOutbounds["direct"]);
+        Assert.Equal("dependent_outbound", catalog.UnavailableOutbounds["chain"]);
+        Assert.Equal("unsupported_member_type", catalog.UnavailableOutbounds["unsupported"]);
+        Assert.Equal("invalid_statistics_tag", catalog.UnavailableOutbounds["invalid>>>tag"]);
+        var serialized = JsonSerializer.Serialize(catalog);
+        Assert.DoesNotContain("Synthetic-Credential", serialized);
+        Assert.DoesNotContain("node.synthetic.invalid", serialized);
+        Assert.DoesNotContain("Same synthetic name", serialized);
+    }
+
+    [Fact]
+    public void SingboxMemberCatalogRequiresMatchingConfigurationAndCore()
+    {
+        foreach (var snapshot in new[] { MemberSnapshot() with { CoreName = "Xray" },
+            MemberSnapshot() with { Generation = "unrelated-generation" }, MemberSnapshot() with { InstanceId = "" } })
+        {
+            Assert.False(SingboxParser.TryReadMemberCatalog(snapshot, Bytes(MemberConfiguration), out var catalog, out var reason));
+            Assert.Null(catalog);
+            Assert.Equal("snapshot_changed", reason);
+        }
+        var changed = MemberConfiguration.Replace("\"default\":\"other\"", "\"default\":\"proxy\"");
+        Assert.False(SingboxParser.TryReadMemberCatalog(MemberSnapshot(), Bytes(changed), out _, out _));
+        var next = MemberSnapshot(changed) with { ProcessIdentity = "core-2", NodeId = "B" };
+        Assert.True(SingboxParser.TryReadMemberCatalog(next, Bytes(changed), out var catalog2, out _));
+        Assert.Equal("core-2", catalog2!.ProcessIdentity);
+        Assert.Equal("B", catalog2.Candidates["proxy"].IndexId);
+        Assert.Null(catalog2.Candidates["other"].IndexId); // Group selection never supplies a member's subscription identity.
+    }
+
+    [Fact]
+    public void SingboxMemberCatalogRejectsAmbiguousOrOutOfScopeConfiguration()
+    {
+        foreach (var config in new[] {
+            MemberConfiguration.Replace("\"tag\":\"other\"", "\"tag\":\"proxy\""),
+            MemberConfiguration.Replace("\"tag\":\"other\"", "\"tag\":\"other\",\"tag\":\"other\""),
+            MemberConfiguration.Replace("\"type\":\"mixed\"", "\"type\":\"tun\""),
+            MemberConfiguration.Replace("\"inbounds\":", "\"endpoints\":[{\"type\":\"wireguard\"}],\"inbounds\":"),
+            "{}", "not-json" })
+        {
+            Assert.False(SingboxParser.TryReadMemberCatalog(MemberSnapshot(config), Bytes(config), out var catalog, out var reason));
+            Assert.Null(catalog);
+            Assert.Equal("unsupported_configuration", reason);
+        }
+    }
+
     private static byte[] StatisticsFrame(params (string Name, ulong? Value)[] stats)
     {
         static void Varint(List<byte> bytes, ulong value)
