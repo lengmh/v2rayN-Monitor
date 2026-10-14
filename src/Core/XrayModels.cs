@@ -3,6 +3,13 @@ namespace V2rayNMonitor.Core;
 public sealed record CollectorReading(CounterSample? Sample, string State, string Message, string? CurrentNode,
     bool InvalidateContinuity = false, string CoreName = "Xray", ProxyCollectionScope? Scope = null);
 public sealed record XrayCounters(long Upload, long Download);
+// Route-tag evidence only: no inferred subscription identity, selected member, or summed total.
+public sealed record V2RayOutboundStatistics(
+    IReadOnlyDictionary<string, XrayCounters> Counters,
+    IReadOnlyDictionary<string, string> UnavailableOutbounds)
+{
+    public string Basis => "routed_outbound";
+}
 public sealed record XrayGuiSelection(string IndexId, bool EnableStatistics, bool DisplayRealTimeSpeed, bool EnableTun)
 {
     public bool StatisticsRequested => EnableStatistics || DisplayRealTimeSpeed;
