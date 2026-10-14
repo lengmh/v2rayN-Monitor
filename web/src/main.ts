@@ -103,14 +103,14 @@ function selectPeriod(next: Period): void {
 function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
   const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
-  const state = status.scope?.isPartial ? '部分采集' : states[status.state.toLowerCase()] || status.state;
+  const state = status.scope?.isPartial || status.state === 'partial' ? '部分采集' : states[status.state.toLowerCase()] || status.state;
   const message = [status.message || '等待有效采样。', status.scope?.description].filter(Boolean).join(' ');
   put('collector-state', state);
   put('collector-message', message);
   put('current-node', status.currentNode || '未确定'); el('current-node').title = status.currentNode || '未确定';
   put('live-upload', `↑ ${rate(status.uploadPerSecond, unit)}`); put('live-download', `↓ ${rate(status.downloadPerSecond, unit)}`);
   put('settings-collector-status', `当前状态：${state}。${message} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
-  el('status-dot').className = `status-dot ${status.scope?.isPartial ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
+  el('status-dot').className = `status-dot ${status.scope?.isPartial || status.state === 'partial' ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
   show('demo-notice', status.demo); show('demo-controls', status.demo);
 }
 function renderNodes(nodes: NodeInfo[]): void {
@@ -177,6 +177,10 @@ function renderHistory(history: HistoryResult): void {
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
   const quality = ['已知总量不等于完整使用量；缺失记录不等于零流量。'];
+  if (history.basis === 'actual_member')
+    quality.push('当前为实际成员维度。business、excluded、unknown 和历史 proxy 独立保存，不与成员量相加。');
+  if ((history.gaps ?? []).some(gap => gap.origin === 'legacy' && gap.isOpen))
+    quality.push('本范围包含历史遗留开放缺口；新成员成功采样不会关闭这类缺口。');
   if (history.partialCoverage || (history.gaps ?? []).some(gap => gap.reason === 'uncollected_outbounds') || history.records.some(record => record.partialCoverage))
     quality.push('本范围包含其他出站未采集的区间；组和其他代理的流量未知，合计仅包含已核实的计量范围。');
   if (recovered > 0n) quality.push(`合计及节点排行已包含恢复量 ${formatBytes(recovered, unit)}（${exactBytes(recovered)}）。`);

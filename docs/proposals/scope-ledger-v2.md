@@ -1,6 +1,6 @@
 # 多范围账本 v2 迁移提案
 
-#18 / S5.6 第五批新增独立 `ScopeLedger`，第六批新增显式离线 `ScopeLedgerMigration`，均使用同一嵌入 [SQL](scope-ledger-v2.sql)。已有 v1 文件不随正常启动升级；现有 Ledger/Host/Server 路径仍未切换，没有真实迁移。源码执行器及合成回归不等于批准真实账本变更。
+#18 / S5.6 的 ScopeLedger、显式离线 ScopeLedgerMigration 和第七批 Windows opt-in 接入使用同一嵌入 [SQL](scope-ledger-v2.sql)。默认启动继续 v1，`--scope-ledger` 只创建新 v2 或打开已有 v2，拒绝自动升级 v1。没有真实迁移或部署，源码及合成回归不等于批准真实账本变更。
 
 ## 目标与选择
 
@@ -101,7 +101,8 @@ identity_kind=outbound 的跨配置范围不承诺逻辑节点延续；没有证
 - 缺失期间发现 session/generation 改变也会持久失效连续性；即使后来回到原代次，也不恢复不确定量。同一实例的批次时间和完整规范化指纹一起保存，目录顺序不影响完整重复判定。
 - `ScopeQuery` 必填一个 basis，可选择一个 scope ID。字节以十进制字符串输出，合计采用 BigInteger；分页只裁明细，不裁合计、分桶、范围合计或缺口。开放缺口在查询到其后时间时仍披露，legacy NULL 缺口保持未归属。
 - 显式离线入口 `ScopeLedgerMigration.Migrate(historyPath, backupPath)` 要求调用方先停止全部写入者并取得具体授权。只接受支持的 v1 历史布局，拒绝其他表/视图/触发器、异常字段、孤立关联和路径链接；backup 路径必须是全新文件。使用 SQLite backup API，并在目标写事务中逐行复核目标与 backup 的原五表及结构，再执行 SQL、核对全部映射/批次水位/连续性和完整性后提交。备份以后历史变化也会拒绝；失败保留备份和故障文件，不删除或覆盖。
-- 第六批已经实现上述执行器，正常 Host/Server 不调用它。真实迁移前仍需核对具体路径、停止程序和恢复方案；不能手动改版本号或直接执行 SQL 绕过门禁。
+- 第六批已经实现执行器，正常 Host/Server 不调用它。第七批补充在创建 backup 父目录前检查已有祖先链接，再于创建后复核。真实迁移仍需核对路径、停止程序和恢复方案，不能手动改版本号或直接执行 SQL 绕过门禁。
+- 第七批在独立 `--scope-ledger` 模式接入采样、成员默认查询及带 basis 的 CSV；Xray 在该模式下延续 legacy_proxy。`/api/scope-history` 必填单一 basis，可查其他维度和旧 legacy 归档；页面尚无完整维度切换器，新模式实时速率暂不合并展示。新模式只在合成/隔离环境验证，未替换现有运行程序。
 
 ## 回滚与恢复
 

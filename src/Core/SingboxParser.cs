@@ -22,7 +22,7 @@ public static class SingboxParser
     }
 
     public static bool TryReadConfiguration(ReadOnlyMemory<byte> json, ReadOnlyMemory<byte> statisticsJson,
-        out XrayEffectiveConfiguration? configuration, out string reason)
+        out XrayEffectiveConfiguration? configuration, out string reason, bool allowMemberStatistics = false)
     {
         configuration = null;
         reason = "unsupported_mode";
@@ -48,7 +48,12 @@ public static class SingboxParser
             if (address.Length == 0 || !port.TryGetInt32(out var number) || number is < 1 or > 65535
                 || Text(proxy, "password").Length == 0) return false;
             reason = "invalid_statistics_configuration";
-            if (!TryReadStatisticsEndpoint(statisticsJson, out var endpoint)) return false;
+            Uri? endpoint;
+            if (allowMemberStatistics)
+            {
+                if (!TryReadMemberStatisticsSettings(statisticsJson, out endpoint, out _)) return false;
+            }
+            else if (!TryReadStatisticsEndpoint(statisticsJson, out endpoint)) return false;
             // The approved core counts the route-matched tag. A group selecting proxy is
             // still outside this counter; extra outbounds cannot broaden its attribution.
             var uncollected = entries.Where(x => Text(x, "tag") != "proxy"
@@ -81,6 +86,29 @@ public static class SingboxParser
                 || uri.Fragment.Length != 0 || uri.UserInfo.Length != 0) return false;
             endpoint = uri;
             return true;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    public static bool TryReadMemberStatisticsSettings(ReadOnlyMemory<byte> json, out Uri? endpoint,
+        out IReadOnlyList<string> members)
+    {
+        endpoint = null; members = [];
+        if (json.Length is <= 0 or > 4096) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !UniqueKeys(root)) return false;
+            if (root.EnumerateObject().Any(x => x.Name is not ("listen" or "monitor_members"))) return false;
+            if (!TryReadStatisticsEndpoint(JsonSerializer.SerializeToUtf8Bytes(new { listen = Text(root, "listen") }), out endpoint)) return false;
+            var field = Read(root, "monitor_members");
+            if (field.ValueKind == JsonValueKind.Undefined) return true; // Explicit mode, disabled member counters stay missing.
+            if (field.ValueKind != JsonValueKind.Array || field.GetArrayLength() == 0) return false;
+            var values = field.EnumerateArray().Select(x => x.ValueKind == JsonValueKind.String ? x.GetString()! : "").ToArray();
+            if (values.Any(x => string.IsNullOrWhiteSpace(x) || x.Contains(">>>", StringComparison.Ordinal)) ||
+                values.Distinct(StringComparer.Ordinal).Count() != values.Length) return false;
+            members = values; return true;
         }
         catch (JsonException) { return false; }
     }

@@ -4,6 +4,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Numerics;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -26,14 +27,16 @@ public sealed class MonitorServer : IAsyncDisposable
     private readonly ConcurrentDictionary<string, DateTimeOffset> launches = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> sessions = new();
     private readonly ProviderImports imports;
-    public Ledger Ledger { get; }
+    private readonly Ledger? legacyLedger;
+    public Ledger Ledger => legacyLedger ?? throw new InvalidOperationException("This opt-in instance uses a v2 scope ledger.");
+    public ScopeLedger? Scopes { get; }
     public string Address { get; private set; } = "";
     public CancellationToken Stopping => app.Lifetime.ApplicationStopping;
     public AppSettings Settings { get { lock (settingsGate) return settings; } }
     public void SetStatus(CollectorStatus value) => Volatile.Write(ref status, value);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    private MonitorServer(string directory, bool demoMode)
+    private MonitorServer(string directory, bool demoMode, bool useScopeLedger)
     {
         dataDir = directory; demo = demoMode; Directory.CreateDirectory(directory);
         var zone = TimeZoneInfo.Local.Id;
@@ -42,18 +45,24 @@ public sealed class MonitorServer : IAsyncDisposable
         var path = Path.Combine(dataDir, "settings.json");
         if (File.Exists(path)) settings = (JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Json) ?? settings) with { Demo = demo };
         _ = TimeZoneInfo.FindSystemTimeZoneById(settings.TimeZoneId);
-        Ledger = new(Path.Combine(directory, "history.db"));
+        if (demoMode && useScopeLedger) throw new ArgumentException("Scope mode cannot use the v1 demo initializer.");
+        var historyPath = Path.Combine(directory, "history.db");
+        if (useScopeLedger)
+            Scopes = File.Exists(historyPath) ? new ScopeLedger(historyPath) : ScopeLedger.CreateNew(historyPath);
+        else legacyLedger = new(historyPath);
         imports = new(Path.Combine(directory, "provider.db"));
-        status = new("setup", "选择 v2rayN 数据目录，开始只读采集。", Demo: demo);
+        status = new("setup", "选择 v2rayN 数据目录，开始只读采集。", Demo: demo,
+            CollectionBasis: useScopeLedger ? "actual_member" : "legacy_proxy");
         if (demo) { Ledger.SeedDemo(DateTimeOffset.UtcNow); status = new("demo", "合成演示数据，不连接真实代理。", Demo: true); }
     }
-    public static Task<MonitorServer> StartAsync(string directory, string webRoot, bool demo = false, CancellationToken ct = default)
+    public static Task<MonitorServer> StartAsync(string directory, string webRoot, bool demo = false, CancellationToken ct = default,
+        bool useScopeLedger = false)
         // The WinForms tray joins this task synchronously; nested framework awaits must not
         // inherit its UI synchronization context (the same applies to Kestrel shutdown).
-        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct), ct);
-    private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct)
+        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger), ct);
+    private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger)
     {
-        var server = new MonitorServer(directory, demo);
+        var server = new MonitorServer(directory, demo, useScopeLedger);
         try { await server.StartWebAsync(webRoot, ct).ConfigureAwait(false); return server; }
         catch { await server.DisposeAsync().ConfigureAwait(false); throw; }
     }
@@ -128,15 +137,24 @@ public sealed class MonitorServer : IAsyncDisposable
         app.MapGet("/api/settings", () => Settings);
         app.MapPost("/api/settings", (AppSettings value) => { UpdateSettings(value); return Results.Ok(Settings); });
         app.MapGet("/api/timezones", () => TimeZoneInfo.GetSystemTimeZones().Select(z => new { id = TimeZoneInfo.TryConvertWindowsIdToIanaId(z.Id, out var iana) ? iana : z.Id, name = z.DisplayName }).DistinctBy(z => z.id));
-        app.MapGet("/api/nodes", () => Ledger.GetNodes());
-        app.MapGet("/api/history", (HttpRequest request) => Ledger.Query(ParseQuery(request)));
+        app.MapGet("/api/nodes", () => Scopes is null ? Ledger.GetNodes() :
+            Scopes.GetScopes(PrimaryBasis).Select(x => new NodeInfo("scope:" + x.Id.ToString(CultureInfo.InvariantCulture), x.Scope.Name)).ToArray());
+        app.MapGet("/api/history", (HttpRequest request) => QueryHistory(ParseQuery(request)));
+        app.MapGet("/api/scope-history", (HttpRequest request) =>
+        {
+            if (Scopes is null) throw new ArgumentException("当前实例未显式启用多范围账本。");
+            return Scopes.Query(ToScopeQuery(ParseQuery(request), request.Query["basis"].ToString()));
+        });
         app.MapGet("/api/export", (HttpRequest request) =>
         {
-            var rows = Ledger.Export(ParseQuery(request));
-            var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality\r\n");
+            var query = ParseQuery(request);
+            var basis = PrimaryBasis;
+            var rows = Scopes is null ? Ledger.Export(query) : Scopes.Export(ToScopeQuery(query, basis)).Select(ToTraffic).ToArray();
+            var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality" + (Scopes is null ? "" : ",basis,scope_key") + "\r\n");
             foreach (var row in rows)
                 csv.AppendLine(string.Join(',', Cell(row.Start), Cell(row.End), Cell(row.NodeName), row.Upload, row.Download,
-                    Cell(row.PartialCoverage ? row.Quality + ";uncollected_outbounds" : row.Quality)));
+                    Cell(row.PartialCoverage ? row.Quality + ";uncollected_outbounds" : row.Quality)) +
+                    (Scopes is null ? "" : "," + Cell(basis) + "," + Cell(row.NodeKey)));
             return Results.File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", "v2rayn-local-history.csv");
         });
         app.MapPost("/api/imports/preview", (ImportRequest request) => imports.Preview(request));
@@ -158,6 +176,42 @@ public sealed class MonitorServer : IAsyncDisposable
         app.UseDefaultFiles(); app.UseStaticFiles();
         await app.StartAsync(ct).ConfigureAwait(false);
         Address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single().TrimEnd('/');
+    }
+    private string PrimaryBasis => Volatile.Read(ref status).CollectionBasis is "legacy_proxy" ? "legacy_proxy" : "actual_member";
+    private ScopeQuery ToScopeQuery(QuerySpec query, string basis)
+    {
+        long? id = null;
+        if (query.NodeKey is { } key)
+        {
+            if (!key.StartsWith("scope:", StringComparison.Ordinal) ||
+                !long.TryParse(key.AsSpan(6), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed <= 0)
+                throw new ArgumentException("请选择有效的多范围历史 ID。");
+            id = parsed;
+        }
+        return new(basis, query.Start, query.End, query.TimeZoneId, query.Bucket, id, query.Page, query.PageSize)
+        { ScopeName = query.NodeName };
+    }
+    private static TrafficRow ToTraffic(ScopeTrafficRow row) =>
+        new(row.Start, row.End, "scope:" + row.ScopeId.ToString(CultureInfo.InvariantCulture),
+            row.Name, row.Upload, row.Download, row.Quality, row.PartialCoverage);
+    private HistoryResult QueryHistory(QuerySpec query)
+    {
+        if (Scopes is null) return Ledger.Query(query);
+        var result = Scopes.Query(ToScopeQuery(query, PrimaryBasis));
+        string Add(string a, string b) => (BigInteger.Parse(a, CultureInfo.InvariantCulture) + BigInteger.Parse(b, CultureInfo.InvariantCulture)).ToString(CultureInfo.InvariantCulture);
+        return new(query.Start.ToString("O", CultureInfo.InvariantCulture), query.End.ToString("O", CultureInfo.InvariantCulture),
+            result.Upload, result.Download, Add(result.RecoveredUpload, result.PartialUpload), Add(result.RecoveredDownload, result.PartialDownload),
+            result.Gaps.Count, result.Series,
+            result.Scopes.Select(x => new NodeTotal("scope:" + x.ScopeId.ToString(CultureInfo.InvariantCulture), x.Name,
+                x.Upload, x.Download, x.RecoveredUpload, x.RecoveredDownload)).ToArray(),
+            result.Records.Select(ToTraffic).ToArray(), checked((int)result.RecordCount))
+        {
+            Basis = result.Basis, RecoveredUpload = result.RecoveredUpload, RecoveredDownload = result.RecoveredDownload,
+            PartialUpload = result.PartialUpload, PartialDownload = result.PartialDownload,
+            UnbucketedUpload = result.UnbucketedUpload, UnbucketedDownload = result.UnbucketedDownload,
+            Gaps = result.Gaps.Select(x => new GapInfo(x.Start, x.End, x.Reason, x.IsOpen, x.Origin)).ToArray(),
+            PartialCoverage = result.Gaps.Any(x => x.Reason == "uncollected_outbounds")
+        };
     }
     private QuerySpec ParseQuery(HttpRequest request)
     {
@@ -185,5 +239,5 @@ public sealed class MonitorServer : IAsyncDisposable
     private static string SafeError(Exception ex) => ex is ArgumentException && ex.Message.Length < 300 && !ex.Message.Contains("Parameter") ? ex.Message : "请检查输入格式、时区和数值范围。";
     private sealed record SessionRequest(string Token);
     public ValueTask DisposeAsync() => new(Task.Run(DisposeCoreAsync));
-    private async Task DisposeCoreAsync() { if (app is not null) { await app.StopAsync().ConfigureAwait(false); await app.DisposeAsync().ConfigureAwait(false); } imports.Dispose(); Ledger.Dispose(); }
+    private async Task DisposeCoreAsync() { if (app is not null) { await app.StopAsync().ConfigureAwait(false); await app.DisposeAsync().ConfigureAwait(false); } imports.Dispose(); legacyLedger?.Dispose(); Scopes?.Dispose(); }
 }

@@ -196,8 +196,44 @@ public sealed class ScopeLedger : IDisposable
                 INSERT INTO scope_batches(instance_id,at_ticks,fingerprint) VALUES($instance,$at,$fingerprint)
                 ON CONFLICT(instance_id) DO UPDATE SET at_ticks=excluded.at_ticks,fingerprint=excluded.fingerprint;
                 """, ("$instance", batch.InstanceId), ("$at", at), ("$fingerprint", fingerprint));
+            Execute(transaction, """
+                UPDATE scope_gaps SET end_ticks=MAX(end_ticks,$at),is_open=0
+                WHERE scope_id IS NULL AND origin='collector' AND is_open=1;
+                """, ("$at", at));
             transaction.Commit();
             return new("committed", statuses);
+        }
+    }
+
+    /// <summary>An unverified capture interrupts known scopes; no instance or node is fabricated.</summary>
+    public void RecordGap(DateTimeOffset at, string reason, bool invalidateContinuity)
+    {
+        if (!Category(reason)) throw new ArgumentException("Use a safe diagnostic category.", nameof(reason));
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            using var transaction = connection.BeginTransaction();
+            var known = new List<(long Id, long At)>();
+            using (var command = Command(transaction, """
+                SELECT s.scope_id,COALESCE(c.at_ticks,$at) FROM measurement_scopes s
+                LEFT JOIN scope_cursors c ON c.scope_id=s.scope_id;
+                """, ("$at", at.UtcTicks)))
+            using (var reader = command.ExecuteReader())
+                while (reader.Read()) known.Add((reader.GetInt64(0), reader.GetInt64(1)));
+            foreach (var item in known) Gap(transaction, item.Id, Math.Min(item.At, at.UtcTicks), at.UtcTicks, reason, true);
+            if (known.Count == 0)
+                Execute(transaction, """
+                    INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin)
+                    SELECT $at,$at,NULL,$reason,1,'collector'
+                    WHERE NOT EXISTS(SELECT 1 FROM scope_gaps WHERE scope_id IS NULL AND origin='collector' AND is_open=1);
+                    UPDATE scope_gaps SET end_ticks=MAX(end_ticks,$at)
+                    WHERE scope_id IS NULL AND origin='collector' AND is_open=1;
+                    """, ("$at", at.UtcTicks), ("$reason", reason));
+            Execute(transaction, """
+                UPDATE scope_cursors SET interrupted=1,continuity_valid=CASE WHEN $invalid=1 THEN 0 ELSE continuity_valid END;
+                UPDATE scope_batches SET at_ticks=$at,fingerprint=NULL WHERE at_ticks<$at;
+                """, ("$at", at.UtcTicks), ("$invalid", invalidateContinuity ? 1 : 0));
+            transaction.Commit();
         }
     }
 
@@ -232,7 +268,7 @@ public sealed class ScopeLedger : IDisposable
         var zone = TimeZoneInfo.FindSystemTimeZoneById(query.TimeZoneId);
         var parameters = new (string, object?)[]
         {
-            ("$basis", query.Basis), ("$id", query.ScopeId), ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks)
+            ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", query.ScopeName), ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks)
         };
         lock (gate)
         {
@@ -278,7 +314,8 @@ public sealed class ScopeLedger : IDisposable
             using (var command = Command(transaction, """
                 SELECT g.scope_id,g.origin,g.start_ticks,g.end_ticks,g.reason,g.is_open
                 FROM scope_gaps g LEFT JOIN measurement_scopes s ON s.scope_id=g.scope_id
-                WHERE (g.scope_id IS NULL OR (s.basis=$basis AND ($id IS NULL OR s.scope_id=$id)))
+                WHERE (g.scope_id IS NULL OR (s.basis=$basis AND ($id IS NULL OR s.scope_id=$id)
+                    AND ($name IS NULL OR s.name=$name COLLATE BINARY)))
                     AND ((g.start_ticks < $end AND (g.end_ticks > $start OR g.is_open=1))
                         OR (g.start_ticks=g.end_ticks AND g.start_ticks >= $start AND g.start_ticks < $end))
                 ORDER BY g.start_ticks,g.id;
@@ -305,7 +342,8 @@ public sealed class ScopeLedger : IDisposable
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=m.scope_id AND g.reason='uncollected_outbounds'
                 AND g.start_ticks < m.start_ticks+600000000 AND g.end_ticks > m.start_ticks) AS partial_coverage
         FROM scope_minutes m JOIN measurement_scopes s ON s.scope_id=m.scope_id
-        WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id) AND m.start_ticks >= $start AND m.start_ticks < $end
+        WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
+            AND m.start_ticks >= $start AND m.start_ticks < $end
         UNION ALL
         SELECT u.start_ticks,u.end_ticks,u.scope_id,s.name,u.upload,u.download,
             CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
@@ -313,8 +351,32 @@ public sealed class ScopeLedger : IDisposable
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=u.scope_id AND g.reason='uncollected_outbounds'
                 AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks)
         FROM scope_unallocated u JOIN measurement_scopes s ON s.scope_id=u.scope_id
-        WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id) AND u.start_ticks < $end AND u.end_ticks > $start
+        WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
+            AND u.start_ticks < $end AND u.end_ticks > $start
         """;
+
+    public IReadOnlyList<ScopeTrafficRow> Export(ScopeQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ValidateBasis(query.Basis);
+        if (query.End <= query.Start || query.ScopeId is <= 0) throw new ArgumentException("Invalid export interval or scope.");
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            using var command = Command(null, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id LIMIT 100001;",
+                ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", query.ScopeName),
+                ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks));
+            using var reader = command.ExecuteReader();
+            var rows = new List<ScopeTrafficRow>();
+            while (reader.Read())
+            {
+                if (rows.Count == 100000) throw new ArgumentException("导出最多 100000 条记录，请缩小范围。");
+                rows.Add(new(query.Basis, reader.GetInt64(2), reader.GetString(3), Iso(reader.GetInt64(0)),
+                    Iso(reader.GetInt64(1)), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6), reader.GetInt64(9) != 0));
+            }
+            return rows;
+        }
+    }
 
     private long Register(SqliteTransaction transaction, string instance, MeasurementScope scope)
     {
