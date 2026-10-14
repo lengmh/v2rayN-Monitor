@@ -530,7 +530,7 @@
       "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
       "issue": 18,
       "pull_request": 20,
-      "implementation_note": "2026-10-14 批量路由 RPC、test.3 核心实际成员原型及独立 Go CI 已交付。第三批新增成员/三个独立总量读取及配置绑定身份目录，9 项新增回归、真实 test.3/test.2 副本的旧连接跨切换、direct 排除、重开读取器/核心和旧版本缺失不补零通过。目录使用既有核实快照，仅 proxy 关联 IndexId，其余候选独立 tag；联测快照为合成，不代表完整 Windows 多出站身份核实。生产入口、sidecar、白名单、Schema、API/页面及账本保持原范围。下一批先完成完整迁移方案及隔离多范围账本验证，真实迁移另取授权。见 docs/STATUS.md 与 docs/singbox-extension-scope.md。"
+      "implementation_note": "批量路由/成员 RPC、test.3 核心原型、独立 CI 与配置绑定候选身份目录已交付，e8a6c22 精确 CI 全通过。第四批完成完整 v2 提案 SQL、旧历史 legacy_proxy 映射和 backup/回滚方案；生产 v1 初始化器生成双库合成数据，19 组隔离迁移/批量记账验证通过，provider.db 精确小数及文件不变。目录完整身份、正式 v2 Ledger/生产采样/查询/页面尚未接入，临时原型未纳入 CI。下一批先实现受控 v2 Ledger 与正式回归；生产入口、sidecar、白名单、Schema及真实账本不变，真实迁移另取授权。见 docs/STATUS.md、docs/proposals/scope-ledger-v2.md 与 docs/singbox-extension-scope.md。"
     },
     {
       "id": "S5.7",
