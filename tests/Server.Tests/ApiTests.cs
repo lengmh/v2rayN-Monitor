@@ -29,6 +29,27 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/settings", new { })).StatusCode);
         await Login(); Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/status")).StatusCode);
     }
+    [Fact] public async Task PartialCollectionIsExplicitInStatusHistoryAndExport()
+    {
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        server.SetStatus(new("collecting", "Synthetic partial collector", "Synthetic node",
+            Scope: new V2rayNMonitor.Core.ProxyCollectionScope(37, 4)));
+        server.Ledger.Accept(new("test", "one", "Synthetic node", "process1", "config1", at, 100, 200, true));
+        server.Ledger.Accept(new("test", "one", "Synthetic node", "process1", "config1", at.AddSeconds(1), 110, 220, true));
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        Assert.Equal("routed_proxy", status.GetProperty("scope").GetProperty("basis").GetString());
+        Assert.True(status.GetProperty("scope").GetProperty("isPartial").GetBoolean());
+        Assert.Equal(37, status.GetProperty("scope").GetProperty("uncollectedOutbounds").GetInt32());
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("10", history.GetProperty("upload").GetString());
+        Assert.Equal("20", history.GetProperty("download").GetString());
+        Assert.True(history.GetProperty("partialCoverage").GetBoolean());
+        Assert.True(history.GetProperty("records")[0].GetProperty("partialCoverage").GetBoolean());
+        Assert.Equal("uncollected_outbounds", history.GetProperty("gaps")[0].GetProperty("reason").GetString());
+        Assert.Contains("measured;uncollected_outbounds", await client.GetStringAsync("/api/export" + query));
+    }
     [Fact] public async Task BootstrapTokenIsOneUseAndCookieHttpOnlyStrict()
     {
         client.DefaultRequestHeaders.Add("X-Monitor-Request", "1");

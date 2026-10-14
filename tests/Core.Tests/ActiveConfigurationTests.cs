@@ -110,6 +110,7 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.True(SingboxParser.TryReadConfiguration(Bytes(AnyTlsConfiguration), StatisticsEndpoint, out var parsed, out _));
         Assert.Equal("sing-box", parsed!.CoreName);
         Assert.Equal("anytls", parsed.Protocol);
+        Assert.False(parsed.Scope!.IsPartial);
     }
 
     [Theory]
@@ -170,11 +171,74 @@ public sealed class ActiveConfigurationTests : IDisposable
     }
 
     [Fact]
-    public void AnyTlsComplexRoutingAndUnverifiedSessionOptionsAreRejected()
+    public void AnyTlsAdditionalOutboundsDoNotBlockTheVerifiedProxy()
     {
         var extra = Change(AnyTlsConfiguration, root => root["outbounds"]!.AsArray().Add(JsonNode.Parse(
             """{"type":"anytls","tag":"another-proxy","server":"other.synthetic.invalid","server_port":443,"password":"Synthetic"}""")));
-        Assert.False(SingboxParser.TryReadConfiguration(Bytes(extra), StatisticsEndpoint, out _, out _));
+        CreateProfiles(AnyTlsProfile());
+        Assert.True(SingboxParser.TryReadConfiguration(Bytes(extra), StatisticsEndpoint, out _, out _));
+        Assert.Equal("Same synthetic name", ReadAnyTls(configuration: extra));
+    }
+
+    [Fact]
+    public void AnyTlsGeneratedMultiOutboundShapeReportsOnlyRoutedProxyCoverage()
+    {
+        // Counts mirror the observed shape; all tags, endpoints and authentication are invented.
+        var configuration = Change(AnyTlsConfiguration, root =>
+        {
+            var outbounds = root["outbounds"]!.AsArray();
+            for (var i = 0; i < 30; i++) outbounds.Add(JsonNode.Parse($$"""
+                {"type":"anytls","tag":"synthetic-anytls-{{i}}","server":"extra.synthetic.invalid",
+                 "server_port":443,"password":"Synthetic"}
+                """));
+            for (var i = 0; i < 3; i++) outbounds.Add(JsonNode.Parse($$"""
+                {"type":"vmess","tag":"synthetic-vmess-{{i}}","server":"extra.synthetic.invalid",
+                 "server_port":443,"uuid":"00000000-0000-0000-0000-000000000002"}
+                """));
+            foreach (var type in new[] { "selector", "urltest" })
+                for (var i = 0; i < 2; i++) outbounds.Add(JsonNode.Parse($$"""
+                    {"type":"{{type}}","tag":"synthetic-{{type}}-{{i}}","outbounds":["proxy","direct"]}
+                    """));
+            root["route"]!["rules"] = JsonNode.Parse("""
+                [{"domain_suffix":["group.synthetic.invalid"],"outbound":"synthetic-selector-0"},
+                 {"domain_suffix":["test.synthetic.invalid"],"outbound":"synthetic-urltest-0"}]
+                """);
+        });
+        CreateProfiles(AnyTlsProfile());
+        Assert.Equal("Same synthetic name", ReadAnyTls(configuration: configuration));
+        Assert.True(SingboxParser.TryReadConfiguration(Bytes(configuration), StatisticsEndpoint, out var parsed, out _));
+        Assert.Equal(new ProxyCollectionScope(37, 4), parsed!.Scope);
+        Assert.Equal("routed_proxy", parsed.Scope!.Basis);
+        Assert.True(parsed.Scope.IsPartial);
+    }
+
+    [Fact]
+    public void AnyTlsUncollectedChainDoesNotChangeTheVerifiedProxyIdentity()
+    {
+        var configuration = Change(AnyTlsConfiguration, root => root["outbounds"]!.AsArray().Add(JsonNode.Parse(
+            """
+            {"type":"anytls","tag":"synthetic-chain","server":"other.synthetic.invalid","server_port":443,
+             "password":"Synthetic","detour":"proxy"}
+            """)));
+        CreateProfiles(AnyTlsProfile());
+        Assert.Equal("Same synthetic name", ReadAnyTls(configuration: configuration));
+        Assert.True(SingboxParser.TryReadConfiguration(Bytes(configuration), StatisticsEndpoint, out var parsed, out _));
+        Assert.Equal(new ProxyCollectionScope(1, 0), parsed!.Scope);
+    }
+
+    [Theory]
+    [InlineData("""{"tag":"proxy","type":"direct"}""")]
+    [InlineData("""{"tag":"","type":"anytls"}""")]
+    [InlineData("""{"tag":"another-proxy"}""")]
+    public void AnyTlsCannotVerifyMissingOrConflictingOutboundIdentity(string outbound)
+    {
+        var configuration = Change(AnyTlsConfiguration, root => root["outbounds"]!.AsArray().Add(JsonNode.Parse(outbound)));
+        Assert.False(SingboxParser.TryReadConfiguration(Bytes(configuration), StatisticsEndpoint, out _, out _));
+    }
+
+    [Fact]
+    public void AnyTlsTargetChainAndUnverifiedSessionOptionsAreRejected()
+    {
         var detour = Change(AnyTlsConfiguration, root => Proxy(root)["detour"] = "direct");
         Assert.False(SingboxParser.TryReadConfiguration(Bytes(detour), StatisticsEndpoint, out _, out _));
         var sessionOption = Change(AnyTlsConfiguration, root => Proxy(root)["idle_session_timeout"] = "1s");
