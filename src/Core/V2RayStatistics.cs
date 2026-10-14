@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.ObjectModel;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -14,6 +15,18 @@ public static class V2RayStatistics
 
     public static async Task<XrayCounters?> ReadAsync(HttpClient client, Uri endpoint, CancellationToken cancellationToken)
     {
+        var result = await ReadOutboundsAsync(client, endpoint, ["proxy"], cancellationToken).ConfigureAwait(false);
+        return result is not null && result.Counters.TryGetValue("proxy", out var counters) ? counters : null;
+    }
+
+    /// <summary>
+    /// Reads route-tag counters in one reset=false RPC. A group tag is not its actual member,
+    /// and the returned dimensions must not be added to member or chain-hop counters.
+    /// </summary>
+    public static async Task<V2RayOutboundStatistics?> ReadOutboundsAsync(HttpClient client, Uri endpoint,
+        IReadOnlyCollection<string> outboundTags, CancellationToken cancellationToken)
+    {
+        var tags = ValidateTags(outboundTags);
         if (endpoint.Scheme != "http" || !IPAddress.TryParse(endpoint.Host.Trim('[', ']'), out var address)
             || !IPAddress.IsLoopback(address)) throw new ArgumentException("A numeric loopback endpoint is required.");
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint, QueryPath))
@@ -42,16 +55,33 @@ public static class V2RayStatistics
         var status = response.TrailingHeaders.TryGetValues("grpc-status", out var trailers) ? trailers
             : response.Headers.TryGetValues("grpc-status", out var headers) ? headers : [];
         if (!status.SequenceEqual(["0"])) throw new HttpRequestException("Statistics RPC did not succeed.");
-        return TryReadResponse(bytes.ToArray(), out var counters) ? counters : null;
+        return TryReadOutboundsResponse(bytes.ToArray(), tags, out var counters) ? counters : null;
     }
 
     public static bool TryReadResponse(ReadOnlySpan<byte> frame, out XrayCounters? counters)
     {
         counters = null;
+        if (!TryReadOutboundsResponse(frame, ["proxy"], out var result)
+            || !result!.Counters.TryGetValue("proxy", out counters)) return false;
+        return true;
+    }
+
+    public static bool TryReadOutboundsResponse(ReadOnlySpan<byte> frame, IReadOnlyCollection<string> outboundTags,
+        out V2RayOutboundStatistics? counters)
+    {
+        counters = null;
+        var tags = ValidateTags(outboundTags);
         if (frame.Length < 5 || frame.Length > MaxResponseBytes || frame[0] != 0
             || BinaryPrimitives.ReadUInt32BigEndian(frame[1..]) != frame.Length - 5) return false;
         var message = frame[5..];
-        long? upload = null, download = null;
+        var expected = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var tag in tags)
+        {
+            expected.Add(CounterName(tag, "uplink"));
+            expected.Add(CounterName(tag, "downlink"));
+        }
+        var values = new Dictionary<string, ulong>(StringComparer.Ordinal);
+        var duplicates = new HashSet<string>(StringComparer.Ordinal);
         while (!message.IsEmpty)
         {
             if (!Field(ref message, out var field, out var wire)) return false;
@@ -61,22 +91,40 @@ public static class V2RayStatistics
                 continue;
             }
             if (wire != 2 || !Block(ref message, out var stat) || !ReadStat(stat, out var name, out var value)) return false;
-            switch (name)
-            {
-                case "outbound>>>proxy>>>traffic>>>uplink":
-                    if (upload is not null) return false;
-                    upload = value; break;
-                case "outbound>>>proxy>>>traffic>>>downlink":
-                    if (download is not null) return false;
-                    download = value; break;
-            }
+            if (expected.Contains(name) && !values.TryAdd(name, value)) duplicates.Add(name);
         }
-        if (upload is null || download is null) return false; // Missing is never a fabricated zero.
-        counters = new(upload.Value, download.Value);
+        var complete = new Dictionary<string, XrayCounters>(StringComparer.Ordinal);
+        var unavailable = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var tag in tags)
+        {
+            var up = CounterName(tag, "uplink");
+            var down = CounterName(tag, "downlink");
+            if (duplicates.Contains(up) || duplicates.Contains(down)) unavailable.Add(tag, "duplicate_counter");
+            else if ((values.TryGetValue(up, out var upload) && upload > long.MaxValue)
+                || (values.TryGetValue(down, out var download) && download > long.MaxValue))
+                unavailable.Add(tag, "invalid_counter");
+            else if (!values.TryGetValue(up, out upload) || !values.TryGetValue(down, out download))
+                unavailable.Add(tag, "missing_counter"); // Missing is never a fabricated zero.
+            else complete.Add(tag, new((long)upload, (long)download));
+        }
+        counters = new(new ReadOnlyDictionary<string, XrayCounters>(complete),
+            new ReadOnlyDictionary<string, string>(unavailable));
         return true;
     }
 
-    private static bool ReadStat(ReadOnlySpan<byte> message, out string name, out long value)
+    private static string CounterName(string tag, string direction) => $"outbound>>>{tag}>>>traffic>>>{direction}";
+
+    private static string[] ValidateTags(IReadOnlyCollection<string> outboundTags)
+    {
+        ArgumentNullException.ThrowIfNull(outboundTags);
+        var tags = outboundTags.ToArray();
+        if (tags.Length == 0 || tags.Any(tag => string.IsNullOrEmpty(tag) || tag.Contains(">>>", StringComparison.Ordinal))
+            || tags.Distinct(StringComparer.Ordinal).Count() != tags.Length)
+            throw new ArgumentException("Use distinct, nonempty outbound tags without the statistics delimiter.", nameof(outboundTags));
+        return tags;
+    }
+
+    private static bool ReadStat(ReadOnlySpan<byte> message, out string name, out ulong value)
     {
         name = "";
         value = 0; // proto3 omits the scalar field for an actual zero.
@@ -94,8 +142,7 @@ public static class V2RayStatistics
             }
             else if (field == 2)
             {
-                if (hasValue || wire != 0 || !Varint(ref message, out var number) || number > long.MaxValue) return false;
-                value = (long)number;
+                if (hasValue || wire != 0 || !Varint(ref message, out value)) return false;
                 hasValue = true;
             }
             else if (!Skip(ref message, wire)) return false;

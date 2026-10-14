@@ -523,13 +523,13 @@
       "phase": "S5",
       "title": "多出站与策略组实际成员计量",
       "depends_on": ["S5.5"],
-      "status": "planned",
+      "status": "in_progress",
       "work": "#18 的独立 PR 扩展核心连接路径归属与累计、独立身份和批量原子采样。多出站按可靠的 instance + IndexId 或独立 outbound 分账；组、实际成员和业务总量不相加，旧长连接跨切换仍保留旧成员，组选 direct 排除。",
       "outputs": ["核心成员归属与累计扩展", "批量原子采样及独立历史身份", "切换、并发、短/长连接、重开及代次证据"],
       "acceptance": "未知出站不阻断独立已核实范围；不依赖可丢事件、活动连接轮询、速率积分或 group.Now() 补精确累计。增量/游标同批原子提交；必要 Schema 先隔离验证，真实迁移另行授权。",
       "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
       "issue": 18,
-      "implementation_note": "2026-10-14 用户扩大范围，已登记独立增强 Issue；当前 test.2 不能证明实际成员累计，本项尚未实现。"
+      "implementation_note": "2026-10-14 已开始独立批量 RPC 读取检查点：路由 tag 的完整计数与缺失/重复/无效原因分别返回；原单 proxy 接口复用且保持范围。纯回环真实 test.2 副本验证路由 tag 分离、并发短连接和重复只读查询。生产发现/账本未切换，实际成员归属、多范围身份与批量原子记账未实现；Schema 迁移仅有方向，未执行。见 docs/STATUS.md 与 docs/singbox-extension-scope.md。"
     },
     {
       "id": "S5.7",

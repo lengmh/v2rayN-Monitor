@@ -1,5 +1,21 @@
 # 初版实现与验证状态
 
+## 2026-10-14：S5.6 / Issue #18 批量路由 tag RPC 接口
+
+起点为 `b832892b5da5e2d9eef1439d65880f6bbd05e6ec`；开始时本地与远端一致、工作树干净，#15 仍 Open、PR #17 仍 Open / Draft，未合并。用户确认 API 接入和独立 proxy 读取已通过，并授权开始后续范围；这些已通过项不因 #18/#19 尚未完成而撤销。新分支为 `feat/issue18-singbox-batch-stats`，以 PR #17 分支为基础走独立 Draft PR，不把本批变更混入 #17。
+
+恢复现场和隔离验证前后，普通权限生产发现均核实实际客户端/核心的路径、父子关系和创建代次；实际 Monitor 仍为此前 CI 包的 preview.2，进程代次不变，采集状态为 connected、routed_proxy，37 个出站未采集，其中 4 个组。本轮不替换真实运行文件、不改生成配置/路由/节点、不重载核心、不访问真实凭据或迁移账本。
+
+新增 `ReadOutboundsAsync` / `TryReadOutboundsResponse`，一次数值回环 HTTP/2 `QueryStats`、reset=false，保持兼容服务名和 65,536 bytes 响应上限。每个请求 tag 的完整上下行累计独立保存；缺失、重复或超出非负 int64 范围的 tag 独立列为不可用，不补零、不丢弃其他完整 tag。不能可靠解析的 wire、压缩/截断/超限帧或 RPC 失败仍拒绝整个响应。原单 proxy API 复用解析并保持原采集范围。
+
+本地最终 Release 构建零警告零错误，Core 265 / Server 32 全部通过；新增 7 项回归覆盖多 tag 分离、组维度不推断成员、缺失/重复/无效的局部不可用、实际 proto3 零值、大小写、整数边界、坏帧、请求参数与只读 RPC。前端未修改，本地未重跑前端或浏览器；精确提交 CI 另行核对，不沿用 #17 绿灯。计划与 diff 检查通过。
+
+真实 test.2 同摘要副本使用显式原生 V2Ray API、纯回环 SOCKS / echo 和合成路由验证，生产批量读取器得到 4 个独立 tag 的零基线及未注册 tag 的 missing_counter。单次 proxy / other / group / direct 分别增加每方向 17 / 29 / 19 / 23 bytes，仅对应 tag 增长；64 次并发 proxy 和 100 次 other 短连接分别增加每方向 1,984 / 3,700 bytes。路由组选择 proxy 只增长组 tag；重复 reset=false 查询稳定，每次新建读取器进程仍保留核心累计。隔离核心均已退出。首轮合成服务因默认监听队列 5 小于并发 8 出现连接拒绝；依据核心日志与 Python 标准库修正临时队列，在新目录完成重跑，失败证据保留。
+
+证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-issue18-batch-20261014`，最终真实核心副本结果见 `attempt3-final/real-core-batch-result.json`。这只证明批量路由 tag 取数，不是组实际成员、Windows 自动全量接入、多范围账本或真实节点验收。现装 test.2 仍只为 proxy 启用文件式统计；生产 WindowsDiscovery、账本、API 和页面范围未扩大。
+
+S5.6 标为 in_progress，S5.7 / #19 保持 planned。已发现 v1 游标以 instance_id 唯一，不能直接保存同实例的多个独立游标；迁移前置方向见 [扩展范围](singbox-extension-scope.md)。本批没有 Schema、依赖或 CI 配置变更，也未将 group.Now()、事件队列或伪造实例键用作计量捷径。下一检查点先在核心实际处理路径验证成员归属，再实现隔离多范围 Schema 与批量原子记账。
+
 ## 2026-10-14：S5.5 真实预览启用与被动账本核验
 
 代码基线为 `c8ea8707a6029264fece5b4d2f95d239983b2547`，开始核对时工作树干净、本地与远端一致，PR #17 仍为 Draft。用户退出旧 preview.1 后，已核实没有残留 Monitor 进程、preview.2 EXE 摘要与 CI 包一致、原独立验证目录的设置正确。启动前用 SQLite 只读 backup 保存验证账本快照；未覆盖旧程序或修改正式 `D:\v2rayn-monitor\data`。
