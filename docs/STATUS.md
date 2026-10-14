@@ -6,7 +6,9 @@
 
 工作流使用 Windows runner / Go 1.26.8，固定公开源码 `1ac1a339` 与归档 SHA256 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`，按序应用 `monitor.patch` / `member-stats.patch`。使用原 Windows 标签加 with_v2ray_api，显式禁止工具链自动切换，测试/构建使用 `-mod=readonly` 并核对依赖清单未变。`^TestMonitor` 必须实际通过四个指定顶级测试，不接受无测试绿灯。候选 artifact 附原始公开源码归档、补丁、GPLv3 LICENSE、说明、构建脚本及包含 checkout/CI/源码/补丁/工具链/二进制身份的 provenance。
 
-本地复用既有 Go 与模块缓存离线执行同一脚本，4 个顶级测试 / 15 个子用例通过，重新构建的 test.3 SHA256 与原隔离联测候选完全一致：`547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`。PowerShell 语法、错误归档摘要拒绝、已有证据目录拒绝、计划一致性与 diff 检查通过。证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-extension-ci-20261014`。远端精确提交的核心 CI 及产物核对待本批提交后执行，不沿用此前 Monitor 绿灯。
+本地复用既有 Go 与模块缓存离线执行同一脚本，4 个顶级测试 / 15 个子用例通过，重新构建的 test.3 SHA256 与原隔离联测候选完全一致：`547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`。PowerShell 语法、错误归档摘要拒绝、已有证据目录拒绝、计划一致性与 diff 检查通过。证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-extension-ci-20261014`。
+
+工作流提交为 `c2318858f719038d6717d362c4306ecb5909bafa`。首轮扩展 PR CI `38567534724` / push CI `38567526662` 在 `monitor.patch` 应用阶段失败，尚未执行 Go 回归；固定源码摘要与 Go 安装已通过。本地同一源码的 LF 补丁校验通过，CRLF 补丁复现远端完全相同的 `experimental/v2rayapi/stats.go:60` 错误。仅在 `.gitattributes` 增加 `*.patch text eol=lf`，避免 Windows checkout 转换补丁，不修改两层补丁或采用忽略上下文的绕过。失败记录保留；修正后的精确提交核心 CI 及产物待核对，不沿用此前 Monitor 绿灯。
 
 本轮没有部署、替换运行文件、重载核心、切换真实节点或迁移真实账本。S5.6 继续 in_progress；新成员读取、多范围身份、完整迁移方案及批量原子账本尚待下一批，S5.7 / #19 保持 planned。
 
