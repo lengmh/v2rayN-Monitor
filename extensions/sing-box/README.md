@@ -73,7 +73,7 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 
 ## 独立扩展 CI
 
-2026-10-14 用户授权新增 [扩展工作流](../../.github/workflows/sing-box-extension.yml)，不改现有 Monitor CI。Windows runner 使用固定 Go 1.26.8，下载上述固定提交的公开源码归档，要求 SHA256 为 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`；按序应用两层补丁，执行 `^TestMonitor` 并核实四个必需测试确实通过，再构建 test.3。保留原 Windows 标签和依赖版本，`-mod=readonly`；构建前后核对 go.mod/go.sum 摘要，禁止自动切换工具链。
+2026-10-14 用户授权新增 [扩展工作流](../../.github/workflows/sing-box-extension.yml)，不改现有 Monitor CI。Windows runner 使用固定 Go 1.26.8，下载上述固定提交的公开源码归档，要求 SHA256 为 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`；按序应用两层补丁，执行 `^TestMonitor` 并核实四个必需测试确实通过，再构建 test.3。保留原 Windows 标签和依赖版本，`-mod=readonly`；构建前后核对 go.mod/go.sum 摘要，禁止自动切换工具链。`.gitattributes` 固定补丁为 LF，防止 Windows checkout 的 CRLF 转换破坏补丁上下文和摘要。
 
 复用同一 [构建脚本](build-ci.ps1) 的本地命令如下；需已有固定 Go 环境，输出目录必须尚不存在。可通过 `-SourceArchive` 指定本地已下载归档，仍执行同一摘要校验。
 

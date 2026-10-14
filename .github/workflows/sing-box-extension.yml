@@ -5,10 +5,12 @@ on:
     paths:
       - 'extensions/sing-box/**'
       - '.github/workflows/sing-box-extension.yml'
+      - '.gitattributes'
   pull_request:
     paths:
       - 'extensions/sing-box/**'
       - '.github/workflows/sing-box-extension.yml'
+      - '.gitattributes'
 permissions:
   contents: read
 jobs:
