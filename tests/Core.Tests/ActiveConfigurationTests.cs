@@ -1065,5 +1065,20 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal(9007199254740993, reading.Upload);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScopeAutostartPreservesModeAndKeepsDistinctDirectories(bool scopeMode)
+    {
+        const string executable = @"C:\Synthetic Program\v2rayN-Monitor.exe";
+        const string root = @"F:\Synthetic Data\scope-ledger";
+        var command = MonitorStartup.Command(executable, root, scopeMode);
+        Assert.StartsWith("\"" + executable + "\" --background", command);
+        Assert.EndsWith("--data-dir \"" + root + "\"", command);
+        Assert.Equal(scopeMode, command.Contains(" --scope-ledger ", StringComparison.Ordinal));
+        Assert.NotEqual(command, MonitorStartup.Command(executable, root, !scopeMode));
+        Assert.NotEqual(command, MonitorStartup.Command(executable, root + "-other", scopeMode));
+    }
+
     public void Dispose() { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
 }

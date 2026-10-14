@@ -12,6 +12,8 @@ test.3 的文件式 sidecar 原来不能启用成员，本批新增第三层 mem
 
 本地整方案 Release build 最终零警告零错误，Core 309 / Server 34 / 前端 52 项全部通过，已包含末次备份父目录门禁、CSV basis/scope_key 及遗留缺口 origin 的全量复验。新增 6 项 Core 投影/sidecar/前后稳定边界/局部缺失/持久化/Xray 回归、2 项 API/启动门禁和1项成员 DOM 回归。源代码/计划/diff、候选与源码摘要在本轮清单核对，远端精确提交 CI 另行记录，不沿用旧绿灯。
 
+Windows 检查点首提交为 `276c6592eb1618fffc3fbb27b1d01eb9aa182bce`。提交后复核发现原开机启动命令会丢失 --scope-ledger，因此补充统一启动命令并按完整程序/模式/目录核对勾选状态，不在后台自动更新注册表。两项回归在原行为下先实测失败，恢复修正后整方案零警告零错误、Core 最终311项全部通过；Server34/前端52相关代码不变，保留先前通过结果。autostart-red.log、build-autostart-final.log 与 core-tests-autostart-final.log 保存红绿证据。此为同一 Windows checkpoint 的修正，未读写实际启动项；最终提交 CI 再核对。
+
 失败记录保留：编译先暴露 out 参数 lambda 捕获和跨平台 test seam 的 CA1416，修为本地变量及显式原生调用边界，未禁用警告；Server 合成夹具在活动 SQLite 文件上使用 File.ReadAllBytes 触发共享冲突，改为正常停止后核对并恢复测试生命周期；前端隔离副本缺三个源码夹具且新增状态夹具漏 null 速率，补齐夹具后52项全过。依赖 cache lock 的摘要不同只因根 preview.1/preview.2 版本，逐项核对全部依赖/直接版本完全相同后复用，不安装或升级依赖。子进程曾继承 NODE_TLS_REJECT_UNAUTHORIZED=0，末次前端验证仅在该子进程解除此值，并关闭 npm 更新提示，未修改全局环境。
 
 证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-windows-scope-20261015`：build*.log、Core/Server TRX、web-tests-final.log、core/artifacts/build-provenance.json、probe/result.json 与隔离核心日志、最终 checkpoint/CI；候选未部署。S5.6 in_progress，S5.7 planned。Windows 源码接入已交付，下一步为经具体授权的实机接入与受控验收；新库优先，真实历史迁移另行确认，不合并或发布。
