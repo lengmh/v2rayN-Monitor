@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -306,6 +307,160 @@ public sealed class ActiveConfigurationTests : IDisposable
         var compressed = Frame(up, down); compressed[0] = 1;
         Assert.False(V2RayStatistics.TryReadResponse(compressed, out _));
         Assert.False(V2RayStatistics.TryReadResponse(Frame(up, down).AsSpan(0, 10), out _));
+    }
+
+    [Fact]
+    public void V2RayBatchKeepsRouteTagsIndependentAndDoesNotInferMembersOrTotals()
+    {
+        var frame = StatisticsFrame(
+            ("outbound>>>proxy>>>traffic>>>uplink", 101),
+            ("outbound>>>proxy>>>traffic>>>downlink", 202),
+            ("outbound>>>other>>>traffic>>>uplink", 303),
+            ("outbound>>>other>>>traffic>>>downlink", 404),
+            ("outbound>>>group>>>traffic>>>uplink", 505),
+            ("outbound>>>group>>>traffic>>>downlink", 606),
+            ("outbound>>>direct>>>traffic>>>uplink", 999));
+        Assert.True(V2RayStatistics.TryReadOutboundsResponse(frame, ["proxy", "other", "group"], out var result));
+        Assert.Equal("routed_outbound", result!.Basis);
+        Assert.Equal(3, result.Counters.Count);
+        Assert.Equal(new XrayCounters(101, 202), result.Counters["proxy"]);
+        Assert.Equal(new XrayCounters(303, 404), result.Counters["other"]);
+        Assert.Equal(new XrayCounters(505, 606), result.Counters["group"]);
+        Assert.Empty(result.UnavailableOutbounds);
+        Assert.False(result.Counters.ContainsKey("direct"));
+        Assert.True(V2RayStatistics.TryReadResponse(frame, out var legacy));
+        Assert.Equal(result.Counters["proxy"], legacy);
+    }
+
+    [Fact]
+    public void V2RayBatchMissingOrDuplicatePairDoesNotDiscardIndependentCompletePair()
+    {
+        var frame = StatisticsFrame(
+            ("outbound>>>proxy>>>traffic>>>uplink", null),
+            ("outbound>>>proxy>>>traffic>>>downlink", long.MaxValue),
+            ("outbound>>>missing-down>>>traffic>>>uplink", 123),
+            ("outbound>>>duplicate>>>traffic>>>uplink", 123),
+            ("outbound>>>duplicate>>>traffic>>>uplink", 123),
+            ("outbound>>>duplicate>>>traffic>>>downlink", 456),
+            ("outbound>>>invalid>>>traffic>>>uplink", ulong.MaxValue),
+            ("outbound>>>invalid>>>traffic>>>downlink", 1),
+            ("outbound>>>Proxy>>>traffic>>>uplink", 789),
+            ("outbound>>>Proxy>>>traffic>>>downlink", null));
+        Assert.True(V2RayStatistics.TryReadOutboundsResponse(frame,
+            ["proxy", "missing-down", "missing-both", "duplicate", "invalid", "Proxy"], out var result));
+        Assert.Equal(2, result!.Counters.Count);
+        Assert.Equal(new XrayCounters(0, long.MaxValue), result.Counters["proxy"]);
+        Assert.Equal(new XrayCounters(789, 0), result.Counters["Proxy"]);
+        Assert.Equal("missing_counter", result.UnavailableOutbounds["missing-down"]);
+        Assert.Equal("missing_counter", result.UnavailableOutbounds["missing-both"]);
+        Assert.Equal("duplicate_counter", result.UnavailableOutbounds["duplicate"]);
+        Assert.Equal("invalid_counter", result.UnavailableOutbounds["invalid"]);
+        Assert.True(V2RayStatistics.TryReadResponse(frame, out _));
+    }
+
+    [Fact]
+    public void V2RayBatchDoesNotInventIdleZeroForAbsentCounters()
+    {
+        Assert.True(V2RayStatistics.TryReadOutboundsResponse(StatisticsFrame(), ["proxy", "other"], out var result));
+        Assert.Empty(result!.Counters);
+        Assert.Equal(2, result.UnavailableOutbounds.Count);
+        Assert.False(V2RayStatistics.TryReadResponse(StatisticsFrame(), out _));
+    }
+
+    [Fact]
+    public void V2RayBatchRejectsMalformedWireWithoutReturningAPartialSnapshot()
+    {
+        var valid = StatisticsFrame(
+            ("outbound>>>proxy>>>traffic>>>uplink", 1),
+            ("outbound>>>proxy>>>traffic>>>downlink", 2));
+        var compressed = valid.ToArray(); compressed[0] = 1;
+        var unknownWire = valid.ToArray(); unknownWire[5] = 0x0f;
+        foreach (var frame in new[] { compressed, valid[..^1], unknownWire, new byte[65537] })
+        {
+            Assert.False(V2RayStatistics.TryReadOutboundsResponse(frame, ["proxy", "other"], out var result));
+            Assert.Null(result);
+        }
+    }
+
+    [Fact]
+    public void V2RayBatchRejectsAmbiguousRequestedTags()
+    {
+        foreach (var tags in new[] { Array.Empty<string>(), new[] { "" }, new[] { "proxy", "proxy" }, new[] { "a>>>b" } })
+            Assert.Throws<ArgumentException>(() => V2RayStatistics.TryReadOutboundsResponse(StatisticsFrame(), tags, out _));
+    }
+
+    [Fact]
+    public async Task V2RayBatchUsesOneBoundedReadOnlyRpcAndKeepsUnavailableTags()
+    {
+        var frame = StatisticsFrame(
+            ("outbound>>>proxy>>>traffic>>>uplink", 10),
+            ("outbound>>>proxy>>>traffic>>>downlink", 20),
+            ("outbound>>>other>>>traffic>>>uplink", 30),
+            ("outbound>>>other>>>traffic>>>downlink", 40));
+        using var handler = new StatisticsHandler(frame);
+        using var client = new HttpClient(handler);
+        var result = await V2RayStatistics.ReadOutboundsAsync(client, new Uri("http://127.0.0.1:10814/"),
+            ["proxy", "other", "unregistered"], CancellationToken.None);
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(new XrayCounters(10, 20), result!.Counters["proxy"]);
+        Assert.Equal(new XrayCounters(30, 40), result.Counters["other"]);
+        Assert.Equal("missing_counter", result.UnavailableOutbounds["unregistered"]);
+    }
+
+    [Fact]
+    public async Task V2RayBatchRpcFailureNeverProducesAvailableCounters()
+    {
+        using var handler = new StatisticsHandler(StatisticsFrame(), status: "13");
+        using var client = new HttpClient(handler);
+        await Assert.ThrowsAsync<HttpRequestException>(() => V2RayStatistics.ReadOutboundsAsync(client,
+            new Uri("http://127.0.0.1:10814/"), ["proxy", "other"], CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => V2RayStatistics.ReadOutboundsAsync(client,
+            new Uri("http://localhost:10814/"), ["proxy"], CancellationToken.None));
+        Assert.Equal(1, handler.Requests);
+    }
+
+    private static byte[] StatisticsFrame(params (string Name, ulong? Value)[] stats)
+    {
+        static void Varint(List<byte> bytes, ulong value)
+        {
+            while (value >= 128) { bytes.Add((byte)((value & 127) | 128)); value >>= 7; }
+            bytes.Add((byte)value);
+        }
+        var message = new List<byte>();
+        foreach (var (name, value) in stats)
+        {
+            var text = Encoding.UTF8.GetBytes(name);
+            var stat = new List<byte> { 0x0a }; Varint(stat, (ulong)text.Length); stat.AddRange(text);
+            if (value.HasValue) { stat.Add(0x10); Varint(stat, value.Value); }
+            message.Add(0x0a); Varint(message, (ulong)stat.Count); message.AddRange(stat);
+        }
+        var frame = new byte[message.Count + 5];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(1), (uint)message.Count);
+        message.CopyTo(frame, 5);
+        return frame;
+    }
+
+    private sealed class StatisticsHandler(byte[] frame, string status = "0") : HttpMessageHandler
+    {
+        public int Requests { get; private set; }
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests++;
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal(V2RayStatistics.QueryPath, request.RequestUri!.AbsolutePath);
+            Assert.Equal(HttpVersion.Version20, request.Version);
+            Assert.Equal(HttpVersionPolicy.RequestVersionExact, request.VersionPolicy);
+            Assert.Equal("application/grpc", request.Content!.Headers.ContentType!.MediaType);
+            Assert.Equal(new byte[] { 0, 0, 0, 0, 2, 0x10, 0 }, await request.Content.ReadAsByteArrayAsync(cancellationToken));
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Version = HttpVersion.Version20,
+                Content = new ByteArrayContent(frame)
+            };
+            response.Content.Headers.ContentType = new("application/grpc");
+            response.TrailingHeaders.Add("grpc-status", status);
+            return response;
+        }
     }
 
     [Theory]
