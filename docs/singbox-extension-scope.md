@@ -97,7 +97,7 @@ test.4 叠加第三层 member-sidecar.patch，通过 listen 加显式 monitor_me
 
 默认 `/api/history` 查询当前主 basis，CSV 增加 basis；`/api/scope-history` 必填单 basis。同名筛选保留独立 scope 身份，成员、business、excluded、unknown、路由与 legacy 不相加。页面已有成员说明与 partial 状态；完整维度切换器和新模式实时速率未交付，旧 legacy 可经显式 API 查询。
 
-本地 Core309/Server34/前端52、Go5顶级/22子用例、真实核心隔离启动/成员 RPC/首接零基线通过，绑定为合成；精确提交 CI 另核对。Windows 源码接入已交付，实际 v2rayN 身份、受控流量/切换/重开及断电恢复仍待经授权验收，不自动迁移或部署。
+本地 Core311/Server34/前端52、Go5顶级/22子用例、真实核心隔离启动/成员 RPC/首接零基线通过，绑定为合成；精确提交 CI 另核对。Windows 源码接入已交付，实际 v2rayN 身份、受控流量/切换/重开及断电恢复仍待经授权验收，不自动迁移或部署。
 
 ## 实机边界
 

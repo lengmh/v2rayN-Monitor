@@ -51,14 +51,14 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add("打开 Monitor 数据目录", null, (_, _) => Process.Start(new ProcessStartInfo(directory) { UseShellExecute = true }));
         if (!demo)
         {
-            var startup = new ToolStripMenuItem("登录 Windows 时启动") { Checked = IsStartupEnabled() };
+            var startup = new ToolStripMenuItem("登录 Windows 时启动") { Checked = IsStartupEnabled(scopeMode) };
             startup.Click += (_, _) =>
             {
                 try
                 {
                     using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
                     if (startup.Checked) key.DeleteValue("V2rayNMonitor", false);
-                    else key.SetValue("V2rayNMonitor", $"\"{Environment.ProcessPath}\" --background --data-dir \"{directory}\"");
+                    else key.SetValue("V2rayNMonitor", MonitorStartup.Command(Environment.ProcessPath!, directory, scopeMode));
                     startup.Checked = !startup.Checked;
                 }
                 catch (Exception) { MessageBox.Show("无法更新开机启动设置，请检查当前用户权限。", "v2rayN Monitor"); }
@@ -81,10 +81,11 @@ internal sealed class TrayContext : ApplicationContext
         using var icon = new Icon(stream, SystemInformation.SmallIconSize);
         return (Icon)icon.Clone();
     }
-    private bool IsStartupEnabled()
+    private bool IsStartupEnabled(bool scopeMode)
     {
         using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
-        return key?.GetValue("V2rayNMonitor") is string value && value.Contains(Environment.ProcessPath ?? "__invalid__", StringComparison.OrdinalIgnoreCase);
+        return key?.GetValue("V2rayNMonitor") is string value &&
+            string.Equals(value, MonitorStartup.Command(Environment.ProcessPath ?? "__invalid__", directory, scopeMode), StringComparison.OrdinalIgnoreCase);
     }
     private void Open()
     {
