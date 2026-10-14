@@ -1,5 +1,15 @@
 # 初版实现与验证状态
 
+## 2026-10-14：S5.6 / PR #20 独立扩展 CI
+
+接手起点为 `80c33396396487e3717d4948edd13f78a3a12877`，工作树干净、本地/远端一致，PR #20 仍 Open / Draft，基础 PR #17 未合并。已恢复上一线程“同意，可以 CI”的具体授权，本轮只新增独立扩展工作流及可复用构建脚本，不改变现有 Monitor CI、依赖版本、核心补丁、生产白名单、Schema 或运行程序。
+
+工作流使用 Windows runner / Go 1.26.8，固定公开源码 `1ac1a339` 与归档 SHA256 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`，按序应用 `monitor.patch` / `member-stats.patch`。使用原 Windows 标签加 with_v2ray_api，显式禁止工具链自动切换，测试/构建使用 `-mod=readonly` 并核对依赖清单未变。`^TestMonitor` 必须实际通过四个指定顶级测试，不接受无测试绿灯。候选 artifact 附原始公开源码归档、补丁、GPLv3 LICENSE、说明、构建脚本及包含 checkout/CI/源码/补丁/工具链/二进制身份的 provenance。
+
+本地复用既有 Go 与模块缓存离线执行同一脚本，4 个顶级测试 / 15 个子用例通过，重新构建的 test.3 SHA256 与原隔离联测候选完全一致：`547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`。PowerShell 语法、错误归档摘要拒绝、已有证据目录拒绝、计划一致性与 diff 检查通过。证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-extension-ci-20261014`。远端精确提交的核心 CI 及产物核对待本批提交后执行，不沿用此前 Monitor 绿灯。
+
+本轮没有部署、替换运行文件、重载核心、切换真实节点或迁移真实账本。S5.6 继续 in_progress；新成员读取、多范围身份、完整迁移方案及批量原子账本尚待下一批，S5.7 / #19 保持 planned。
+
 ## 2026-10-14：S5.6 / PR #20 核心实际成员原型
 
 起点为 `1782621a7bce2e9496bcfb60aa07e7c4b5581f8f`，实现提交为 `bfc1e404d73cf1ae7b6eed34030e614ef721c530`；开始时工作树干净、本地与远端一致，PR #20 Open / Draft，基础仍为未合并的 PR #17。用户授权继续下一检查点。本批不改变 Monitor 生产代码、Schema、依赖或运行程序。
