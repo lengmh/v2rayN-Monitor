@@ -1,8 +1,10 @@
 # 初版实现与验证状态
 
+本文证据路径使用通用占位符：`<evidence-root>` 为本机证据根目录，`<monitor-data>` 为正式 Monitor 数据目录。此处仅对历史路径脱敏，保留原测试结论与提交身份，不表示在这些占位路径重新执行过验证。
+
 ## 2026-10-14：S5.5 真实预览启用与被动账本核验
 
-代码基线为 `c8ea8707a6029264fece5b4d2f95d239983b2547`，开始核对时工作树干净、本地与远端一致，PR #17 仍为 Draft。用户退出旧 preview.1 后，已核实没有残留 Monitor 进程、preview.2 EXE 摘要与 CI 包一致、原独立验证目录的设置正确。启动前用 SQLite 只读 backup 保存验证账本快照；未覆盖旧程序或修改正式 `D:\v2rayn-monitor\data`。
+代码基线为 `c8ea8707a6029264fece5b4d2f95d239983b2547`，开始核对时工作树干净、本地与远端一致，PR #17 仍为 Draft。用户退出旧 preview.1 后，已核实没有残留 Monitor 进程、preview.2 EXE 摘要与 CI 包一致、原独立验证目录的设置正确。启动前用 SQLite 只读 backup 保存验证账本快照；未覆盖旧程序或修改正式 `<monitor-data>`。
 
 2026-10-14 14:08（北京时间）启动 CI `38508181097` 的 preview.2，沿用原独立 `live-validation-data`。其 ProductVersion 为 `0.2.0-preview.2+e79e4973afedb62ed4e264739eb4c186da95786e`，后缀仍是该次合并测试提交，不是 PR HEAD。扩展保持 test.2；本轮没有修改路由、节点选择或侧文件，也没有发起核心重载。
 
@@ -17,7 +19,7 @@
 
 上述是实际预览首次基线、持续持久化和被动守恒证据，不再仅为合成链路或只读采集器探测。受控实际 proxy/direct 对照、受控节点/核心切换、Monitor 重开恢复和真实页面目视验收仍待完成；S0.3/S5.1–S5.3 保留 blocked，S5.5 保留 in_progress，不将完整真实节点验收标为通过。多出站实际成员、代理链及自定义配置仍分别由 #18/S5.6、#19/S5.7 跟踪。
 
-脱敏核验报告及本地账本备份位于 `F:\AI playground\TempFiles\v2rayn-monitor-singbox-scope-20261014\live-preview2-20261014-140812`。真实流量数值、节点身份和数据库没有上传。此 checkpoint 只更新事实记录；代码、依赖、Schema 和运行扩展不变，现有 preview.2 保持运行。文档提交的检查/CI 另行核对，不替换当前已核实的运行包，不合并或正式发布。
+脱敏核验报告及本地账本备份位于 `<evidence-root>/v2rayn-monitor-singbox-scope-20261014/live-preview2-20261014-140812`。真实流量数值、节点身份和数据库没有上传。此 checkpoint 只更新事实记录；代码、依赖、Schema 和运行扩展不变，现有 preview.2 保持运行。文档提交的检查/CI 另行核对，不替换当前已核实的运行包，不合并或正式发布。
 
 ## 2026-10-14：S5.5 / PR #17 独立 proxy 与部分覆盖
 
@@ -38,7 +40,7 @@
 - 真实核心副本首轮因合成 urltest 的 interval 大于 idle_timeout 启动失败；补齐 fixture 并使用新隔离库后通过，失败记录保留。前端首轮修复了合成响应漏字段及隔离副本缺源码输入，未吞掉失败。
 - 定向 Edge 无头浏览器用例通过，主代理目视检查桌面/390 px 手机的部分采集、历史未知范围和明细标签。所有临时核心退出；真实客户端/核心/旧预览的进程代次、生成配置、选择文件、扩展、侧文件和系统代理前后未变。
 
-证据根目录为本机 `F:\AI playground\TempFiles\v2rayn-monitor-singbox-scope-20261014`；真实核验仅输出脱敏形状和布尔比较，不上传节点名、地址、凭据、IndexId、完整配置或运行数据库。实际命令、结果与可验证预览身份保留在该目录的验证记录中。当前提交的远端 CI 与预览只认该次运行，不沿用旧绿灯；PR 保持 Draft，不合并、不正式发布。
+证据根目录为本机 `<evidence-root>/v2rayn-monitor-singbox-scope-20261014`；真实核验仅输出脱敏形状和布尔比较，不上传节点名、地址、凭据、IndexId、完整配置或运行数据库。实际命令、结果与可验证预览身份保留在该目录的验证记录中。当前提交的远端 CI 与预览只认该次运行，不沿用旧绿灯；PR 保持 Draft，不合并、不正式发布。
 
 S5.5 的实机预览替换与持续记账待具体授权；S0.3/S5.1–S5.3 仍 blocked。新增 S5.6 / [Issue #18](https://github.com/lengmh/v2rayN-Monitor/issues/18)（多出站与实际组成员）、S5.7 / [Issue #19](https://github.com/lengmh/v2rayN-Monitor/issues/19)（链与自定义配置），后续各走独立 PR；不将本批部分覆盖包装为全量支持。范围见 [扩展计量](singbox-extension-scope.md)。CSV #16 planned，插件 deferred。
 
