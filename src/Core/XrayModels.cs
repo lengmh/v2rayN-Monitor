@@ -10,6 +10,20 @@ public sealed record V2RayOutboundStatistics(
 {
     public string Basis => "routed_outbound";
 }
+// Member and aggregate dimensions stay separate; no cross-dimension sum or IndexId inference.
+public sealed record V2RayMemberStatistics(
+    IReadOnlyDictionary<string, XrayCounters> Members,
+    IReadOnlyDictionary<string, string> UnavailableMembers,
+    IReadOnlyDictionary<string, XrayCounters> Totals,
+    IReadOnlyDictionary<string, string> UnavailableTotals)
+{
+    public string Basis => "actual_member";
+}
+public sealed record SingboxMemberIdentity(string OutboundTag, string Protocol, string? IndexId);
+// Candidates come from an independently verified configuration, not names returned by the RPC.
+public sealed record SingboxMemberCatalog(string InstanceId, string Generation, string ProcessIdentity,
+    IReadOnlyDictionary<string, SingboxMemberIdentity> Candidates,
+    IReadOnlyDictionary<string, string> UnavailableOutbounds);
 public sealed record XrayGuiSelection(string IndexId, bool EnableStatistics, bool DisplayRealTimeSpeed, bool EnableTun)
 {
     public bool StatisticsRequested => EnableStatistics || DisplayRealTimeSpeed;
