@@ -106,7 +106,7 @@
       ],
       "acceptance": "明确输出能力等级：逐出站累计、活动配置累计、速度估算或不可用。不能用连接轮询推断已消失的短连接流量；速度乘时间的结果必须标为估算。",
       "stop_rule": "本轮只验证路径，不承诺所有构建与模式。用户未安装或不使用该内核时可 deferred，待 S5 再验证，不阻塞已证明的主内核，也不改以 CSV 作为主来源。",
-      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
     },
     {
       "id": "S0.4",
@@ -451,7 +451,7 @@
       ],
       "acceptance": "可靠模式下原始累计差与数据库总量一致；若仅能估算，页面及导出全程标明估算，不能将其纳入“精确节点计量已通过”。",
       "stop_rule": "不存在可用可靠路径时公开保留限制；不伪造完成，不重写 v2rayN。",
-      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
     },
     {
       "id": "S5.2",
@@ -468,7 +468,7 @@
       ],
       "acceptance": "受控 direct 与 proxy 混合流量不会冒充单节点使用量；未知最终出口时显示活动配置或不支持，而不是全归当前选中节点。",
       "stop_rule": "本版不扩展 TUN、任意策略组、多跳链或多实例；无法核实的范围继续明确不支持。",
-      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
     },
     {
       "id": "S5.3",
@@ -485,7 +485,7 @@
       ],
       "acceptance": "跨内核切换不重复入账、不沿用错误单位，不损害既有第一内核历史；所有异常状态在同一页面可解释。",
       "stop_rule": "只修复当前两内核交接问题，不扩为其他客户端通用监控器。",
-      "implementation_note": "2026-10-14 Issue #15：文件式扩展 1.14.1-monitor-test.2 及 Monitor 0.2.0-preview.1 已实现，Windows 合成 AnyTLS/direct/账本恢复/代次/跨核心通过。仍缺真实客户端文件加载、真实节点字段等价和实际账本验收；不以合成结果标为 done。证据见 docs/STATUS.md 和 docs/singbox-capability.md；真实安装与重载等待具体授权。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 / preview.1 已通过原 Windows 合成链路，已安装并重载真实扩展。实际配置被旧预览 unsupported_mode 整体拒绝，验证账本尚无节点/游标/流量；S5.5 / PR #17 修复独立 routed-proxy 的部分采集。完整真实节点及记账仍未验收，保持 blocked；证据见 docs/STATUS.md、docs/singbox-capability.md。新预览替换及后续扩展部署需具体授权。"
     },
     {
       "id": "S5.4",
@@ -503,6 +503,46 @@
       "acceptance": "sing-box / AnyTLS 普通单节点至少有一条已实测支持路径，原有 Xray 回归通过；否则本项保留 BLOCKED。整版发布还需核对 S6.4，不单为版本号发布。",
       "stop_rule": "不会为等待第二内核而移除已稳定的第一内核版本。",
       "implementation_note": "2026-10-13 用户确认纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+    },
+    {
+      "id": "S5.5",
+      "phase": "S5",
+      "title": "复杂配置中的独立 proxy 与部分覆盖",
+      "depends_on": ["S5.1"],
+      "status": "in_progress",
+      "work": "#15 / PR #17 保留唯一、独立且可核实的 AnyTLS routed-proxy 采集，不因其他代理或组整体拒绝。现有 test.2 按路由匹配 tag 计数，组即使选 proxy 仍不计入；不放宽目标链、身份、代次及未核实连接字段限制。",
+      "outputs": ["routed_proxy 范围元数据及持久覆盖缺口", "API、历史、CSV、页面的部分覆盖披露", "合成多出站及真实核心副本回归"],
+      "acceptance": "额外出站不阻断已核实 proxy，其他代理/组/direct 不混入；未知范围与字节/游标同事务保存，不填零；Xray、旧历史和 CSV 回归保留。合成证据和真实客户端记账分别记录。",
+      "stop_rule": "交付预览及精确提交 CI；真实预览替换须授权，不宣称完整复杂配置计量已通过。",
+      "issue": 15,
+      "pull_request": 17,
+      "implementation_note": "2026-10-14 接手 df888c0；test.2 已实际加载，preview.1 unsupported_mode 且验证账本无游标/流量。preview.2 局部修复及隔离验证中，真实记账仍未验收。"
+    },
+    {
+      "id": "S5.6",
+      "phase": "S5",
+      "title": "多出站与策略组实际成员计量",
+      "depends_on": ["S5.5"],
+      "status": "planned",
+      "work": "#18 的独立 PR 扩展核心连接路径归属与累计、独立身份和批量原子采样。多出站按可靠的 instance + IndexId 或独立 outbound 分账；组、实际成员和业务总量不相加，旧长连接跨切换仍保留旧成员，组选 direct 排除。",
+      "outputs": ["核心成员归属与累计扩展", "批量原子采样及独立历史身份", "切换、并发、短/长连接、重开及代次证据"],
+      "acceptance": "未知出站不阻断独立已核实范围；不依赖可丢事件、活动连接轮询、速率积分或 group.Now() 补精确累计。增量/游标同批原子提交；必要 Schema 先隔离验证，真实迁移另行授权。",
+      "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
+      "issue": 18,
+      "implementation_note": "2026-10-14 用户扩大范围，已登记独立增强 Issue；当前 test.2 不能证明实际成员累计，本项尚未实现。"
+    },
+    {
+      "id": "S5.7",
+      "phase": "S5",
+      "title": "代理链与自定义配置身份",
+      "depends_on": ["S5.6"],
+      "status": "planned",
+      "work": "#19 的独立 PR 验证单次业务总量、链/各跳独立维度及真实生效配置文件、目录和参数。按配置/outbound 身份保存历史，只在可靠证据下关联 IndexId；不猜任意自定义配置的订阅身份。",
+      "outputs": ["配置来源与代次核验", "独立身份和单次业务计量", "链中组变化回归及必要的隔离迁移方案"],
+      "acceptance": "各跳不相加为总量，不等同加密传输量或服务商计费量。首接基线、回退、重开、失败回滚及未知缺口保持；脚本/插件/动态注入未验证时明确限定。保留 Xray、旧历史及独立 CSV。",
+      "stop_rule": "独立 PR、CI、有界实机验收；真实配置改动、扩展替换、重载、节点切换及账本迁移需具体授权，CSV 与插件不在本项范围。",
+      "issue": 19,
+      "implementation_note": "2026-10-14 用户扩大范围，已登记独立增强 Issue；尚未修改自定义配置发现、扩展核心或 Schema。"
     },
     {
       "id": "S6.1",
