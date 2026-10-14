@@ -1,8 +1,10 @@
 namespace V2rayNMonitor.Core;
 
-public sealed record CounterSample(string InstanceId, string NodeId, string NodeName, string SessionId, string Generation, DateTimeOffset At, long Upload, long Download);
+public sealed record CounterSample(string InstanceId, string NodeId, string NodeName, string SessionId, string Generation, DateTimeOffset At, long Upload, long Download,
+    bool PartialCoverage = false);
 public sealed record NodeInfo(string Key, string Name);
-public sealed record TrafficRow(string Start, string End, string NodeKey, string NodeName, string Upload, string Download, string Quality);
+public sealed record TrafficRow(string Start, string End, string NodeKey, string NodeName, string Upload, string Download, string Quality,
+    bool PartialCoverage = false);
 public sealed record SeriesPoint(string Label, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0");
 public sealed record NodeTotal(string Key, string Name, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0");
 public sealed record GapInfo(string Start, string End, string Reason, bool IsOpen);
@@ -15,6 +17,7 @@ public sealed record HistoryResult(string Start, string End, string Upload, stri
     public string UnbucketedUpload { get; init; } = "0";
     public string UnbucketedDownload { get; init; } = "0";
     public IReadOnlyList<GapInfo> Gaps { get; init; } = [];
+    public bool PartialCoverage { get; init; }
 }
 public sealed record QuerySpec(DateTimeOffset Start, DateTimeOffset End, string TimeZoneId, string Bucket = "day", string? NodeKey = null, int Page = 0, int PageSize = 50)
 {

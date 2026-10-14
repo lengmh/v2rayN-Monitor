@@ -30,6 +30,29 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('partial sing-box coverage is visible on desktop and mobile after collection resumes', async ({ page }) => {
+  const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: '正在采集 sing-box proxy 原始字节。',
+      currentNode: 'Synthetic · AnyTLS', lastSample: '2026-10-09T11:01:00Z', uploadPerSecond: '0', downloadPerSecond: '0', demo: false,
+      scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 37, uncollectedGroups: 4, description } })),
+    '/api/history': route => route.fulfill(json({ ...history, gapCount: 1,
+      records: history.records.map(row => ({ ...row, partialCoverage: true })),
+      gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:01:00Z', reason: 'uncollected_outbounds', isOpen: false }] }))
+  });
+  await expect(page.locator('#collector-state')).toHaveText('部分采集');
+  await expect(page.locator('#collector-message')).toContainText(description);
+  await expect(page.locator('#records')).toContainText('部分出站');
+  await page.locator('#quality-summary').click();
+  await expect(page.locator('#quality-notice')).toContainText('组和其他代理的流量未知');
+  await page.locator('#gap-summary').click();
+  await expect(page.locator('#gap-list')).toContainText('其他出站未采集，流量未知');
+  await page.screenshot({ path: 'test-results/partial-singbox-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(page.locator('#collector-message')).toContainText('当前合计不是全部代理流量');
+  await page.screenshot({ path: 'test-results/partial-singbox-mobile.png', fullPage: true });
+});
 test('CSV source uses node statistics and exact billing without local direction labels', async ({ page }) => {
   const provider = { source: 'Synthetic provider', rawBytes: '1300', billedBytes: '1000.800000000123', recordCount: 1,
     series: [{ label: '2026-10-09', rawBytes: '1300', billedBytes: '1000.800000000123' }],
