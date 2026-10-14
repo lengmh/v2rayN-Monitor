@@ -69,4 +69,16 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 
 本地定向回归与真实核心隔离证据：旧 TCP/UDP 连接跨 selector 切换、嵌套组、1,200 短连接及切换期间并发、urltest 旧连接/新成员、direct 排除、链留 unknown；另用未改动 test.2 服务端对照 AnyTLS/TLS 和 VMess 的原始业务字节，核心重启恢复真实零。合成 TLS 使用合成证书和 insecure，不是实际节点 TLS/证书验收。完整源码重构建与测试二进制 SHA256 相同，详见本轮本机证据及 [扩展范围](../../docs/singbox-extension-scope.md)。
 
-本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，只描述这个本地实验构建，不自动授权安装或扩展 Monitor 白名单。Monitor 尚未读取新成员维度、映射多出站或写多范围账本。现有远端 Monitor CI 不编译 Go 补丁；专用扩展CI尚未配置，不能用Monitor CI的绿灯替代核心验证。
+本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，只描述这个本地实验构建，不自动授权安装或扩展 Monitor 白名单。Monitor 尚未读取新成员维度、映射多出站或写多范围账本。现有远端 Monitor CI 不编译 Go 补丁，不能用它的绿灯替代核心验证。
+
+## 独立扩展 CI
+
+2026-10-14 新增 [扩展工作流](../../.github/workflows/sing-box-extension.yml)，不改现有Monitor CI。Windows runner 使用固定 Go 1.26.8，下载上述固定提交的公开源码归档，要求 SHA256 为 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`；按序应用两层补丁，执行 `^TestMonitor` 并核实四个必需测试确实通过，再构建 test.3。保留原 Windows 标签和依赖版本，`-mod=readonly`；构建前后核对 go.mod/go.sum 摘要，禁止自动切换工具链。
+
+复用同一 [构建脚本](build-ci.ps1) 的本地命令如下；需已有固定 Go 环境，输出目录必须尚不存在。可通过 `-SourceArchive` 指定本地已下载归档，仍执行同一摘要校验。
+
+```powershell
+./extensions/sing-box/build-ci.ps1 -OutputRoot 'F:\AI playground\TempFiles\本轮独立构建目录'
+```
+
+工作流只在扩展目录或工作流自身改动时触发 push / PR 检查。候选 artifact 包含 EXE、原始源码归档、两层补丁、GPLv3 LICENSE、说明及构建脚本；`build-provenance.json` 记录实际 checkout、CI 提交/运行 ID、源码/补丁/二进制摘要、Go 版本、标签和构建参数。PR 的 checkout 可能是合并测试提交，不能把它误写为 PR HEAD。artifact 不是正式 Release，也不自动部署或更新 Monitor 白名单。远端实际结果以 [STATUS](../../docs/STATUS.md) 和具体运行记录为准，核心回归/构建不替代此前回环联测或实机验收。

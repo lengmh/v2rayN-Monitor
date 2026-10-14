@@ -57,7 +57,7 @@ test.3 候选使用 [member-stats.patch](../extensions/sing-box/member-stats.pat
 
 本地回归包含 4 个顶级 Go 测试、15 个子用例；真实候选副本验证 selector 的旧 TCP/UDP、嵌套组、8 并发 1,200 短连接、切换期间 200 请求、urltest 旧 TCP/新成员、direct 排除和链留 unknown。另用未改动同摘要 test.2 服务端，对照 AnyTLS/TLS 与 VMess：旧连接跨切换，8 并发的 1,200 AnyTLS / 200 VMess 短连接逐原始业务整数 bytes 守恒；候选核心重启所有新累计真实归零。不是 Windows 实际节点或 Monitor 重开/账本验收。
 
-首轮 UDP 夹具只接受 SOCKS IPv4 地址，遇到合法的其他地址形式断开；失败记录保留。只修正临时服务的地址解析，在新目录完成重跑。原始源码归档 + 两层补丁的 1,558 个文件与测试源码一致，重建二进制摘要与联测候选一致；go.mod/go.sum 未变。专用核心 CI 等待配置授权，现有 Monitor CI 仅核对 Monitor，不作为 Go 补丁验收。
+首轮 UDP 夹具只接受 SOCKS IPv4 地址，遇到合法的其他地址形式断开；失败记录保留。只修正临时服务的地址解析，在新目录完成重跑。原始源码归档 + 两层补丁的 1,558 个文件与测试源码一致，重建二进制摘要与联测候选一致；go.mod/go.sum 未变。新增独立核心CI，固定源码归档摘要及Go1.26.8，应用补丁后回归并构建Windows候选；具体结果见 STATUS。现有 Monitor CI 仅核对 Monitor，不作为 Go 补丁验收，CI 不部署新核心或迁移账本。
 
 ## 实机边界
 
