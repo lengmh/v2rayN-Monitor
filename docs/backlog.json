@@ -530,7 +530,7 @@
       "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
       "issue": 18,
       "pull_request": 20,
-      "implementation_note": "路由/成员 RPC、test.3 核心原型、独立 CI 与候选身份目录已交付；第四批 v2 提案在双库合成数据通过 19 组隔离验证。第五批新增正式独立 ScopeLedger：全新文件显式初始化、完整目录退休核对、原子批次/游标/范围缺口、单 basis BigInteger 查询与分页；正式回归及精确提交 CI 见 STATUS。同一 SQL 嵌入 Core，现有 v1 文件不会自动升级。nodes 仅插入新核实关联，旧行不改。下一节点补正式 v1 迁移预检/backup/逐行核对执行器；完整 Windows 身份、生产采样/API/页面尚待接入。生产入口、sidecar、白名单及真实账本不变，真实迁移另取授权。见 docs/proposals/scope-ledger-v2.md 与 docs/singbox-extension-scope.md。"
+      "implementation_note": "路由/成员 RPC、test.3 核心原型、独立 CI 与候选目录已交付；独立 ScopeLedger 的新库门禁、完整目录退休、原子批次和单 basis 查询/分页已有正式回归。第六批新增显式离线 v1→v2 迁移执行器，SQLite backup、事务内原库/快照及完整映射逐行核对、失败 DDL/user_version 回滚：新增 11 项，v2/迁移共 29 项定向通过。正常启动不自动升级；nodes 仅插入新关联，provider.db 独立。先完成到Windows opt-in源码接入，sidecar/Windows批量发现及采集/API为下一批；不自动部署或迁移真实库。具体提交/CI及边界见 STATUS 和扩展范围。"
     },
     {
       "id": "S5.7",

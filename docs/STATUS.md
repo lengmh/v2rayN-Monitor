@@ -1,5 +1,15 @@
 # 初版实现与验证状态
 
+## 2026-10-15：S5.6 第六批 / 受控离线迁移执行器
+
+起点 `817b72c1b6c10f8aea650e4c88005a50f388f5bf`，工作树干净，PR #20 Open / Draft。先完成到Windows源码接入，真实部署/迁移仍保留具体授权边界。本批新增 `ScopeLedgerMigration.Migrate(historyPath, backupPath)`，不由正常启动或现有 Server 调用。原 v1 Ledger 行为不改。
+
+迁移先只读预检支持的 v1 五表/列类型/主键、整数 bytes/ticks、标记、实例/历史关联、完整性和外键；其他表/视图/触发器、部分 v2、错误版本及路径链接拒绝。SQLite backup 写入全新文件，绝不覆盖已有备份。目标连接使用 exclusive locking，写事务内再次预检并逐原业务键核对目标与 backup 的全部字段和旧结构，防止 backup 后变化；同一事务执行 SQL、完整映射/批次水位/continuity_valid/legacy origin/完整性核对后提交。失败全部回滚，包括 DDL 与 user_version；备份/故障文件保留供恢复。调用方必须先停止全部写入者，不把锁策略当作授权或停程序的替代。
+
+合成回归新增 11 项：历史/大整数/标记/开放 legacy 缺口保留、迁移首接基线、独立 provider.db 的精确小数及文件不变、空 v1、已有备份和 v2 拒绝；REAL/非法标记/实例错配/孤立 gap/结构变化/provider 目标拒绝；DDL+user_version 后 SQL 或逐行核对失败回滚，以及 backup 后数据变化拒绝。仅合成 failure regression 通过反射调用同一内部事务方法并注入 SQL，不提供公共任意 SQL 输入或生产故障开关。
+
+使用隔离 SDK 10.0.401 和既有离线缓存，Release build 零警告零错误，v2/迁移定向 `LedgerTests.Scope*` 共 29 项通过。日志/合成产物在 `F:\AI playground\TempFiles\v2rayn-monitor-scope-migration-20261015`，未访问真实库。提交与精确 CI 单独核对；下一批继续 sidecar 成员开关、Windows 前后稳定发现及 opt-in 批量采集/API 接入，到真实部署/迁移边界再确认。S5.6 in_progress，S5.7 planned。
+
 ## 2026-10-15：S5.6 / PR #20 独立 v2 账本
 
 起点为 `8845b2931e71471e138a460821b42e134bd2b834`；工作树干净、本地与远端一致，PR #20 Open / Draft，base 仍为未合并的 PR #17 分支。本批范围为正式账本实现。本 checkpoint 只交付独立 Core 层与既有文件中的正式回归，不部署核心/预览，不修改依赖、CI 配置、生产入口或任何真实数据库。
