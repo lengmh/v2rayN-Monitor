@@ -1,5 +1,28 @@
 # 初版实现与验证状态
 
+## 2026-10-14：S5.5 / PR #17 独立 proxy 与部分覆盖
+
+接手基线为 `df888c0cfcf69d81bca08712b38dd1e732257b31`，分支 `docs/issue15-singbox-capability`；开始时本地/远端一致、工作树干净。旧精确提交 CI `38444230044` 双平台成功，旧预览的 ProductVersion 后缀来自合并测试提交 `c4bc06c0`，没有将其误记为 PR HEAD。
+
+当前实机核对确认用户已安装并重载 test.2；普通权限生产原生查询验证客户端路径、核心父子关系、创建代次与标准命令，统计监听属于扩展核心，二进制 SHA256 与已核实值一致。旧 preview.1 的独立验证账本为 0 节点、0 游标、0 分钟/未分时记录，存在开放 `unsupported_mode` 缺口，`reset=false` RPC 本身可读。仓库此前“尚未安装”描述已更新，历史实验记录保留。
+
+实际配置的脱敏形状为 39 个出站：唯一 AnyTLS `proxy`、33 个其他代理、4 个 selector/urltest 组与 1 个 direct；路由实际引用组，不能当作未使用条目。本批 preview.2 只放开其他出站的存在，不扩大 `proxy` 的身份或计数范围：仍拒绝目标 detour、TUN、非空 endpoints、已有自定义 V2Ray API 与未核实连接字段。新增 `routed_proxy` 范围及部分覆盖标记；未知范围复用现有缺口表，与已知字节/游标原子提交，失败不推进。API、历史、CSV 和页面披露部分采集，覆盖提示不受历史缺口展示上限或明细分页影响。没有 Schema 迁移或新增依赖，扩展继续 test.2。
+
+新的生产发现代码对当前真实配置只读采样已得到 `connected`，身份/连接字段检查通过；范围为 `routed_proxy`、37 个出站未采集，其中 4 个组。没有写入真实或现有独立验证账本，也未替换旧预览。该结果证明当前拒绝点已解除，不等于真实节点字节守恒、受控 direct 或持续记账验收。
+
+本地验证：
+
+- 最短回归先在旧解析器复现额外独立代理导致拒绝，再在新代码通过。最终 Release 构建零警告零错误，Core 258 / Server 32 / 前端 51 项通过；包括覆盖缺口写入失败的字节/游标回滚、重开恢复、回到完整范围，以及超过 200 条历史缺口后仍披露范围未知。计划与 diff 检查通过。
+- Windows 合成 v2rayN 父进程、真实 test.2 / Xray 副本、生产 WindowsDiscovery 与隔离 SQLite：39 出站部分采集；空闲零基线；单次 routed-proxy 上传 163 / 下载 149 bytes 与账本一致。
+- selector→proxy、selector→direct、urltest、其他代理各 40 次短连接均不增加 routed-proxy 累计；100 次 direct 及绕过核心不计入。该结果证明排除范围，不证明组实际成员计量。
+- Monitor harness 重开后恢复 1,200 短连接上传 195,600 / 下载 178,800 bytes，保留未分时；核心重启、侧文件变化须重载、AnyTLS→Xray→AnyTLS 与两个 IndexId 分账通过。Xray 段仍为实际上传 0 / 下载 151 bytes，只证明切换及原值守恒。
+- 真实核心副本首轮因合成 urltest 的 interval 大于 idle_timeout 启动失败；补齐 fixture 并使用新隔离库后通过，失败记录保留。前端首轮修复了合成响应漏字段及隔离副本缺源码输入，未吞掉失败。
+- 定向 Edge 无头浏览器用例通过，主代理目视检查桌面/390 px 手机的部分采集、历史未知范围和明细标签。所有临时核心退出；真实客户端/核心/旧预览的进程代次、生成配置、选择文件、扩展、侧文件和系统代理前后未变。
+
+证据根目录为本机 `F:\AI playground\TempFiles\v2rayn-monitor-singbox-scope-20261014`；真实核验仅输出脱敏形状和布尔比较，不上传节点名、地址、凭据、IndexId、完整配置或运行数据库。实际命令、结果与可验证预览身份保留在该目录的验证记录中。当前提交的远端 CI 与预览只认该次运行，不沿用旧绿灯；PR 保持 Draft，不合并、不正式发布。
+
+S5.5 的实机预览替换与持续记账待具体授权；S0.3/S5.1–S5.3 仍 blocked。新增 S5.6 / [Issue #18](https://github.com/lengmh/v2rayN-Monitor/issues/18)（多出站与实际组成员）、S5.7 / [Issue #19](https://github.com/lengmh/v2rayN-Monitor/issues/19)（链与自定义配置），后续各走独立 PR；不将本批部分覆盖包装为全量支持。范围见 [扩展计量](singbox-extension-scope.md)。CSV #16 planned，插件 deferred。
+
 ## 2026-10-14：Issue #15 Monitor 适配预览实现
 
 起点 a612ca5；同步 main 的 dc17de3 README 插图后实现 AnyTLS 采集，预览标识 0.2.0-preview.1。

@@ -139,6 +139,19 @@ public sealed class Ledger : IDisposable
                 UPDATE gaps SET end_ticks=MAX(end_ticks,$at),is_open=0 WHERE is_open=1;
                 """, ("$instance", sample.InstanceId), ("$key", key), ("$session", sample.SessionId),
                 ("$generation", sample.Generation), ("$at", at), ("$up", sample.Upload), ("$down", sample.Download));
+            if (sample.PartialCoverage)
+            {
+                // Coverage gaps do not interrupt this verified counter. Persist the unknown
+                // remainder alongside its bytes/cursor so history cannot present a full total.
+                var start = sameIdentity && (status is "recorded" or "unallocated") ? previous!.At : at;
+                var gap = sameIdentity ? Scalar(transaction, """
+                    SELECT COALESCE(MAX(id),0) FROM gaps
+                    WHERE node_key=$key AND reason='uncollected_outbounds' AND is_open=0 AND end_ticks=$start;
+                    """, ("$key", key), ("$start", start)) : 0;
+                if (gap != 0)
+                    Execute(transaction, "UPDATE gaps SET end_ticks=$at WHERE id=$id;", ("$at", at), ("$id", gap));
+                else InsertGap(transaction, start, at, key, "uncollected_outbounds");
+            }
             transaction.Commit();
             return status;
         }
@@ -289,6 +302,14 @@ public sealed class Ledger : IDisposable
                     AND ($node IS NULL OR node_key=$node OR node_key IS NULL)
                     AND ($name IS NULL OR node_key IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY));
                 """, parameters));
+            var partialCoverage = Scalar(transaction, """
+                SELECT EXISTS(SELECT 1 FROM gaps
+                WHERE reason='uncollected_outbounds'
+                    AND ((start_ticks < $end AND end_ticks > $start)
+                        OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
+                    AND ($node IS NULL OR node_key=$node)
+                    AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY)));
+                """, parameters) != 0;
             var gapDetails = new List<GapInfo>();
             using (var command = Command(transaction, """
                 SELECT start_ticks,end_ticks,reason,is_open FROM gaps
@@ -316,7 +337,7 @@ public sealed class Ledger : IDisposable
                 RecoveredUpload = recovered.UploadText, RecoveredDownload = recovered.DownloadText,
                 PartialUpload = partial.UploadText, PartialDownload = partial.DownloadText,
                 UnbucketedUpload = unbucketed.UploadText, UnbucketedDownload = unbucketed.DownloadText,
-                Gaps = gapDetails
+                Gaps = gapDetails, PartialCoverage = partialCoverage
             };
         }
     }
@@ -346,14 +367,18 @@ public sealed class Ledger : IDisposable
         Command(transaction, """
             SELECT m.start_ticks AS start_ticks,m.start_ticks+$minute AS end_ticks,m.node_key AS node_key,n.name,m.upload,m.download,
                 CASE WHEN m.synthetic=1 THEN 'synthetic' WHEN m.approximate=1 THEN 'approximate' ELSE 'measured' END AS quality,
-                0 AS kind,0 AS row_id
+                0 AS kind,0 AS row_id,
+                EXISTS(SELECT 1 FROM gaps g WHERE g.node_key=m.node_key AND g.reason='uncollected_outbounds'
+                    AND g.start_ticks < m.start_ticks+$minute AND g.end_ticks > m.start_ticks) AS partial_coverage
             FROM minutes m JOIN nodes n ON n.node_key=m.node_key
             WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
                 AND ($name IS NULL OR n.name=$name COLLATE BINARY)
             UNION ALL
             SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download,
                 CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
-                1 AS kind,u.id AS row_id
+                1 AS kind,u.id AS row_id,
+                EXISTS(SELECT 1 FROM gaps g WHERE g.node_key=u.node_key AND g.reason='uncollected_outbounds'
+                    AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks)
             FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
             WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
                 AND ($name IS NULL OR n.name=$name COLLATE BINARY)
@@ -364,7 +389,7 @@ public sealed class Ledger : IDisposable
 
     private static TrafficRow ReadRecord(SqliteDataReader reader) =>
         new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2),
-            reader.GetString(3), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6));
+            reader.GetString(3), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6), reader.GetInt64(9) != 0);
 
     public IReadOnlyList<NodeInfo> GetNodes()
     {

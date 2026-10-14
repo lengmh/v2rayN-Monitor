@@ -11,6 +11,7 @@ Issue #15 的实验核心 `1.14.1-monitor-test.2`，针对公开 sing-box
 - 仅主 config.json 读取程序旁 monitor-stats.json；文件只允许 listen。
 - 端点固定为数值回环地址和非零端口；统计仅启用 proxy 出站，源配置不写回。
 - 新核心先注册两个真实零计数，便于空闲基线；累计仍在当前核心内存中，重启需新基线。
+- 计数按路由匹配 tag；selector/urltest 选中 proxy 也不进入 proxy 累计。preview.2 可在其他出站存在时独立采集 routed-proxy，并明确披露未知范围；全量/成员统计另见 [扩展计划](../../docs/singbox-extension-scope.md)。
 
 Monitor 当前只接受经核实的实验文件 SHA256：
 
@@ -35,8 +36,7 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 
 ## 安装与回退边界
 
-本轮只准备预览，尚未安装到真实客户端。安装前确认空闲端口、文件摘要和实际客户端版本，
-再增加 bin/sing_box/sing-box-client.exe 及 monitor-stats.json，并择时让 v2rayN 正常重载。
+2026-10-14 用户已批准安装 test.2，并手动重载实际客户端，回环 RPC 可读。旧 Monitor preview.1 因其他出站整体拒绝，真实记账尚未通过。后续新扩展安装前确认空闲端口、文件摘要和实际客户端版本，再经具体授权更新运行文件并择时让 v2rayN 正常重载；此前安装授权不自动涵盖新部署。
 文件示例为 `{"listen":"127.0.0.1:待选端口"}`，必须将端口替换为核实后的数字。
 不会写订阅、节点数据库、路由或 guiNConfig.json。
 

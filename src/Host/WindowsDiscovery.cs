@@ -14,7 +14,7 @@ using V2rayNMonitor.Core;
 namespace V2rayNMonitor.Host;
 
 /// <summary>
-/// Read-only adapter for compatible v2rayN 7.25.1 builds, ordinary single-proxy mode.
+/// Read-only adapter for compatible v2rayN 7.25.1 builds and a verified routed proxy.
 /// Never starts/stops a core or writes its configuration/profile records. SQLite is opened
 /// ReadOnly; SQLite can still participate in the existing database's shared-memory locking.
 /// Real Windows/core integration remains a separate acceptance requirement.
@@ -65,9 +65,10 @@ public sealed class WindowsDiscovery : IDisposable
             if (counters is null)
                 return Unknown("missing_counters", "proxy 上下行累计计数缺失或无效；未知不能记为零。", after.NodeName);
             return new(new CounterSample(after.InstanceId, after.NodeId, after.NodeName,
-                after.ProcessIdentity, after.Generation, observedAt, counters!.Upload, counters.Download),
+                after.ProcessIdentity, after.Generation, observedAt, counters!.Upload, counters.Download,
+                after.Scope?.IsPartial == true),
                 "connected", $"已按 v2rayN 活动配置读取 {after.CoreName} proxy 原始累计字节。",
-                after.NodeName, guard.RequiresBaseline, after.CoreName);
+                after.NodeName, guard.RequiresBaseline, after.CoreName, after.Scope);
         }
         catch (DiscoveryException e)
         {
@@ -175,7 +176,7 @@ public sealed class WindowsDiscovery : IDisposable
         if (singbox) generation += ":" + XrayParser.Hash(statisticsBytes!) + ":" + statisticsStamp!.WrittenAt.UtcTicks;
         var writtenAt = singbox && statisticsStamp!.WrittenAt > configStamp.WrittenAt ? statisticsStamp.WrittenAt : configStamp.WrittenAt;
         return new(instanceId, selection.IndexId, node, processIdentity, generation, coreStartedAt,
-            writtenAt, listenerIdentity, configuration.MetricsEndpoint, configuration.CoreName);
+            writtenAt, listenerIdentity, configuration.MetricsEndpoint, configuration.CoreName, configuration.Scope);
     }
 
     private void VerifyExtension(ProcessInfo core)
@@ -241,6 +242,8 @@ public sealed class WindowsDiscovery : IDisposable
                     ? Fail(configurationReason, "Monitor 统计端点文件无效；仅允许一个数值回环地址及非零端口，当前流量保持未知。")
                     : configurationReason is "statistics_unavailable" or "statistics_disabled"
                     ? Fail(configurationReason, "有效配置没有可用的回环 Xray metrics 统计；请在 v2rayN 中检查统计设置。")
+                    : type == 11
+                    ? Fail("unsupported_mode", "无法核实独立的 AnyTLS proxy 计量范围；proxy 链、TUN、endpoints 或已有自定义统计配置尚未支持。")
                     : Fail("unsupported_mode", "仅支持可核实的单 proxy 出站；自定义配置、策略组、代理链和多代理出站暂不支持。");
             configuration = parsedConfiguration!;
             if ((type == 11 ? "anytls" : XrayParser.ProtocolForConfigType(type)) != configuration.Protocol)

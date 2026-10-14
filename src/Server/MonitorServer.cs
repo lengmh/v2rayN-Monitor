@@ -135,7 +135,8 @@ public sealed class MonitorServer : IAsyncDisposable
             var rows = Ledger.Export(ParseQuery(request));
             var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality\r\n");
             foreach (var row in rows)
-                csv.AppendLine(string.Join(',', Cell(row.Start), Cell(row.End), Cell(row.NodeName), row.Upload, row.Download, Cell(row.Quality)));
+                csv.AppendLine(string.Join(',', Cell(row.Start), Cell(row.End), Cell(row.NodeName), row.Upload, row.Download,
+                    Cell(row.PartialCoverage ? row.Quality + ";uncollected_outbounds" : row.Quality)));
             return Results.File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", "v2rayn-local-history.csv");
         });
         app.MapPost("/api/imports/preview", (ImportRequest request) => imports.Preview(request));

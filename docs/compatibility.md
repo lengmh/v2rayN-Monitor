@@ -10,9 +10,11 @@ v0.1.0 目标为 Windows x64 + v2rayN **7.25.1** + Xray 普通单节点。2026-1
 | v2rayN 7.25.1 + Xray 普通单节点 | 只读发现 / 原始累计量 / 按活动配置归属 | 固定源码 + 合成回归；用户报告 `a3f2d80` 的重复配置切换失败，新规则的逐项实机记录未补充 |
 | VMess / VLESS / Trojan / Shadowsocks / SOCKS / HTTP | 仅对应单 proxy 出站映射 | 解析器合成回归；实机待验收 |
 | V2free 7.25.1 的 Hysteria2 + Xray | 按精确 fork 生成规则匹配服务器和 transport auth | 用户报告 `a3f2d80` 普通权限 Monitor 采集提升权限客户端、首次基线、连续记账、Monitor 重启恢复及字节守恒通过 |
-| V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；0.2.0-preview.1 已实现指定扩展的只读路径 | 实际核心/版本、基础活动配置与 Clash 监听只读核验；真实原生 API 未启用，完整 TLS/传输和新采集器未验收 |
-| sing-box | Issue #15 预览支持固定扩展 1.14.1-monitor-test.2 的 AnyTLS | 原安装构建无 V2Ray API；扩展 1.14.1-monitor-test.1 的 Windows 合成测试确认 proxy 累计、直连排除和不查询期间恢复。扩展未安装，真实客户端/节点与 Monitor 未验收，见 [能力核验](singbox-capability.md) |
-| TUN / 策略组 / 多跳链 / 自定义配置 / 多实例 | 拒绝精确归属 | 不支持 |
+| V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；指定 test.2 扩展的只读路径已实现 | 用户已安装并重载扩展，真实 RPC 可读；旧 preview.1 被额外出站整体拒绝，真实记账未通过 |
+| sing-box 的独立 AnyTLS `proxy` 与其他出站共存 | preview.2 / S5.5 仅采集直接路由到 `proxy` 的累计，披露部分覆盖 | 解析器、原子账本/API/DOM 回归；真实核心副本与新提交 CI 另按 checkpoint 记录，不当作真实节点验收 |
+| selector / urltest 实际成员及全量多出站 | #18 / S5.6 planned | 现有 test.2 按路由组 tag 计数，组选 `proxy` 也不进入 routed-proxy 累计；组/其他出站未知 |
+| 代理链 / 自定义配置 | #19 / S5.7 planned | 独立 `proxy` 有 detour 仍拒绝；其他链的存在可与部分采集共存，但不计其流量；任意配置来源和订阅身份未核实 |
+| TUN / 多实例 | 拒绝精确归属 | 不支持 |
 | 服务商六列 CSV | 精确十进制计费量、预览、独立账本、同来源导出快照按出现次数增量去重 | 合成输入/事务回归；真实 CSV 未导入开发库或上传；用户已整体认可相关修复并授权发布，未补充逐项真实 CSV 提交记录 |
 | TrafficMonitor / WebView2 | 未实现，也不依赖 | deferred |
 
@@ -52,17 +54,16 @@ AnyTLS 的 `ConfigType=11` 不属于 Xray 白名单。在该 fork 中，核心�
 
 普通权限 Monitor 会尝试以 `PROCESS_QUERY_LIMITED_INFORMATION` 读取提升权限进程的映像路径、创建时间和命令行，补足 WMI 的空字段。命令行回退使用动态解析的 Windows 原生查询；该查询不是所有 Windows 版本都保证支持的公开 API。路径、命令行、WMI/原生创建时间冲突，或任何必要信息仍无法核实时，显示明确的未知状态并保留缺口，不仅凭进程名或监听端口建立归属。用户已报告 `a3f2d80` 在其 Windows 环境可用；其他系统版本和权限组合未据此宣称通过。不自动提权，不要求默认管理员运行。
 
-## 0.2.0-preview.1 有界支持
+## 0.2.0-preview.2 有界支持
 
 精确客户端 ProductVersion 为 7.25.1+95f68d9955c2324518c5e1dc9485d73412102a95；
 扩展二进制摘要及源码见 [可选扩展](../extensions/sing-box/README.md)。
-只支持普通单 AnyTLS proxy，允许核心内 direct/block/dns；拒绝 TUN、链、多代理出站、
-自定义传输/会话参数和已有自定义 V2Ray API。统计文件纳入有效配置代次，改动后须重载。
+只核实生成配置中的唯一独立 AnyTLS `proxy`。其他代理、selector、urltest 或其他链可共存，但其流量不采集，状态、历史和 CSV 持续披露未知范围。拒绝目标 `proxy` 的 detour、TUN、非空 endpoints、自定义传输/会话参数和已有自定义 V2Ray API。统计文件纳入有效配置代次，改动后须重载；本轮不修改侧文件或重载真实核心。
 
 TLS 比较按固定生成器处理 SNI/Host、ALPN、显式 uTLS、insecure、可识别 SPKI Base64 pins、
 fragment/record_fragment。无显式 Fingerprint 时不把 DefFingerprint 误加到 sing-box；
 固定生成器会丢弃 Xray hex pin，Monitor 采用相同规则。证书 PEM、ECH 和绑定网卡/源地址
 需要额外等价核验，当前返回 unsupported_connection。AnyTLS 未使用的数据库字段不充当运行归属证据。
 
-Windows 合成全链路已通过；真实客户端扩展加载、真实节点及真实账本尚未验收。
+test.2 已实际加载，真实 RPC 可读；旧 preview.1 仍整体拒绝配置且尚未记账。preview.2 的新验证按当前 checkpoint 单独记录，完整真实节点守恒、direct 对照及真实账本仍待验收。扩大范围、分批口径和授权见 [扩展范围](singbox-extension-scope.md)。
 正式 v0.1.1 仍保持既有支持矩阵，预览功能不等于 v0.2.0 正式发布。
