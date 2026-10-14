@@ -10,8 +10,8 @@ v0.1.0 目标为 Windows x64 + v2rayN **7.25.1** + Xray 普通单节点。2026-1
 | v2rayN 7.25.1 + Xray 普通单节点 | 只读发现 / 原始累计量 / 按活动配置归属 | 固定源码 + 合成回归；用户报告 `a3f2d80` 的重复配置切换失败，新规则的逐项实机记录未补充 |
 | VMess / VLESS / Trojan / Shadowsocks / SOCKS / HTTP | 仅对应单 proxy 出站映射 | 解析器合成回归；实机待验收 |
 | V2free 7.25.1 的 Hysteria2 + Xray | 按精确 fork 生成规则匹配服务器和 transport auth | 用户报告 `a3f2d80` 普通权限 Monitor 采集提升权限客户端、首次基线、连续记账、Monitor 重启恢复及字节守恒通过 |
-| V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；指定 test.2 扩展的只读路径已实现 | 已安装并重载扩展，真实 RPC 可读；旧 preview.1 被额外出站整体拒绝，真实记账未通过 |
-| sing-box 的独立 AnyTLS `proxy` 与其他出站共存 | preview.2 / S5.5 仅采集直接路由到 `proxy` 的累计，披露部分覆盖 | 解析器、原子账本/API/DOM 回归；真实核心副本与新提交 CI 另按 checkpoint 记录，不当作真实节点验收 |
+| V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；指定 test.2 扩展的只读路径已实现 | 已安装并重载扩展；真实 preview.2 已通过首接基线、持续持久化与被动守恒，完整受控节点验收仍未完成 |
+| sing-box 的独立 AnyTLS `proxy` 与其他出站共存 | preview.2 / S5.5 仅采集直接路由到 `proxy` 的累计，披露部分覆盖 | 解析/账本/API/DOM、真实核心副本与 c8ea870 双平台 CI 通过；实际配置不再整体拒绝，4轮参考 RPC 范围核对通过，未取得同刻精确对照；组/其他出站仍未知 |
 | selector / urltest 实际成员及全量多出站 | #18 / S5.6 planned | 现有 test.2 按路由组 tag 计数，组选 `proxy` 也不进入 routed-proxy 累计；组/其他出站未知 |
 | 代理链 / 自定义配置 | #19 / S5.7 planned | 独立 `proxy` 有 detour 仍拒绝；其他链的存在可与部分采集共存，但不计其流量；任意配置来源和订阅身份未核实 |
 | TUN / 多实例 | 拒绝精确归属 | 不支持 |
@@ -65,5 +65,5 @@ fragment/record_fragment。无显式 Fingerprint 时不把 DefFingerprint 误加
 固定生成器会丢弃 Xray hex pin，Monitor 采用相同规则。证书 PEM、ECH 和绑定网卡/源地址
 需要额外等价核验，当前返回 unsupported_connection。AnyTLS 未使用的数据库字段不充当运行归属证据。
 
-test.2 已实际加载，真实 RPC 可读；旧 preview.1 仍整体拒绝配置且尚未记账。preview.2 的新验证按当前 checkpoint 单独记录，完整真实节点守恒、direct 对照及真实账本仍待验收。扩大范围、分批口径和授权见 [扩展范围](singbox-extension-scope.md)。
+test.2 已实际加载；用户退出旧 preview.1 后启动真实 preview.2，独立验证库首接只建基线，持续累计差与账本增量守恒。参考 `reset=false` RPC 前后夹测核对保存计数范围，不是同刻精确对照。受控实际 proxy/direct、切换、重开恢复及真实页面目视验收仍待完成；当前页面仅核对 HTTP/版本/会话保护。扩大范围、分批口径和授权见 [扩展范围](singbox-extension-scope.md)。
 正式 v0.1.1 仍保持既有支持矩阵，预览功能不等于 v0.2.0 正式发布。
