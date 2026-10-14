@@ -42,3 +42,31 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 
 回退需先正常退出扩展核心，移开本次新增的两个文件，再由客户端加载原 sing-box.exe。
 不要在核心运行时覆盖文件。真实客户端选择/升级/退出和真实 AnyTLS 节点仍待验收。
+
+## Issue #18：实际成员实验（未部署）
+
+`member-stats.patch` 是叠加于 test.2 的独立实验补丁，不替换 `monitor.patch`。候选版本为 `1.14.1-monitor-test.3`；现装 test.2、侧文件的仅 listen 约束和 Monitor 的二进制白名单均不变。只有隔离配置显式设置 `experimental.v2ray_api.stats.monitor_members` 时才启用新路径；现有文件式侧文件没有开启成员统计。
+
+```powershell
+git apply --unidiff-zero monitor.patch
+git apply --unidiff-zero member-stats.patch
+# 使用上文同一固定源码、Go 和 Windows 构建标签
+go test -mod=readonly -ldflags $flags -tags $tags -run '^TestMonitor' -count=1 -v ./cmd/sing-box
+go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X github.com/sagernet/sing-box/constant.Version=1.14.1-monitor-test.3') -o sing-box-client.exe ./cmd/sing-box
+```
+
+核心在 selector/urltest 的实际拨号结果上附加成员证据，ConnectionManager 只从最终用于传输的返回连接绑定归属；并行拨号的成功但未采用连接不能提前绑定业务流。selector 直接转交成员 handler 时绑定那个实际 handler。嵌套组保留返回连接的叶成员，首次绑定后不随组选择改变。累计在同一业务连接的读写路径直接更新，不使用 `Now()`、活动连接轮询或事件消费队列。
+
+| RPC 前缀 | 语义 |
+|---|---|
+| `outbound>>>{tag}>>>traffic` | 保留原路由 tag 维度；组可包含 direct，不是实际成员 |
+| `monitor>>>member>>>{tag}>>>traffic` | 已核实独立叶成员的业务连接字节 |
+| `monitor>>>business>>>traffic` | 已知代理业务字节，只计一次；不能再加成员或组量 |
+| `monitor>>>excluded>>>traffic` | 独立 direct 的排除量，不计代理业务 |
+| `monitor>>>unknown>>>traffic` | 未注册/未解析成员、链及未绑定前已出现字节；不猜归属 |
+
+成员候选类型限制为核心已有的 SOCKS、HTTP、Shadowsocks、VMess、VLESS、Trojan、AnyTLS、Hysteria2、TUIC；叶出站有 Dependencies 时归为 unknown，不解释链的实际最终出口。这里只验证普通 TCP/UDP 连接，TUN flow、动态注入、插件/脚本及任意协议不在范围。RPC 仍不是跨维度同刻原子快照，组、成员、业务、排除与未知维度不得相加当总使用量。
+
+本地定向回归与真实核心隔离证据：旧 TCP/UDP 连接跨 selector 切换、嵌套组、1,200 短连接及切换期间并发、urltest 旧连接/新成员、direct 排除、链留 unknown；另用未改动 test.2 服务端对照 AnyTLS/TLS 和 VMess 的原始业务字节，核心重启恢复真实零。合成 TLS 使用合成证书和 insecure，不是实际节点 TLS/证书验收。完整源码重构建与测试二进制 SHA256 相同，详见本轮本机证据及 [扩展范围](../../docs/singbox-extension-scope.md)。
+
+本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，只描述这个本地实验构建，不自动授权安装或扩展 Monitor 白名单。Monitor 尚未读取新成员维度、映射多出站或写多范围账本。现有远端 Monitor CI 不编译 Go 补丁；专用扩展CI尚未配置，不能用Monitor CI的绿灯替代核心验证。

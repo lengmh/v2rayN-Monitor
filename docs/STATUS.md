@@ -1,5 +1,25 @@
 # 初版实现与验证状态
 
+## 2026-10-14：S5.6 / PR #20 核心实际成员原型
+
+起点为 `1782621a7bce2e9496bcfb60aa07e7c4b5581f8f`；开始时工作树干净、本地与远端一致，PR #20 Open / Draft，基础仍为未合并的 PR #17。下一检查点范围已确定。本批不改变 Monitor 生产代码、Schema、依赖或运行程序。
+
+新增 `extensions/sing-box/member-stats.patch`，叠加既有 test.2 的 `monitor.patch`；候选为 `1.14.1-monitor-test.3`。保留固定上游 `1ac1a339`、Go 1.26.8、Windows 默认标签加 with_v2ray_api、原 go.mod/go.sum。只在隔离配置显式启用 `stats.monitor_members`，现有 sidecar 仍只允许 listen、默认仍仅启用 routed-proxy；Monitor 白名单没有添加候选摘要。
+
+成员绑定取自最终用于传输的返回 TCP/UDP 连接，或者 selector 实际转交的叶 handler；嵌套组保留叶证据，成功但未采用的并行拨号不提前绑定。首次绑定冻结，旧长连接不随后续选择重标。计数在原业务连接读写路径直接更新，无事件消费队列、连接历史轮询、速率积分或 `Now()` 归属推断。原 `outbound>>>` 路由维度不变；新 member / business / excluded / unknown 各自独立，不能相加当总量。叶有 outbound Dependencies 时留 unknown，链不是已支持成员。
+
+本地实际执行结果：
+
+- 离线 Go 定向回归通过：4 个顶级测试、15 个子用例。包含冻结归属、最终返回的赢家而非未采用拨号、嵌套/包连接证据、direct 排除、未注册/链/未绑定 unknown、过早字节不追溯重标、8 并发 800 个合成连接与未启用时的原统计兼容。
+- 候选真实副本完成 14 段纯回环 SOCKS/echo 联测：selector 旧 TCP/UDP 跨切换、nested、1,200 短连接（8 并发，每方向 73,200 bytes）、切换期间 200 请求（每方向 13,400 bytes 按实际服务端路径分账）、urltest 旧 TCP 与新成员、direct 排除、链留 unknown。两套合成代理服务分别记录实际处理 payload，不使用组当前选择分配字节。
+- 未改动、同摘要 test.2 服务端与候选客户端的 AnyTLS/TLS、VMess 5 段对照通过：旧 AnyTLS + 新 VMess 跨切换，组选 direct 不影响旧代理连接，8 并发 200 VMess 短连接每方向 8,600 bytes、1,200 AnyTLS 短连接每方向 56,400 bytes，成员量均与服务端原始路由计数及 echo payload 守恒。读取器进程每次新建，reset=false 重读稳定；候选核心重启新累计真实归零。TLS 为合成证书/insecure，不升级为实际节点 TLS 或服务商计费量验收。
+- 首轮 UDP 因临时 SOCKS 服务只接受 IPv4 地址形式而断开，核心收到 EOF；保留失败记录，仅补齐夹具合法地址解析，在新目录重跑通过，未改生产计量代码。
+- 下载同一固定公开源码归档，依次应用两层补丁；1,558 个重构源码文件与测试源码一致。再次离线测试/构建通过，候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，从原始源码重构建的二进制与联测候选摘要完全一致。
+
+证据位于本机 `F:\AI playground\TempFiles\v2rayn-monitor-issue18-members-20261014`：`integration2/result.json`、`anytls-vmess-integration/result.json`、`pristine-build-verification.json` 和 `verification-report.md`。所有隔离核心子进程均退出；普通权限生产发现核实实际客户端、核心、Monitor 的进程代次与原包前后不变，connected / routed_proxy、37 出站（含 4 组）未采集。没有新核心部署、实际节点切换/核心重载、运行库读取或迁移。
+
+S5.6 仍 in_progress，S5.7 / #19 planned。生产新成员维度读取、可靠多出站身份、完整迁移 DDL 与批量原子账本尚未实现，Monitor 重开/多范围账本与实机全量未验收。现有远端 CI 只验证 Monitor，不编译 Go 补丁；专用扩展工作流尚未配置，本批不修改CI。精确提交的既有 Monitor CI 后续另行核对，不借其绿灯宣称核心 CI 已通过。
+
 ## 2026-10-14：S5.6 / Issue #18 批量路由 tag RPC 接口
 
 起点为 `b832892b5da5e2d9eef1439d65880f6bbd05e6ec`；开始时本地与远端一致、工作树干净，#15 仍 Open、PR #17 仍 Open / Draft，未合并。API接入和独立proxy读取已有人工通过确认，后续范围另行推进；这些已通过项不因 #18/#19 尚未完成而撤销。新分支为 `feat/issue18-singbox-batch-stats`，代码提交 `235adff79570d77c137613414dd49893ff5a575c`，以 PR #17 分支为基础走独立 Draft PR #20，不把本批变更混入 #17。
