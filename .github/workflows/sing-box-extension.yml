@@ -1,0 +1,45 @@
+name: sing-box extension build and regression
+on:
+  push:
+    branches: ['feat/**', 'fix/**']
+    paths:
+      - 'extensions/sing-box/**'
+      - '.github/workflows/sing-box-extension.yml'
+  pull_request:
+    paths:
+      - 'extensions/sing-box/**'
+      - '.github/workflows/sing-box-extension.yml'
+permissions:
+  contents: read
+jobs:
+  extension:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.8'
+          check-latest: false
+          cache: false
+      - name: Reconstruct, test and build the fixed candidate
+        shell: pwsh
+        env:
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          ./extensions/sing-box/build-ci.ps1 -OutputRoot "$env:RUNNER_TEMP/sing-box-extension"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-monitor-test3-windows-amd64
+          path: ${{ runner.temp }}/sing-box-extension/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sing-box-extension-regression-logs
+          path: ${{ runner.temp }}/sing-box-extension/*.log
+          if-no-files-found: ignore
+          retention-days: 14
