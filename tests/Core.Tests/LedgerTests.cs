@@ -629,6 +629,365 @@ public sealed class LedgerTests : IDisposable
         Assert.Empty(ledger.GetNodes());
     }
 
+    // All v2 identities and counters below are synthetic. No real client or history file is opened.
+    private static MeasurementScope Member(string id = "a", string name = "Synthetic member") =>
+        new("actual_member", "index_id", id, name, id, "fixture-" + id);
+    private static ScopeReading Reading(string id, long up, long down = 0) => new(Member(id), up, down);
+    private static ScopeBatch Batch(double seconds, params ScopeReading[] readings) =>
+        new("instance", "process-1", "config-1", Epoch.AddSeconds(seconds), readings, []);
+    private static ScopeQuery ScopeAll(string basis = "actual_member", long? id = null, int page = 0, int size = 50) =>
+        new(basis, Epoch.AddYears(-2), Epoch.AddYears(3), "UTC", ScopeId: id, Page: page, PageSize: size);
+
+    [Fact]
+    public void ScopeLedgerIsOptInAndNeverMigratesAnExistingFile()
+    {
+        using (var original = new Ledger(Database)) original.Accept(Sample(0, 50));
+        var originalBytes = File.ReadAllBytes(Database);
+        Assert.Throws<IOException>(() => ScopeLedger.CreateNew(Database));
+        Assert.Throws<InvalidOperationException>(() => new ScopeLedger(Database));
+        Assert.Equal(originalBytes, File.ReadAllBytes(Database));
+        using (var original = new Ledger(Database)) Assert.Equal("recorded", original.Accept(Sample(1, 60)));
+        var missing = Path.Combine(directory, "missing.db");
+        Assert.Throws<SqliteException>(() => new ScopeLedger(missing));
+        Assert.False(File.Exists(missing));
+        using var scopes = ScopeLedger.CreateNew(Path.Combine(directory, "new-v2.db"));
+        Assert.Empty(scopes.GetScopes("actual_member"));
+        Assert.Throws<InvalidOperationException>(() => new Ledger(Path.Combine(directory, "new-v2.db")));
+    }
+
+    [Fact]
+    public void ScopeBatchSeparatesDimensionsAndUsesFullCanonicalReplay()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        var business = new MeasurementScope("business", "aggregate", "business", "Synthetic business");
+        var first = Batch(0, Reading("b", 700), new(business, 900, 0), Reading("a", 100));
+        Assert.All(ledger.Accept(first).Scopes.Values, x => Assert.Equal("baseline", x));
+        var next = Batch(1, Reading("b", 720), new(business, 930, 0), Reading("a", 110));
+        ledger.Accept(next);
+        Assert.Equal("duplicate", ledger.Accept(next with { Readings = next.Readings.Reverse().ToArray() }).Status);
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(1, Reading("a", 110))));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(next with
+        {
+            Readings = next.Readings.Select(x => x.Scope.IdentityValue == "a"
+                ? x with { Scope = x.Scope with { Name = "Renamed" } } : x).ToArray()
+        }));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(next with { At = Epoch.AddSeconds(0.5) }));
+        var members = ledger.Query(ScopeAll());
+        Assert.Equal("30", members.Upload);
+        Assert.Equal(2, members.Scopes.Count);
+        Assert.Equal(2, members.Scopes.Select(x => x.ScopeId).Distinct().Count());
+        Assert.Equal("30", ledger.Query(ScopeAll("business")).Upload);
+        Assert.Equal("0", ledger.Query(ScopeAll("routed_outbound")).Upload);
+        Assert.Throws<ArgumentException>(() => ledger.Query(ScopeAll("all")));
+        Assert.Throws<ArgumentException>(() => ledger.Query(ScopeAll("actual_member,business")));
+    }
+
+    [Fact]
+    public void ScopeMissingKeepsIndependentCursorAndRecoversOnlyUnallocatedAcrossReopen()
+    {
+        long a;
+        using (var ledger = ScopeLedger.CreateNew(Database))
+        {
+            ledger.Accept(Batch(0, Reading("a", 100), Reading("b", 200)));
+            ledger.Accept(Batch(1, new ScopeReading(Member("a"), UnavailableReason: "missing_counter"), Reading("b", 210)));
+            a = ledger.GetScopes("actual_member").Single(x => x.Scope.IdentityValue == "a").Id;
+            Assert.Equal("10", ledger.Query(ScopeAll()).Upload);
+            Assert.True(Assert.Single(ledger.Query(ScopeAll(id: a)).Gaps).IsOpen);
+            Assert.Empty(ledger.Query(ScopeAll(id: ledger.GetScopes("actual_member").Single(x => x.Id != a).Id)).Gaps);
+            // The missing sample still advances the instance watermark, not a fabricated cursor counter.
+            Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0.5, Reading("a", 105), Reading("b", 205))));
+        }
+        using var reopened = new ScopeLedger(Database);
+        reopened.Accept(Batch(2, Reading("a", 140), Reading("b", 220)));
+        var result = reopened.Query(ScopeAll());
+        Assert.Equal("60", result.Upload);
+        Assert.Equal("40", result.RecoveredUpload);
+        Assert.Equal("recovered-contained", Assert.Single(result.Records, x => x.ScopeId == a).Quality);
+        Assert.All(result.Gaps, x => Assert.False(x.IsOpen));
+    }
+
+    [Fact]
+    public void ScopeUnavailableIdentityBoundaryCannotBeUndoneByReturningToTheOldGeneration()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, Reading("a", 100)));
+        ledger.Accept(Batch(1, new ScopeReading(Member(), UnavailableReason: "missing_counter")) with { Generation = "config-2" });
+        ledger.Accept(Batch(2, Reading("a", 150)));
+        Assert.Equal("0", ledger.Query(ScopeAll()).Upload);
+        ledger.Accept(Batch(3, Reading("a", 157)));
+        Assert.Equal("7", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal("0", ledger.Query(ScopeAll()).RecoveredUpload);
+    }
+
+    [Fact]
+    public void ScopeRetirementRequiresTheCompleteDirectoryAndReturningScopesStartAtBaseline()
+    {
+        long a;
+        using (var ledger = ScopeLedger.CreateNew(Database))
+        {
+            ledger.Accept(Batch(0, Reading("a", 100), Reading("b", 200)));
+            a = ledger.GetScopes("actual_member").Single(x => x.Scope.IdentityValue == "a").Id;
+            Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(1, Reading("b", 210))));
+            ledger.Accept(Batch(1, Reading("b", 210)) with { RetiredScopeIds = [a] });
+        }
+        using var reopened = new ScopeLedger(Database);
+        reopened.Accept(Batch(2, Reading("b", 220)) with { RetiredScopeIds = [a] });
+        reopened.Accept(Batch(3, Reading("a", 999), Reading("b", 230)));
+        Assert.Equal("30", reopened.Query(ScopeAll()).Upload);
+        reopened.Accept(Batch(4, Reading("a", 1004), Reading("b", 240)));
+        Assert.Equal("45", reopened.Query(ScopeAll()).Upload);
+        Assert.Equal("0", reopened.Query(ScopeAll()).RecoveredUpload);
+        Assert.Throws<ArgumentException>(() => reopened.Accept(Batch(5, Reading("a", 1010), Reading("b", 250))
+            with { RetiredScopeIds = [a] }));
+    }
+
+    [Fact]
+    public void ScopeUnavailableFirstStillRequiresRetirementAndForeignInstanceCannotRetireIt()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, new ScopeReading(Member(), UnavailableReason: "missing_counter")));
+        var a = Assert.Single(ledger.GetScopes("actual_member")).Id;
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(1)));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(1) with { InstanceId = "other", RetiredScopeIds = [a] }));
+        ledger.Accept(Batch(1) with { RetiredScopeIds = [a] });
+        ledger.Accept(Batch(2, Reading("a", 900)));
+        Assert.Equal("0", ledger.Query(ScopeAll()).Upload);
+        Assert.All(ledger.Query(ScopeAll()).Gaps, gap => Assert.False(gap.IsOpen));
+    }
+
+    [Fact]
+    public void ScopeBatchFailureRollsBackBytesCursorGapMetadataRegistrationAndWatermark()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, Reading("a", 100), Reading("b", 200)));
+        ledger.Accept(Batch(1, new ScopeReading(Member(), UnavailableReason: "missing_counter"), Reading("b", 210)));
+        RunSql("""
+            CREATE TRIGGER fail_scope_watermark BEFORE UPDATE ON scope_batches
+            BEGIN SELECT RAISE(ABORT,'Synthetic batch failure'); END;
+            """);
+        var next = Batch(2, new ScopeReading(Member() with { Name = "Renamed synthetic member" }, 120, 0),
+            Reading("b", 220), Reading("c", 300));
+        Assert.Throws<SqliteException>(() => ledger.Accept(next));
+        Assert.Equal(2, ledger.GetScopes("actual_member").Count);
+        Assert.All(ledger.GetScopes("actual_member"), x => Assert.Equal("Synthetic member", x.Scope.Name));
+        Assert.Equal("10", ledger.Query(ScopeAll()).Upload);
+        Assert.True(Assert.Single(ledger.Query(ScopeAll()).Gaps).IsOpen);
+        RunSql("DROP TRIGGER fail_scope_watermark;");
+        ledger.Accept(next);
+        Assert.Equal("40", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal("20", ledger.Query(ScopeAll()).RecoveredUpload);
+        Assert.False(Assert.Single(ledger.Query(ScopeAll()).Gaps).IsOpen);
+    }
+
+    [Fact]
+    public void ScopeMinuteRemainderConservesBytesAndBigIntegerAggregationDoesNotOverflow()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(59, Reading("a", 0), Reading("b", 0)));
+        ledger.Accept(Batch(61, Reading("a", 7, 11), Reading("b", 5, 9)));
+        var result = ledger.Query(ScopeAll());
+        Assert.Equal("12", result.Upload);
+        Assert.Equal("20", result.Download);
+        Assert.Equal(4, result.RecordCount);
+        Assert.All(result.Records, x => Assert.Equal("approximate", x.Quality));
+        Assert.Equal(2, result.Series.Count);
+        RunSql("UPDATE scope_minutes SET upload=9223372036854775807;");
+        Assert.Equal((new BigInteger(long.MaxValue) * 4).ToString(CultureInfo.InvariantCulture), ledger.Query(ScopeAll()).Upload);
+    }
+
+    [Fact]
+    public void ScopeMinuteUsesOnlyTheSliceForCheckedAdditionAndTrueOverflowRollsBackTheBatch()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(59, Reading("a", 0), Reading("b", 0)));
+        var id = ledger.GetScopes("actual_member").Single(x => x.Scope.IdentityValue == "b").Id;
+        var minute = Epoch.AddMinutes(1).UtcTicks;
+        RunSql($"""
+            INSERT INTO scope_minutes(start_ticks,scope_id,upload,download,approximate,synthetic)
+            VALUES({minute},{id},{long.MaxValue - 5},0,0,0);
+            """);
+        // Second slice is 5. old+whole_delta would overflow; old+slice must not.
+        ledger.Accept(Batch(61, Reading("a", 10), Reading("b", 10)));
+        Assert.Equal((new BigInteger(long.MaxValue) + 15).ToString(CultureInfo.InvariantCulture), ledger.Query(ScopeAll()).Upload);
+        Assert.Throws<OverflowException>(() => ledger.Accept(Batch(62, Reading("a", 20), Reading("b", 11))));
+        Assert.Equal((new BigInteger(long.MaxValue) + 15).ToString(CultureInfo.InvariantCulture), ledger.Query(ScopeAll()).Upload);
+        ledger.Accept(Batch(62, Reading("a", 20), Reading("b", 10)));
+        Assert.Equal((new BigInteger(long.MaxValue) + 25).ToString(CultureInfo.InvariantCulture), ledger.Query(ScopeAll()).Upload);
+    }
+
+    [Fact]
+    public void ScopeRecoveryQueryDisclosesPartialAndCrossMidnightAmountsWithoutApportionment()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(59, Reading("a", 100)));
+        ledger.Accept(Batch(72, Reading("a", 230)));
+        var all = ledger.Query(ScopeAll());
+        Assert.Equal("130", all.Upload);
+        Assert.Equal("130", all.RecoveredUpload);
+        Assert.Equal("130", all.UnbucketedUpload);
+        Assert.Empty(all.Series);
+        var partial = ledger.Query(ScopeAll() with { Start = Epoch.AddMinutes(1), End = Epoch.AddMinutes(2) });
+        Assert.Equal("0", partial.Upload);
+        Assert.Equal("130", partial.PartialUpload);
+        Assert.Equal("recovered-partial", Assert.Single(partial.Records).Quality);
+        Assert.Single(partial.Gaps);
+    }
+
+    [Fact]
+    public void ScopeQueryPagesNeverTrimTotalsOrCoverageGapsAndKeepsBasisInEachRow()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, Reading("a", 0) with { PartialCoverage = true }, Reading("b", 0)));
+        ledger.Accept(Batch(1, Reading("a", 10) with { PartialCoverage = true }, Reading("b", 20)));
+        ledger.Accept(Batch(61, Reading("a", 70) with { PartialCoverage = true }, Reading("b", 80)));
+        var first = ledger.Query(ScopeAll(size: 1));
+        var second = ledger.Query(ScopeAll(page: 1, size: 1));
+        Assert.Equal("150", first.Upload);
+        Assert.Equal(first.Upload, second.Upload);
+        Assert.Equal(first.Gaps, second.Gaps);
+        Assert.Equal(first.RecordCount, second.RecordCount);
+        Assert.Single(first.Records);
+        Assert.Single(second.Records);
+        Assert.NotEqual(first.Records[0].ScopeId, second.Records[0].ScopeId);
+        var a = ledger.GetScopes("actual_member").Single(x => x.Scope.IdentityValue == "a").Id;
+        Assert.Equal("70", ledger.Query(ScopeAll(id: a)).Upload);
+        Assert.All(ledger.Query(ScopeAll(id: a)).Records, x =>
+        {
+            Assert.Equal("actual_member", x.Basis); Assert.True(x.PartialCoverage);
+        });
+        Assert.Empty(ledger.Query(ScopeAll("business", a)).Records);
+        Assert.Throws<ArgumentOutOfRangeException>(() => ledger.Query(ScopeAll(page: -1)));
+    }
+
+    [Fact]
+    public void ScopeBoundaryResetAndExplicitInvalidationNeverRecoverUncertainCumulativeBytes()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, Reading("a", 100)));
+        ledger.Accept(Batch(1, Reading("a", 1000)) with { SessionId = "process-2" });
+        ledger.Accept(Batch(2, Reading("a", 1007)) with { SessionId = "process-2" });
+        ledger.Accept(Batch(3, Reading("a", 0)) with { SessionId = "process-2" });
+        ledger.Accept(Batch(4, Reading("a", 900) with { InvalidateContinuity = true }) with { SessionId = "process-2" });
+        Assert.Equal("7", ledger.Query(ScopeAll()).Upload);
+        Assert.Contains(ledger.Query(ScopeAll()).Gaps, x => x.Reason == "counter_reset");
+        Assert.Equal("0", ledger.Query(ScopeAll()).RecoveredUpload);
+    }
+
+    [Fact]
+    public void ScopeIdentityValidationRejectsGuessedAssociationsAndMalformedPairs()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(Member(), 5, null))));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(Member(), -1, 0))));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(Member(), 5, 0, "missing_counter"))));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(Member(), UnavailableReason: "https://secret.invalid"))));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(Member() with { NodeId = "other" }, 0, 0))));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, Reading("a", 0), Reading("a", 1))));
+        var digest = XrayParser.Hash("synthetic-configuration");
+        var independent = new MeasurementScope("actual_member", "outbound",
+            System.Text.Json.JsonSerializer.Serialize(new[] { digest, "fixture-independent" }),
+            "Synthetic member", OutboundTag: "fixture-independent");
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(independent with { NodeId = "guessed" }, 0, 0))));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(independent with { OutboundTag = "wrong" }, 0, 0))));
+        ledger.Accept(Batch(0, new ScopeReading(independent, 5, 0)));
+        ledger.Accept(Batch(1, new ScopeReading(independent, 9, 0)));
+        Assert.Null(Assert.Single(ledger.GetScopes("actual_member")).Scope.NodeId);
+        Assert.Equal("4", ledger.Query(ScopeAll()).Upload);
+    }
+
+    [Fact]
+    public void ScopeSchemaVersionAndIntegerGuardsAreEnforcedOnReopenAndWrite()
+    {
+        using (var ledger = ScopeLedger.CreateNew(Database)) ledger.Accept(Batch(0, Reading("a", 0)));
+        Assert.Throws<SqliteException>(() => RunSql("UPDATE scope_cursors SET upload=1.5;"));
+        Assert.Throws<SqliteException>(() => RunSql("UPDATE scope_cursors SET continuity_valid=2;"));
+        Assert.Throws<SqliteException>(() => RunSql("UPDATE measurement_scopes SET basis='business';"));
+        Assert.Throws<SqliteException>(() => RunSql("""
+            INSERT INTO scope_minutes(start_ticks,scope_id,upload,download,approximate,synthetic)
+            VALUES(0,1,9223372036854775808,0,0,0);
+            """));
+        RunSql("DROP INDEX scope_gap_open;");
+        Assert.Throws<InvalidOperationException>(() => new ScopeLedger(Database));
+    }
+
+    [Fact]
+    public void ScopeInstancesAndConcurrentReplayRemainIndependent()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, Reading("a", 0)));
+        ledger.Accept(Batch(0, Reading("a", 100)) with { InstanceId = "other" });
+        var next = Batch(1, Reading("a", 10));
+        Parallel.For(0, 8, _ => ledger.Accept(next));
+        ledger.Accept(Batch(1, Reading("a", 120)) with { InstanceId = "other" });
+        Assert.Equal("30", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal(2, ledger.GetScopes("actual_member").Count);
+        Assert.Equal(2, ledger.Query(ScopeAll()).RecordCount);
+    }
+
+    [Fact]
+    public void ScopeRenameKeepsArchivedNodeMetadataAndNeverClosesLegacyGaps()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, Reading("a", 0), Reading("b", 0)));
+        var a = ledger.GetScopes("actual_member").Single(x => x.Scope.IdentityValue == "a").Id;
+        RunSql($"""
+            INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin)
+            VALUES({Epoch.UtcTicks},{Epoch.UtcTicks},NULL,'legacy_unknown',1,'legacy'),
+                  ({Epoch.UtcTicks},{Epoch.UtcTicks},{a},'legacy_scoped',1,'legacy');
+            """);
+        ledger.Accept(Batch(1, new ScopeReading(Member() with { Name = "Renamed synthetic" }, 10, 0), Reading("b", 20)));
+        var result = ledger.Query(ScopeAll(id: a));
+        Assert.Equal("Renamed synthetic", Assert.Single(result.Scopes).Name);
+        Assert.Equal(2, result.Gaps.Count);
+        Assert.All(result.Gaps, x => Assert.True(x.IsOpen));
+        // Even a page after the last record must disclose an old open, unassigned gap.
+        Assert.Single(ledger.Query(ScopeAll("business", page: 10)).Gaps);
+        using var db = new SqliteConnection($"Data Source={Database};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = "SELECT name FROM nodes WHERE node_key='instance/a';";
+        Assert.Equal("Synthetic member", command.ExecuteScalar());
+    }
+
+    [Fact]
+    public void ScopeIndependentConfigurationChangeRequiresRetirementAndDoesNotMergeSameNames()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        MeasurementScope Outbound(string config) => new("actual_member", "outbound",
+            System.Text.Json.JsonSerializer.Serialize(new[] { XrayParser.Hash(config), "fixture" }),
+            "Same synthetic name", OutboundTag: "fixture");
+        var first = Outbound("synthetic-config-a");
+        var second = Outbound("synthetic-config-b");
+        ledger.Accept(Batch(0, new ScopeReading(first, 100, 0)));
+        var id = Assert.Single(ledger.GetScopes("actual_member")).Id;
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(1, new ScopeReading(second, 500, 0))
+            with { Generation = "config-2" }));
+        Assert.Single(ledger.GetScopes("actual_member"));
+        ledger.Accept(Batch(1, new ScopeReading(second, 500, 0)) with { Generation = "config-2", RetiredScopeIds = [id] });
+        var secondId = ledger.GetScopes("actual_member").Single(x => x.Id != id).Id;
+        ledger.Accept(Batch(2, new ScopeReading(second, 507, 0)) with { Generation = "config-2", RetiredScopeIds = [id] });
+        ledger.Accept(Batch(3, new ScopeReading(first, 800, 0)) with { RetiredScopeIds = [secondId] });
+        Assert.Equal("7", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal(2, ledger.GetScopes("actual_member").Count);
+        Assert.Equal("0", ledger.Query(ScopeAll()).RecoveredUpload);
+    }
+
+    [Fact]
+    public void ScopeBatchRejectsTwoIdentitiesForTheSameMemberCounterTag()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        var duplicateTag = new ScopeReading(Member("b") with { OutboundTag = "fixture-a" }, 100, 0);
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, Reading("a", 100), duplicateTag)));
+        Assert.Empty(ledger.GetScopes("actual_member"));
+        var route = new MeasurementScope("routed_outbound", "outbound",
+            System.Text.Json.JsonSerializer.Serialize(new[] { XrayParser.Hash("synthetic-config"), "fixture-a" }),
+            "Synthetic route", OutboundTag: "fixture-a");
+        ledger.Accept(Batch(0, Reading("a", 100), new(route, 200, 0)));
+        ledger.Accept(Batch(1, Reading("a", 107), new(route, 220, 0)));
+        Assert.Equal("7", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal("20", ledger.Query(ScopeAll("routed_outbound")).Upload);
+    }
+
     private void RunSql(string sql)
     {
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Database, Pooling = false }.ToString());

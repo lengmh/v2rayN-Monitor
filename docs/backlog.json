@@ -530,7 +530,7 @@
       "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
       "issue": 18,
       "pull_request": 20,
-      "implementation_note": "批量路由/成员 RPC、test.3 核心原型、独立 CI 与配置绑定候选身份目录已交付，e8a6c22 精确 CI 全通过。第四批完成完整 v2 提案 SQL、旧历史 legacy_proxy 映射和 backup/回滚方案；生产 v1 初始化器生成双库合成数据，19 组隔离迁移/批量记账验证通过，provider.db 精确小数及文件不变。目录完整身份、正式 v2 Ledger/生产采样/查询/页面尚未接入，临时原型未纳入 CI。下一批先实现受控 v2 Ledger 与正式回归；生产入口、sidecar、白名单、Schema及真实账本不变，真实迁移另取授权。见 docs/STATUS.md、docs/proposals/scope-ledger-v2.md 与 docs/singbox-extension-scope.md。"
+      "implementation_note": "路由/成员 RPC、test.3 核心原型、独立 CI 与候选身份目录已交付；第四批 v2 提案在双库合成数据通过 19 组隔离验证。第五批新增正式独立 ScopeLedger：全新文件显式初始化、完整目录退休核对、原子批次/游标/范围缺口、单 basis BigInteger 查询与分页；正式回归及精确提交 CI 见 STATUS。同一 SQL 嵌入 Core，现有 v1 文件不会自动升级。nodes 仅插入新核实关联，旧行不改。下一节点补正式 v1 迁移预检/backup/逐行核对执行器；完整 Windows 身份、生产采样/API/页面尚待接入。生产入口、sidecar、白名单及真实账本不变，真实迁移另取授权。见 docs/proposals/scope-ledger-v2.md 与 docs/singbox-extension-scope.md。"
     },
     {
       "id": "S5.7",

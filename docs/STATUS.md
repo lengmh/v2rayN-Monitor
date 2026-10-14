@@ -1,5 +1,25 @@
 # 初版实现与验证状态
 
+## 2026-10-15：S5.6 / PR #20 独立 v2 账本
+
+起点为 `8845b2931e71471e138a460821b42e134bd2b834`；工作树干净、本地与远端一致，PR #20 Open / Draft，base 仍为未合并的 PR #17 分支。本批范围为正式账本实现。本 checkpoint 只交付独立 Core 层与既有文件中的正式回归，不部署核心/预览，不修改依赖、CI 配置、生产入口或任何真实数据库。
+
+新增 `ScopeLedger` / `ScopeModels`。新库必须显式 `CreateNew`，拒绝每个已有文件；打开已有库必须为 v2，核对六张新表/索引的完整 DDL、完整性和外键，不自动建表或升级。复用 docs/proposals 的同一 SQL 作为 Core 嵌入资源，仅在全新空库初始化时执行。正式已有 v1 库的预检、backup、逐行映射核对及迁移执行器仍未实现；原 Ledger/WindowsDiscovery/Server 继续 v1。
+
+完整批次的 instance/session/generation、时间/规范化输入指纹、范围注册/名称、全部字节/游标、缺口及退休失效在单事务提交。完整目录必须明确退休每个遗漏范围，含从未获得计数和已退休范围；漏列、跨实例退休、重复/冲突/迟到输入或任何约束/溢出全批拒绝。缺失范围不补零，也不清空其他游标；缺失期间观察到代次变化同样持久失效连续性，A→B→A 不恢复不确定量。恢复量保持未分时，分片先算本片再 checked 累加，避免 SQLite REAL 提升及可表示分片的中间溢出。
+
+新增单 basis Core 查询，按 scope ID、时区及时间分桶，BigInteger 合计输出十进制字符串；成员、business、excluded、unknown、路由和 legacy 不能混合查询。明细分页不裁合计、分桶或缺口，部分重叠恢复不摊分，跨桶恢复单列。成员成功只关闭该范围 collector 缺口，不关闭 legacy/NULL 范围缺口。nodes 只为新核实关联插入行，不改旧行，范围新名称保存在新表。这个共享身份目录约定已同步提案，旧字节/游标/缺口表不写入 v2 记录。
+
+本地使用隔离 .NET SDK 10.0.401 与既有离线 NuGet 缓存，设置本轮 DOTNET_CLI_HOME/TEMP/NUGET_PACKAGES，显式禁止生成开发 HTTPS 证书。实际执行 `dotnet restore ... --source <既有缓存>`、Core / Server Release build、`dotnet test ... --no-build --no-restore --logger trx`：第一轮完整构建均零警告零错误，Core 291 / Server 32 通过。原 LedgerTests.cs 新增的长期回归全部使用合成身份/计数，覆盖新库门禁、维度分离/同名分账/规范化重放、局部缺失与持久恢复、不可用代次边界、完整目录/退休/返回基线、后项失败全回滚（含名称/节点关联/注册/缺口/批次）、整数余数/大整数/真溢出、查询恢复/跨午夜/分页/coverage、重启/回退/显式失效、关联校验/非法输入/Schema、并发重读、legacy 缺口保留和独立配置身份变更；末次复核补同 tag 双身份最短回归，共 18 项，最终复验结果另列。
+
+首次编译 Core 成功、测试编译失败：单个 params 实参中的 target-typed `new()` 被编译器当作数组目标，另有 xUnit2031 断言规则错误。仅显式写 ScopeReading 类型并使用 Assert.Single 的过滤参数，未放宽编译器警告或测试；失败 build.log 保留，后续构建及回归通过。SQL 注释/使用说明同步后再执行最终嵌入资源定向复验。前端未改，本地不重复前端/浏览器或真实核心联测。
+
+提交前复核发现同一成员 counter tag 可被两条不同范围身份重复绑定。最短合成回归先实测失败（没有抛出预期拒绝），随后在批次输入边界拒绝同 basis/tag 的双身份；跨 actual_member/routed_outbound 的同 tag 仍合法并分别查询。最终 Release build 零警告零错误，18 项 v2 定向复验全部通过，见 build-final18.log、scope-tests-final18.log、results-final18/ 与 verification-manifest-final18.json。红例在 duplicate-tag-red.log 保留，不扩大支持类型或修改核心；未受影响的旧 Core / Server 检查不重复运行，远端最终全量结果单独记录。
+
+本机产物位于 `F:\AI playground\TempFiles\v2rayn-monitor-scope-ledger-20261015`：build.log / build2.log / build3.log / server-build.log、scope-tests2.log / core-tests3.log / server-tests.log 与各 TRX；正式新库/回归的临时文件均在本轮 tmp 下，不提交数据库。提交、远端精确 HEAD 和对应 Monitor/扩展 CI 单独核对，结果见本轮 checkpoint 记录，不沿用上一提交绿灯。
+
+S5.6 保持 in_progress；独立持久化层与 Core 查询已实现，但尚不是生产自动多出站分账。下一节点先完成正式受控 v1 迁移执行器及合成 SQLite backup/逐行核对/失败回滚，再推进完整 Windows 身份、生产采样及 API/页面接入。test.3 未部署，生产仍只采 proxy，服务商库独立不变；真实迁移、运行文件替换、重载、节点切换、合并及发布不在本批范围。真实进程重开、断电恢复和全量实机验收未补齐，S5.7 / #19 仍 planned。
+
 ## S5.6 / PR #20 多范围迁移提案与隔离验证
 
 接手起点为 `e8a6c22aa0c291a7d1365e421cfd0ce0c741145a`，工作树干净、本地/远端一致，PR #20 仍 Open / Draft。该提交的 Monitor PR / push CI `38588487034` / `38588478588` 双平台及独立核心 CI `38588487693` 已通过，分别为 Core 274 / Server 32 / 前端 51、Linux 浏览器 15，以及 Go 4 个顶级测试 / 15 个子用例。本批范围为迁移方案和隔离账本验证。本轮不修改生产源码、依赖、CI、运行程序或真实 Schema。

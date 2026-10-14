@@ -1,4 +1,5 @@
--- S5.6 proposal only. Not loaded by Ledger, Host, Server, or CI.
+-- S5.6 schema/mapping source, embedded by opt-in ScopeLedger.CreateNew for NEW EMPTY files.
+-- Existing-file migration remains a proposal; no production Host/Server entry point calls it.
 -- Caller must verify a supported v1 database, take a SQLite backup, enable
 -- foreign_keys, begin ONE write transaction, and validate before committing.
 -- No BEGIN/COMMIT here: failed validation must roll back DDL and user_version.
@@ -97,7 +98,7 @@ INSERT INTO scope_batches(instance_id,at_ticks,fingerprint)
     SELECT instance_id,MAX(at_ticks),NULL FROM cursors GROUP BY instance_id;
 
 -- Keep original local tables intact. provider.db is separate and must not be migrated here.
--- v2 writes scope_* only for local accounting.
+-- v2 accounting writes scope_* only; nodes may receive new verified associations (insert-only).
 -- Caller must compare every mapped row, inspect foreign_key_check and integrity_check,
 -- before committing this version marker. Do not use a provider.db connection.
 PRAGMA user_version=2;
