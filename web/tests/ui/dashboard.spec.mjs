@@ -30,6 +30,23 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('member group labels wrap fully and local details request nonzero rows', async ({ page }) => {
+  const name = '【US-1x】 1-Synthetic member with a deliberately long readable name for the ranking';
+  const calls = await mock(page, {
+    '/api/history': route => route.fulfill(json({ ...history, basis: 'actual_member', recordCount: 1,
+      nodes: [{ ...history.nodes[0], name }], records: [{ ...history.records[0], nodeName: name }] }))
+  });
+  expect(calls.find(x => x.path === '/api/history').url.searchParams.get('nonZeroRecords')).toBe('true');
+  await expect(page.locator('#record-count')).toHaveText('1 条非零记录');
+  for (const [width, height, suffix] of [[1200, 1000, 'desktop'], [390, 844, 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    const label = page.locator('.rank-node').first();
+    await expect(label).toHaveText(name);
+    expect(await label.evaluate(el => el.scrollWidth <= el.clientWidth + 1 && getComputedStyle(el).whiteSpace === 'normal')).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/member-label-${suffix}.png`, fullPage: true });
+  }
+});
 test('partial sing-box coverage is visible on desktop and mobile after collection resumes', async ({ page }) => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
   await mock(page, {
@@ -108,7 +125,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await page.click('[data-period=day]');
   await expect(page.locator('#bucket')).toHaveValue('hour');
   await expect(page.locator('#comparison-chart .comparison-bar')).toHaveCount(2);
-  expect(await page.locator('#comparison-chart .comparison-bar').first().evaluate(node => parseFloat(getComputedStyle(node).height))).toBeGreaterThan(0);
+  await expect.poll(() => page.locator('#comparison-chart .comparison-bar').first().evaluate(node => parseFloat(getComputedStyle(node).height))).toBeGreaterThan(0);
   await page.screenshot({ path: 'test-results/comparison-desktop.png', fullPage: true });
   await page.selectOption('#node-filter', 'Synthetic shared node');
   await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('nodeName')).toBe('Synthetic shared node');

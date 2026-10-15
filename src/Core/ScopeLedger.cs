@@ -299,10 +299,13 @@ public sealed class ScopeLedger : IDisposable
                     if (recovery) bucket.Recovered.Add(up, down);
                     if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered);
                 }
-            var count = Scalar(transaction, "SELECT COUNT(*) FROM (" + RecordsSql + ");", parameters);
+            var detailsSql = query.NonZeroRecords
+                ? "SELECT * FROM (" + RecordsSql + ") WHERE upload<>0 OR download<>0"
+                : RecordsSql;
+            var count = Scalar(transaction, "SELECT COUNT(*) FROM (" + detailsSql + ");", parameters);
             var rows = new List<ScopeTrafficRow>();
             using (var command = Command(transaction,
-                RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id LIMIT $limit OFFSET $offset;",
+                detailsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id LIMIT $limit OFFSET $offset;",
                 [.. parameters, ("$limit", query.PageSize), ("$offset", checked((long)query.Page * query.PageSize))]))
             using (var reader = command.ExecuteReader())
                 while (reader.Read())

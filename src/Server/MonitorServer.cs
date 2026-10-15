@@ -189,7 +189,7 @@ public sealed class MonitorServer : IAsyncDisposable
             id = parsed;
         }
         return new(basis, query.Start, query.End, query.TimeZoneId, query.Bucket, id, query.Page, query.PageSize)
-        { ScopeName = query.NodeName };
+        { ScopeName = query.NodeName, NonZeroRecords = query.NonZeroRecords };
     }
     private static TrafficRow ToTraffic(ScopeTrafficRow row) =>
         new(row.Start, row.End, "scope:" + row.ScopeId.ToString(CultureInfo.InvariantCulture),
@@ -224,9 +224,13 @@ public sealed class MonitorServer : IAsyncDisposable
         var page = int.TryParse(q["page"], out var p) ? p : 0; var size = int.TryParse(q["pageSize"], out var s) ? s : 50;
         if (page < 0 || page > 100000 || size < 1 || size > 500) throw new ArgumentException("分页范围无效。");
         var name = q["nodeName"].FirstOrDefault();
+        var nonZero = false;
+        if (q.TryGetValue("nonZeroRecords", out var flag) && (flag.Count != 1 || !bool.TryParse(flag[0], out nonZero)))
+            throw new ArgumentException("非零明细筛选必须为 true 或 false。");
         return new(start, end, zone, bucket, q["nodeKey"].FirstOrDefault() is { Length: > 0 } key ? key : null, page, size)
         {
-            NodeName = string.IsNullOrEmpty(name) ? null : name
+            NodeName = string.IsNullOrEmpty(name) ? null : name,
+            NonZeroRecords = nonZero
         };
     }
     public static string Cell(string text)

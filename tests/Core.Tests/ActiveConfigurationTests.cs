@@ -559,6 +559,50 @@ public sealed class ActiveConfigurationTests : IDisposable
             with { CoreName = "sing-box" };
 
     [Fact]
+    public void MemberFriendlyNameUsesExplicitGroupMembershipWithoutChangingLedgerIdentity()
+    {
+        const string tag = "12345-proxy-US-1x-1-Synthetic A";
+        var config = MemberConfiguration.Replace("\"other\"", JsonSerializer.Serialize(tag), StringComparison.Ordinal)
+            .Replace("\"group\"", "\"12345-proxy-US-1x\"", StringComparison.Ordinal);
+        var snapshot = MemberSnapshot(config);
+        Assert.True(SingboxParser.TryReadMemberCatalog(snapshot, Bytes(config), out var catalog, out _));
+        var member = catalog!.Candidates[tag];
+        Assert.Equal("【US-1x】 1-Synthetic A", member.DisplayName);
+        Assert.Equal(tag, member.OutboundTag);
+        Assert.Null(member.IndexId);
+        Assert.Null(catalog.Candidates["proxy"].DisplayName);
+        var counters = ScopeCounters(10, 20);
+        counters = counters with { Members = new Dictionary<string, XrayCounters>
+            { ["proxy"] = new(10, 0), [tag] = new(20, 0) } };
+        var batch = ScopeCollector.Project(new(snapshot, catalog, ["proxy", tag]), counters, Start);
+        using var ledger = ScopeLedger.CreateNew(History);
+        ScopeCollector.Commit(ledger, batch with
+        {
+            Readings = batch.Readings.Select(x => x.Scope.OutboundTag == tag
+                ? x with { Scope = x.Scope with { Name = tag } } : x).ToArray()
+        });
+        var id = ledger.GetScopes("actual_member").Single(x => x.Scope.OutboundTag == tag).Id;
+        var commit = ScopeCollector.Commit(ledger, batch with { At = Start.AddSeconds(1) });
+        var renamed = ledger.GetScopes("actual_member").Single(x => x.Id == id);
+        Assert.Equal(member.DisplayName, renamed.Scope.Name);
+        Assert.Equal(tag, renamed.Scope.OutboundTag);
+        Assert.Null(renamed.Scope.NodeId);
+        Assert.Equal("recorded", commit.Scopes[id]);
+        Assert.DoesNotContain(ledger.Query(new("actual_member", Start.AddSeconds(-1), Start.AddMinutes(1), "UTC")).Gaps,
+            x => x.Reason == "identity_change");
+    }
+
+    [Fact]
+    public void MemberSharedBySelectorsKeepsOriginalTagInsteadOfGuessingAGroup()
+    {
+        var config = MemberConfiguration.Replace("\"type\":\"urltest\"", "\"type\":\"selector\"", StringComparison.Ordinal);
+        Assert.True(SingboxParser.TryReadMemberCatalog(MemberSnapshot(config), Bytes(config), out var catalog, out _));
+        Assert.Null(catalog!.Candidates["other"].DisplayName);
+        Assert.Equal("other", catalog.Candidates["other"].OutboundTag);
+        Assert.Null(catalog.Candidates["other"].IndexId);
+    }
+
+    [Fact]
     public void SingboxMemberCatalogPreservesIndependentIdentityAndOnlyVerifiedProxyIndexId()
     {
         var snapshot = MemberSnapshot();
