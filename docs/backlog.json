@@ -557,7 +557,7 @@
       "stop_rule": "隔离回归、核心副本与精确提交CI分层记录；test.4实机不自动更新，启用新预览前提醒。扩展替换、重载及真实迁移须具体授权。",
       "issue": 18,
       "pull_request": 20,
-      "implementation_note": "2026-10-15首批新增probe-stats.patch、test.5构建及ReadProbesAsync/TryReadProbesResponse。只有核心累计和Core读取，Windows采样、版本化持久化/API/页面及实机未接入。test.2/test.4白名单不变；其他内部请求未宣称覆盖。见STATUS及docs/proposals/probe-accounting.md。"
+      "implementation_note": "2026-10-15首批新增probe-stats.patch、test.5构建及Core读取；第二批新增显式v3历史、联合原子批次/单维查询和受控v2→v3执行器。旧范围/历史/游标/缺口与指纹逐表保留，新探测首次建基线；失败回滚DDL/版本/数据。通用认证scope-history合成验证探测查询，默认历史/导出仍为业务。正常打开不迁移，默认新库仍v2。Windows同代批量采样、探测能力说明/页面及实机未接入，test.2/test.4白名单不变；真实v2和provider未操作，其他内部请求未宣称覆盖。见STATUS及docs/proposals/probe-accounting.md。"
     },
     {
       "id": "S6.1",

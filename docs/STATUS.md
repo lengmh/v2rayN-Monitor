@@ -1,5 +1,23 @@
 # 初版实现与验证状态
 
+## 2026-10-15：S5.8 第二批 / v3 探测历史与受控迁移
+
+起点 `42bdedb46b90614736740d768d02eee20c5c1441`，工作树干净。首批该提交的 Monitor PR/push `38743941438` / `38743930366`、扩展 PR/push `38743941411` / `38743930176` 均成功，完整元数据和日志在首批本机 `checkpoint-final.json` 证据目录。本批按用户「可以，请继续」完成账本与隔离迁移检查点，不替换运行包或操作真实数据。
+
+新增嵌入 [v3 SQL](proposals/scope-ledger-v3.sql) 与四个探测 basis：probe_urltest_member / business / excluded / unknown（后面三项带同一 probe_urltest_ 前缀）。原业务 basis 和 v2 SQL 不变；ScopeLedger.CreateNew 默认仍创建 v2，仅 includeProbes:true 创建 v3。正常打开只核对版本和对应 DDL，不迁移。探测复用既有整数差分、分钟分片、未分时恢复、缺口和单维查询；成员与总量分别查，不相加。
+
+新增 ScopeCollector.ProjectWithProbes：从已核实目录复制成员身份，保留无可用计数的探测范围；业务/探测字节、游标、缺口及批次指纹在同一事务提交。Commit 按账本支持的维度明确退休范围，探测与业务分别恢复/退休。首次探测不回填，缺失不补零，同名不合并身份。
+
+独立 ScopeLedgerMigration.MigrateProbes 仅接受完整支持的 v2。只读预检、全新 SQLite backup 后，独占事务内再次比对；仅重建范围目录以扩展 CHECK，全部旧 scope ID、v1 五表、v2 六表的行、游标连续性、未分时、缺口和水位/指纹均逐表保留，未改 DDL 逐项核对。事务内检查完整性/外键后才提交版本3；SQL、数据比对或外键失败均回滚目录、版本及数据。迁移连接于事务前关闭外键执行，退出后恢复；新库和正常采样保持开启。真实调用仍要求先停止全部写入者并取得具体授权；provider.db 不参与迁移。
+
+本地隔离 .NET SDK 10.0.401 与既有离线缓存：新增 Core 15 项定向通过，随后完整 Core 332 / Server 36 通过。末次复核将新库初始化明确保留原外键开启行为后，最终 Core 相关30项复验通过。另在现有 Server 测试文件增加1项认证/探测大整数/维度隔离回归，最终单项通过，Server生产代码未改。通用认证 /api/scope-history 显式选择探测basis可查询v3；默认 /api/history、节点列表和导出仍只用业务维度。未把先后两次Server结果拼成一次本地37项全量运行。
+
+回归覆盖显式v3/不自动升级、2^53以上整数、业务/探测独立、缺失及跨代恢复、退休返回基线、任一范围溢出时全批回滚；v2备份与全部旧行/Schema（目录DDL除外）保留、原业务游标连续性、新探测首次基线、provider文件不变；空v2、已有备份/v1/provider/v3拒绝、部分Schema拒绝、SQL/数据/外键故障回滚以及backup后源变化拒绝。全部为合成SQLite，不访问真实库；当前核心补丁及依赖不变，本批不重复Go或真实核心实验。
+
+证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-probe-ledger-20261015`：隔离源码、首次15项/完整Core与Server/末次30项和API单项日志及TRX。计划/链接/diff/源码身份检查后提交，精确提交CI单独核对，不沿用首批绿灯。
+
+S5.8 仍 in_progress：Core持久化、联合投影及通用单维历史查询已实现；Windows同代次批量读取/采样、探测能力说明和页面未接入，test.2/test.4白名单不变，test.5未部署。当前预览仍不会保存探测历史，真实v2、provider、核心/sidecar/Monitor和路由/启动项均未操作。下一批接Windows及页面，启用新预览前提醒；实库迁移、扩展替换和重载仍另经具体授权。S5.6原名称对照/覆盖说明及受控实机验收继续保留，S5.7 planned。
+
 ## 2026-10-15：S5.8 首批 / URLTest 独立累计与 Core 读取
 
 起点 `38d787a521f09c83bb209b57e9c1bc797b4994ca`，工作树干净，PR #20 Open / Draft，base 仍为未合并的 PR #17 分支。用户确认计费诊断收口，并要求后续覆盖 `urltest` 等内部接口、单独统计。新增 S5.8 并同步计划、任务清单与支持矩阵；真实计费诊断数据只留本机，没有提交节点、账单或运行配置。

@@ -26,7 +26,7 @@ v0.1.1 已正式发布。v0.2.0 的 #15 为内核线、#16 为 CSV 线。S5.5 / 
 
 第九批增加明确组引用的友好成员名及换行，HTML明细以nonZeroRecords=true先筛零再分页；汇总/缺口和原始导出不变，不删除零记录。经提醒和授权，用户退出旧Monitor后，13:24:58仅启动68b8a35 CI包，SQLite backup后沿用同一live-scope-data；37个身份/旧历史保留、33个友好名、6个新批次逐范围被动守恒通过。同核心代次重开增量与账本一致，停机量保存为恢复未分时，long_interval缺口关闭；未动v2rayN、核心/sidecar、路由或启动项，用户随后明确回复UI符合预期，本次友好名/排行展示及非零明细的页面使用确认通过，不扩展为切换或全量计量验收。偏少诊断中的首接前不回填、直连排除及历史snapshot_changed/identity_change窗口不变；不能将无开放缺口写成全历史无缺口。真实计数/图谱及备份只留TempFiles，运行目录不得当临时垃圾清理，详见STATUS。
 
-2026-10-15 新增 S5.8 内部探测独立计量：test.5 的第四层 probe-stats.patch 与 Core 只读读取已完成隔离回归，实际仍未部署；test.2/test.4 白名单不变。Windows 采样、版本化账本、历史/API/页面待接，当前 v2 与真实数据不改。目标 TLS/HEAD 流字节不等同代理外层或服务商计费，其他内部请求逐条验证；详见 STATUS 与 docs/proposals/probe-accounting.md。新预览启用前提醒，不借用先前授权替换运行文件、重载或迁移。
+2026-10-15 S5.8 内部探测独立计量：test.5第四层probe-stats.patch与Core读取已有隔离回归；第二批新增显式v3探测历史、联合原子批次和受控v2→v3执行器，合成旧历史保留/回滚通过。通用认证scope-history可显式查探测，默认历史/导出仍为业务。正常打开不迁移，默认新库仍v2，实际v2与provider不改。Windows同代批量采样、探测能力说明/页面待接，test.2/test.4白名单不变，test.5未部署。目标TLS/HEAD流字节不等同代理外层或计费，其他内部请求逐条验证；详见STATUS与docs/proposals/probe-accounting.md。新预览启用前提醒，不借用先前授权替换运行文件、重载或迁移。
 
 ## 公开仓库边界
 

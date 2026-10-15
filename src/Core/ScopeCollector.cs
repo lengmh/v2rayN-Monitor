@@ -44,6 +44,34 @@ public static class ScopeCollector
         return new(snapshot.InstanceId, snapshot.ProcessIdentity, snapshot.Generation, at, readings, []);
     }
 
+    /// <summary>Projects one complete business/probe batch for an explicitly initialized v3 ledger.</summary>
+    public static ScopeBatch ProjectWithProbes(ScopeCapture capture, V2RayMemberStatistics business,
+        V2RayProbeStatistics probes, DateTimeOffset at, bool invalidateContinuity = false)
+    {
+        ArgumentNullException.ThrowIfNull(probes);
+        var batch = Project(capture, business, at, invalidateContinuity);
+        var enabled = capture.EnabledMembers.ToHashSet(StringComparer.Ordinal);
+        var readings = batch.Readings.ToList();
+        foreach (var member in batch.Readings.Where(x => x.Scope.Basis == "actual_member"))
+        {
+            var tag = member.Scope.OutboundTag!;
+            var scope = member.Scope with { Basis = "probe_urltest_member" };
+            var counter = enabled.Contains(tag) ? probes.Members.GetValueOrDefault(tag) : null;
+            readings.Add(new(scope, counter?.Upload, counter?.Download, counter is not null ? null :
+                !enabled.Contains(tag) ? "probe_statistics_disabled" : probes.UnavailableMembers.GetValueOrDefault(tag, "missing_counter"),
+                invalidateContinuity, member.PartialCoverage));
+        }
+        foreach (var total in new[] { "business", "excluded", "unknown" })
+        {
+            var basis = "probe_urltest_" + total;
+            var counter = probes.Totals.GetValueOrDefault(total);
+            readings.Add(new(new(basis, "aggregate", basis, basis), counter?.Upload, counter?.Download,
+                counter is not null ? null : probes.UnavailableTotals.GetValueOrDefault(total, "missing_counter"),
+                invalidateContinuity));
+        }
+        return batch with { Readings = readings };
+    }
+
     public static ScopeBatch ProjectLegacy(XraySnapshot snapshot, XrayCounters counter, DateTimeOffset at, bool invalidateContinuity)
     {
         var key = Uri.EscapeDataString(snapshot.InstanceId) + "/" + Uri.EscapeDataString(snapshot.NodeId);
@@ -55,7 +83,7 @@ public static class ScopeCollector
     public static ScopeCommit Commit(ScopeLedger ledger, ScopeBatch completeDirectory)
     {
         var active = completeDirectory.Readings.Select(x => (x.Scope.Basis, x.Scope.IdentityKind, x.Scope.IdentityValue)).ToHashSet();
-        var retired = new[] { "actual_member", "legacy_proxy", "business", "excluded", "unknown", "routed_outbound" }
+        var retired = ledger.Bases
             .SelectMany(ledger.GetScopes).Where(x => x.InstanceId == completeDirectory.InstanceId &&
                 !active.Contains((x.Scope.Basis, x.Scope.IdentityKind, x.Scope.IdentityValue))).Select(x => x.Id).Order().ToArray();
         return ledger.Accept(completeDirectory with { RetiredScopeIds = retired });
