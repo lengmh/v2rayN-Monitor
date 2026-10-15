@@ -19,6 +19,15 @@ public sealed record V2RayMemberStatistics(
 {
     public string Basis => "actual_member";
 }
+// URLTest stream bytes are independent of business traffic and provider billing.
+public sealed record V2RayProbeStatistics(
+    IReadOnlyDictionary<string, XrayCounters> Members,
+    IReadOnlyDictionary<string, string> UnavailableMembers,
+    IReadOnlyDictionary<string, XrayCounters> Totals,
+    IReadOnlyDictionary<string, string> UnavailableTotals)
+{
+    public string ProbeKind => "urltest";
+}
 public sealed record SingboxMemberIdentity(string OutboundTag, string Protocol, string? IndexId)
 {
     public string? DisplayName { get; init; }
