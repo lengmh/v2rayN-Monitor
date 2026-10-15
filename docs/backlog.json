@@ -546,6 +546,20 @@
       "implementation_note": "2026-10-14 用户扩大范围，已登记独立增强 Issue；尚未修改自定义配置发现、扩展核心或 Schema。"
     },
     {
+      "id": "S5.8",
+      "phase": "S5",
+      "title": "核心内部探测与后台请求独立计量",
+      "depends_on": ["S5.6"],
+      "status": "in_progress",
+      "work": "计费诊断收口，后续覆盖urltest等内部接口并单独统计。首批在#18 / PR #20实现test.5公共URLTest独立累计与Monitor Core只读读取；版本化账本、Windows采样和页面后续接入，DNS/规则集逐条核实。",
+      "outputs": ["每成员及代理/排除/未知探测累计", "版本化账本扩展与单维查询", "独立探测页面及覆盖/缺口说明"],
+      "acceptance": "探测不污染业务/路由；预热与正式连接分别绑定实际成员，不读Now猜归属，失败前字节保留。首接不回填，增量/游标同事务，旧历史和独立provider保留。探测流字节不冒充服务商计费。",
+      "stop_rule": "隔离回归、核心副本与精确提交CI分层记录；test.4实机不自动更新，启用新预览前提醒。扩展替换、重载及真实迁移须具体授权。",
+      "issue": 18,
+      "pull_request": 20,
+      "implementation_note": "2026-10-15首批新增probe-stats.patch、test.5构建及ReadProbesAsync/TryReadProbesResponse。只有核心累计和Core读取，Windows采样、版本化持久化/API/页面及实机未接入。test.2/test.4白名单不变；其他内部请求未宣称覆盖。见STATUS及docs/proposals/probe-accounting.md。"
+    },
+    {
       "id": "S6.1",
       "phase": "S6",
       "title": "实现当前 CSV 格式的可选预览",

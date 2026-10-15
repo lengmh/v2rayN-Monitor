@@ -1,5 +1,23 @@
 # 初版实现与验证状态
 
+## 2026-10-15：S5.8 首批 / URLTest 独立累计与 Core 读取
+
+起点 `38d787a521f09c83bb209b57e9c1bc797b4994ca`，工作树干净，PR #20 Open / Draft，base 仍为未合并的 PR #17 分支。计费诊断收口，后续覆盖 `urltest` 等内部接口并单独统计。新增 S5.8 并同步计划、任务清单与支持矩阵；真实计费诊断数据只留本机，没有提交节点、账单或运行配置。
+
+第四层 `probe-stats.patch` 在固定公共 URLTest 的每次实际拨号计量，复用返回连接的叶成员证据。原生启动/周期、AnyTLS 预热/正式、公共延迟测试调用分别进入新命名空间 `monitor>>>probe>>>urltest>>>...`，成员及 business / excluded / unknown 与原业务/路由独立。Clash 延迟 API 只传入统计服务，原目标、TLS 信任及超时不变。未启用 monitor_members 保持旧行为；没有以 Now、活动连接轮询或速率积分补累计。
+
+构建脚本叠加四层补丁、要求七个顶级回归后构建 test.5；工作流配置、Go 1.26.8、固定归档/Windows 标签及依赖不变。Monitor Core 新增 `ReadProbesAsync` / `TryReadProbesResponse` 与独立结果类型，仍单次 reset=false、数值回环 HTTP/2、65,536 bytes 上限和严格整数解析；旧核心缺失为 unavailable，不填零。现有 test.2/test.4 白名单不变，Windows 生产采样、历史/API/页面尚未调用新接口。
+
+本地完整 Core 317 项通过；新三项覆盖探测/业务隔离、旧核心缺失、局部坏计数与只读 RPC。固定归档重建的 Go 七个顶级测试/29 个子用例通过，包含单 HEAD、预热双测、组实际返回成员、direct、链/未注册、失败前字节与并发。候选 SHA256 为 `D748E6D712C93D377B2EC1FC66D1DB58F729F766B178A024D5F5BF48FE2E7835`，由提交前工作树构建，provenance 的 monitorCommit 是起点，不冒充后续提交/CI EXE 身份。
+
+纯回环 test.5 客户端与未改 test.4 参考服务端验证三轮原生探测共189次HEAD；逐方向成员和、探测总量、参考服务端流计数完全一致，业务计数不变。另对叶成员及组各调用一次延迟 API，合成私有CA在原API信任上下文按预期被拒绝，两次503均保留已传输探测字节，业务增量为零；这不是实际节点成功延迟验收。独立 default/HK/US/direct 业务仍只进入其原业务范围，未向全组复制，全部自建子进程已退出。
+
+失败证据保留：首轮选错离线模块缓存而未编译，不作为红例；正确缓存中的最短红例为 probe counters unavailable。首版回归发现出站读写方向不能照抄入站，仅交换出站计数方向后复验通过。原生隔离首轮目标过早关闭，目标中继与客户端流存在关闭字节差；调整合成目标等待关闭后，仍观察到目标中继比已转交参考流多48/72/96B。最终只对同口径客户端/参考服务端流做精确断言，中继差异原样保留，不声称网络层逐字节相等。探测流含目标TLS/HEAD，不包含建连前、代理外层、填充和重传，也不等于服务商计费。
+
+证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-urltest-20261015`：Core日志/TRX、红例/首次失败、candidate的归档/四补丁/Go日志/provenance、三次 native-loopback 与最终结果。方案见 [probe-accounting](proposals/probe-accounting.md)。提交与精确远端CI单独核对，不以本地构建替代CI。
+
+S5.8 保持 in_progress：下一批先设计并隔离验证版本化探测账本，再接 Windows 采样、历史/API/页面。当前 v2 Schema 未改，真实账本未迁移，运行核心/sidecar/Monitor、路由及启动项未操作；没有触发真实测速或发布。S5.6 仍 in_progress，S5.7 planned。名称对照与覆盖说明继续保留在主线；DNS/规则集等内部请求逐条验证后接入。新运行扩展替换、重载、实库迁移及预览启用仍需具体授权，启用前提醒用户。
+
 ## 2026-10-15：S5.6 第九批 UI 人工使用确认
 
 起点 `b956b2f6659dca6f3caf65839fcca17abc7e66a8`，工作树干净。该提交的 Monitor PR `38687237559`、push `38687232257` 及独立扩展 PR `38687237569` 均成功，精确提交/job 元数据已保存在前一检查点的本机 activation 证据目录。查询期间曾遇 GitHub API EOF，恢复只读查询后确认成功，没有重跑 CI。
