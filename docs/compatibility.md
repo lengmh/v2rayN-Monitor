@@ -16,7 +16,7 @@ v0.1.0 目标为 Windows x64 + v2rayN **7.25.1** + Xray 普通单节点。2026-1
 | 代理链 / 自定义配置 | #19 / S5.7 planned | 独立 `proxy` 有 detour 仍拒绝；其他链的存在可与部分采集共存，但不计其流量；任意配置来源和订阅身份未核实 |
 | TUN / 多实例 | 拒绝精确归属 | 不支持 |
 | 服务商六列 CSV | 精确十进制计费量、预览、独立账本、同来源导出快照按出现次数增量去重 | 合成输入/事务回归；真实 CSV 未导入开发库或上传；相关修复已有整体人工使用认可，未补充逐项真实CSV提交记录 |
-| URLTest 内部探测独立计量 | S5.8 in_progress；test.5 核心累计及 Core 只读读取，未部署 | 探测与业务/路由命名空间独立，目标 TLS/HEAD 流字节不等同计费；旧核心缺失保持 unavailable。Windows 采样、版本化持久化/API/页面及其他内部请求待接，test.2/test.4 白名单不变，详见 STATUS |
+| URLTest 内部探测独立计量 | S5.8 in_progress；test.5核心累计/Core读取、显式v3历史与受控v2→v3执行器，未部署 | 合成库验证联合批次、独立查询、旧历史保留及迁移回滚，通用认证scope-history可显式查探测，默认历史/导出仍为业务。正常打开不升级、默认新库仍v2；Windows采样/同代批量读取、探测能力说明/页面及其他内部请求待接。目标TLS/HEAD流字节不等同计费，缺失为unavailable；test.2/test.4白名单不变，见STATUS |
 | TrafficMonitor / WebView2 | 未实现，也不依赖 | deferred |
 
 ## 发现与身份边界

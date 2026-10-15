@@ -4,6 +4,7 @@ using Microsoft.Data.Sqlite;
 namespace V2rayNMonitor.Core;
 
 public sealed record ScopeMigrationResult(string HistoryPath, string BackupPath, long LegacyScopes);
+public sealed record ProbeMigrationResult(string HistoryPath, string BackupPath, long PreservedScopes);
 
 /// <summary>Explicit offline migration. The caller must stop all writers and obtain authorization first.</summary>
 public static class ScopeLedgerMigration
@@ -45,8 +46,41 @@ public static class ScopeLedgerMigration
         ["nodes"] = "node_key", ["cursors"] = "instance_id", ["minutes"] = "start_ticks,node_key",
         ["unallocated"] = "id", ["gaps"] = "id"
     };
+    private static readonly Dictionary<string, string> ScopeOrdering = new()
+    {
+        ["measurement_scopes"] = "scope_id", ["scope_cursors"] = "scope_id", ["scope_batches"] = "instance_id",
+        ["scope_minutes"] = "start_ticks,scope_id", ["scope_unallocated"] = "id", ["scope_gaps"] = "id"
+    };
 
     public static ScopeMigrationResult Migrate(string historyPath, string backupPath)
+    {
+        var (history, backup) = Backup(historyPath, backupPath, Preflight);
+        using var snapshot = Open(backup, SqliteOpenMode.ReadOnly);
+        Preflight(snapshot, null);
+        using var target = Open(history, SqliteOpenMode.ReadWrite);
+        // Exclusive locking is connection-local; competing readers/writers must leave before DDL.
+        Execute(target, null, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA locking_mode=EXCLUSIVE;");
+        Apply(target, snapshot, ScopeLedger.SchemaSql);
+        return new(history, backup, Scalar(target, null, "SELECT COUNT(*) FROM measurement_scopes;"));
+    }
+
+    /// <summary>Explicit offline v2 -> v3. Preserves all old rows and cursors; probes start at a new baseline.</summary>
+    public static ProbeMigrationResult MigrateProbes(string historyPath, string backupPath)
+    {
+        var (history, backup) = Backup(historyPath, backupPath, PreflightProbes);
+        using var snapshot = Open(backup, SqliteOpenMode.ReadOnly);
+        PreflightProbes(snapshot, null);
+        using var target = Open(history, SqliteOpenMode.ReadWrite);
+        // SQLite requires disabling FK enforcement before the table-rebuild transaction.
+        Execute(target, null, "PRAGMA synchronous=FULL; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=OFF;");
+        try { ApplyProbes(target, snapshot, ScopeLedger.ProbeUpgradeSql); }
+        finally { Execute(target, null, "PRAGMA foreign_keys=ON;"); }
+        Require(Scalar(target, null, "PRAGMA foreign_keys;") == 1, "Foreign key enforcement was not restored.");
+        return new(history, backup, Scalar(target, null, "SELECT COUNT(*) FROM measurement_scopes;"));
+    }
+
+    private static (string History, string Backup) Backup(string historyPath, string backupPath,
+        Action<SqliteConnection, SqliteTransaction?> preflight)
     {
         var history = CheckedPath(historyPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
@@ -56,7 +90,7 @@ public static class ScopeLedgerMigration
         // Preflight is read-only, before creating a backup or changing any persistent setting.
         using (var source = Open(history, SqliteOpenMode.ReadOnly))
         {
-            Preflight(source, null);
+            preflight(source, null);
             CheckedParents(backup);
             Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
             CheckedParents(backup);
@@ -64,13 +98,7 @@ public static class ScopeLedgerMigration
             using var destination = Open(backup, SqliteOpenMode.ReadWrite);
             source.BackupDatabase(destination);
         }
-        using var snapshot = Open(backup, SqliteOpenMode.ReadOnly);
-        Preflight(snapshot, null);
-        using var target = Open(history, SqliteOpenMode.ReadWrite);
-        // Exclusive locking is connection-local; competing readers/writers must leave before DDL.
-        Execute(target, null, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA locking_mode=EXCLUSIVE;");
-        Apply(target, snapshot, ScopeLedger.SchemaSql);
-        return new(history, backup, Scalar(target, null, "SELECT COUNT(*) FROM measurement_scopes;"));
+        return (history, backup);
     }
 
     // SQL is not a public input. Keeping the transactional application separate also allows
@@ -96,6 +124,49 @@ public static class ScopeLedgerMigration
         transaction.Commit();
     }
 
+    internal static void ApplyProbes(SqliteConnection target, SqliteConnection snapshot, string sql)
+    {
+        Require(Scalar(target, null, "PRAGMA foreign_keys;") == 0, "Disable foreign keys before starting the offline upgrade.");
+        using var transaction = target.BeginTransaction();
+        PreflightProbes(target, transaction);
+        PreflightProbes(snapshot, null);
+        CompareProbeHistory(target, transaction, snapshot, directoryChanged: false);
+        Execute(target, transaction, sql);
+        Require(Scalar(target, transaction, "PRAGMA user_version;") == 3, "Probe upgrade version is missing.");
+        ScopeLedger.ValidateSchema(target, transaction, 3);
+        CompareProbeHistory(target, transaction, snapshot, directoryChanged: true);
+        transaction.Commit();
+    }
+
+    private static void PreflightProbes(SqliteConnection db, SqliteTransaction? transaction)
+    {
+        Require(Scalar(db, transaction, "PRAGMA user_version;") == 2, "Only a supported v2 history ledger can enable probes.");
+        ScopeLedger.ValidateSchema(db, transaction, 2);
+        var objects = new List<string>();
+        using (var command = Command(db, transaction,
+            "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name;"))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) objects.Add(reader.GetString(0) + ":" + reader.GetString(1));
+        var expected = Ordering.Keys.Concat(ScopeOrdering.Keys).Select(x => "table:" + x).Concat(
+            new[] { "minutes_node_time", "unallocated_time", "gaps_time", "scope_gap_open", "scope_minutes_time",
+                "scope_unallocated_time", "scope_gaps_time" }.Select(x => "index:" + x)).Order(StringComparer.Ordinal);
+        Require(objects.SequenceEqual(expected), "Unsupported objects in v2 history.");
+        CheckLegacyColumns(db, transaction);
+    }
+
+    private static void CompareProbeHistory(SqliteConnection target, SqliteTransaction transaction,
+        SqliteConnection snapshot, bool directoryChanged)
+    {
+        var schema = "SELECT type,name,tbl_name,sql FROM sqlite_master" +
+            (directoryChanged ? " WHERE name<>'measurement_scopes'" : "") + " ORDER BY type,name;";
+        Compare(target, transaction, schema, snapshot, schema);
+        foreach (var (table, ordering) in Ordering.Concat(ScopeOrdering))
+        {
+            var rows = $"SELECT * FROM {table} ORDER BY {ordering};";
+            Compare(target, transaction, rows, snapshot, rows);
+        }
+    }
+
     private static void Preflight(SqliteConnection db, SqliteTransaction? transaction)
     {
         Require(Scalar(db, transaction, "PRAGMA user_version;") == 1, "Only a supported v1 history ledger can be migrated.");
@@ -111,14 +182,7 @@ public static class ScopeLedgerMigration
             }
             Require(names.SequenceEqual(Columns.Keys.Order(StringComparer.Ordinal)), "Not an unmodified v1 history database.");
         }
-        foreach (var (table, expected) in Columns)
-        {
-            using var command = Command(db, transaction, $"PRAGMA table_info({table});");
-            using var reader = command.ExecuteReader();
-            var signature = new List<string>();
-            while (reader.Read()) signature.Add($"{reader.GetString(1)}:{reader.GetString(2)}:{reader.GetInt64(5)}");
-            Require(string.Join('|', signature) == expected, "Unsupported v1 column layout.");
-        }
+        CheckLegacyColumns(db, transaction);
         CheckIntegrity(db, transaction);
         foreach (var table in new[] { "cursors", "minutes", "unallocated" })
             Require(Scalar(db, transaction, $"""
@@ -158,6 +222,18 @@ public static class ScopeLedgerMigration
             "Historical identity is empty.");
     }
 
+    private static void CheckLegacyColumns(SqliteConnection db, SqliteTransaction? transaction)
+    {
+        foreach (var (table, expected) in Columns)
+        {
+            using var command = Command(db, transaction, $"PRAGMA table_info({table});");
+            using var reader = command.ExecuteReader();
+            var signature = new List<string>();
+            while (reader.Read()) signature.Add($"{reader.GetString(1)}:{reader.GetString(2)}:{reader.GetInt64(5)}");
+            Require(string.Join('|', signature) == expected, "Unsupported legacy column layout.");
+        }
+    }
+
     private static void CompareOriginal(SqliteConnection target, SqliteTransaction transaction, SqliteConnection snapshot)
     {
         Compare(target, transaction, "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('nodes','cursors','minutes','unallocated','gaps') ORDER BY type,name;",
@@ -183,7 +259,7 @@ public static class ScopeLedgerMigration
         }
         Require(!expected.Read(), "Historical row was omitted.");
     }
-    private static void CheckIntegrity(SqliteConnection db, SqliteTransaction? transaction)
+    internal static void CheckIntegrity(SqliteConnection db, SqliteTransaction? transaction)
     {
         using (var command = Command(db, transaction, "PRAGMA integrity_check;"))
         using (var reader = command.ExecuteReader())
