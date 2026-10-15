@@ -12,7 +12,7 @@ v0.1.0 目标为 Windows x64 + v2rayN **7.25.1** + Xray 普通单节点。2026-1
 | V2free 7.25.1 的 Hysteria2 + Xray | 按精确 fork 生成规则匹配服务器和 transport auth | 用户报告 `a3f2d80` 普通权限 Monitor 采集提升权限客户端、首次基线、连续记账、Monitor 重启恢复及字节守恒通过 |
 | V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；指定 test.2 扩展的只读路径已实现 | 已安装并重载扩展；真实 preview.2 已通过首接基线、持续持久化与被动守恒，完整受控节点验收仍未完成 |
 | sing-box 的独立 AnyTLS `proxy` 与其他出站共存 | preview.2 / S5.5 仅采集直接路由到 `proxy` 的累计，披露部分覆盖 | 解析/账本/API/DOM、真实核心副本与 c8ea870 双平台 CI 通过；实际配置不再整体拒绝，4轮参考 RPC 范围核对通过，未取得同刻精确对照；组/其他出站仍未知 |
-| selector / urltest 实际成员及多出站 | #18 / S5.6 in_progress；test.4 sidecar、v2 离线迁移执行器、Windows opt-in 采样/API/导出与成员口径页面已源码接入 | 仍要求可核实的独立 AnyTLS proxy；只有 proxy 关联核实 IndexId，其他成员用配置摘要/tag。Go 5/22、Core311/Server34/前端52及真实核心副本首接零基线见 STATUS；副本绑定为合成。默认 v1/test.2 不变、现有库不自动升级，实际候选/预览未部署；完整维度切换/新模式速率及 Windows 实机全量待验收 |
+| selector / urltest 实际成员及多出站 | #18 / S5.6 in_progress；test.4 与 Windows opt-in 新预览已实际启用，独立新 v2 账本，不自动迁移旧库 | 2026-10-15 生产发现连续3轮核实成员及三种独立汇总，采样批次首接无回填、逐范围被动守恒，无开放缺口。仍需独立 AnyTLS proxy；只有 proxy 关联核实 IndexId，其他成员用配置摘要/tag。受控组切换/重开、完整维度页面/新模式速率及真实页面验收待补；合成/CI证据另见 STATUS，默认v1入口不变 |
 | 代理链 / 自定义配置 | #19 / S5.7 planned | 独立 `proxy` 有 detour 仍拒绝；其他链的存在可与部分采集共存，但不计其流量；任意配置来源和订阅身份未核实 |
 | TUN / 多实例 | 拒绝精确归属 | 不支持 |
 | 服务商六列 CSV | 精确十进制计费量、预览、独立账本、同来源导出快照按出现次数增量去重 | 合成输入/事务回归；真实 CSV 未导入开发库或上传；相关修复已有整体人工使用认可，未补充逐项真实CSV提交记录 |

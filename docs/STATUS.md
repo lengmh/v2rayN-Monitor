@@ -1,5 +1,21 @@
 # 初版实现与验证状态
 
+## 2026-10-15：S5.6 第八批 / Windows 实机接入与 v2 新预览
+
+起点 `63936290975b008796fe95c72297bddaf6adbb4e`，工作树干净，PR #20 Open / Draft，基础仍为未合并的 PR #17 分支。该代码提交的 Monitor PR `38634576032`、push `38634567398` 和独立扩展 PR `38634576073` 均已成功。本批范围为扩展安装和正常重载，启用新预览前提醒。由于通讯依赖代理，先核实实际路径、配置和原核心，备份 test.2 与 sidecar、校验备份后，由用户离线替换两个文件并重新打开 v2rayN；代理恢复已有人工报告。
+
+只读生产发现核实新 test.4 的完整摘要与第七批候选一致、客户端/核心路径及父子关系和新代次、标准参数、监听归属与前后稳定边界。实际配置内容与替换前一致，sidecar 与准备文件一致；连续 3 轮 `ReadScopesAsync` 均为 connected， actual_member 及 business / excluded / unknown 三个独立总量全部可读。4 个组和 1 个 direct 不作为成员重复计数，其他成员仍只用配置摘要/tag，不猜 IndexId。
+
+启用前明确提醒用户，旧 Monitor 退出后核实已无旧进程。重新下载并核对精确 CI `38634576032` 的 artifact `11927882794`：外层摘要与 GitHub digest 一致，内层 ZIP 与随附 SHA256.txt 一致，解压后的 435 个文件逐项一致。实际程序 ProductVersion 为 `0.2.0-preview.2+33b79abf3611fef7348cf092790294ae41837151`，后缀为 PR 合并测试提交，不是 HEAD；EXE SHA256 为 `A04D239050E062E31900E0F43A4A8FA5939C37C69901701AD0CF9F6575CA38F5`。
+
+2026-10-15 以 `--scope-ledger --data-dir <独立新目录>` 启动新预览，没有复制或迁移旧 history/provider 数据。实际 SQLite 只读事务观察取得 采样批次：首批 范围仅建立游标，历史为零；后续相邻区间逐范围累计差均与分钟及未分时账本增量相等，期间有成员实际增长。成员与三种汇总分别保存，未跨 basis 相加；无开放缺口，持久身份与真实发现一致。观察前后核心代次、配置及 sidecar 不变，旧独立验证目录的 3 个数据/设置文件摘要不变。
+
+预览保持运行，核实唯一 Monitor 的实际路径、显式新模式/数据目录参数和回环监听；页面 HTTP 200，未认证状态 API 401。没有读取浏览器会话或令牌，真实页面目视验收仍待用户确认。临时观察器编译零警告零错误；本批未改生产源码、依赖或 CI，文档一致性检查及本批提交 CI 单独记录，不把先前测试数当成本轮新运行结果。
+
+本机证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-windows-live-20261015-094133`：preflight.json、backup/、preview-package.json、post-install-readonly.json、activation-start.json、activation-result.json、activation-http-process.json 及本地逐范围样本。新预览数据为其中的 `live-scope-data`；旧验证数据保留。真实计数、sidecar、数据库、会话和节点身份不提交或上传。
+
+本批交付真实 Windows 发现/取数、首次无回填基线及持续持久化/被动守恒，不等于受控组切换或全量节点验收。S5.6 保持 in_progress，S5.7 planned；受控 proxy/direct、成员切换、Monitor 重开恢复、完整维度页面/新模式速率及真实页面验收仍待后续。S0.3/S5.1–S5.3 的既有 blocked 不变。未修改实际启动项、迁移真实旧库、合并或发布；不再要求重复授权已完成的本次安装/启用，新的切换、重载或真实迁移仍按具体范围授权。
+
 ## 2026-10-15：S5.6 第七批 / Windows opt-in 源码接入
 
 起点 `1284f0c4afee9ddd81b3896cd1c9794e6dafdfad`；第六批提交的 Monitor PR/push `38624549751` / `38624536312` 及独立扩展 PR `38624548405` 全部通过。先完成到Windows接入处，实际部署/迁移另按具体范围。没有替换实际运行文件、修改真实 sidecar、重载核心、启动真实预览或迁移真实库。
