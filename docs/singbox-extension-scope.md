@@ -7,7 +7,7 @@
 | 任务 | Issue / PR | 计量范围 | 当前边界 |
 |---|---|---|---|
 | S5.5 | #15 / Draft PR #17 | test.2 的路由直接匹配 `proxy` 的累计 | preview.2 代码/隔离回归/CI通过；真实首接基线与持续被动守恒通过，受控实机及页面验收待补；其他出站未知 |
-| S5.6 | #18 / Draft PR #20 | 多出站、策略组/urltest 的实际成员 | in_progress；test.4 sidecar、v2 迁移执行器及 Windows opt-in 采样/API/导出已源码接入，实际程序未切换 |
+| S5.6 | #18 / Draft PR #20 | 多出站、策略组/urltest 的实际成员 | in_progress；test.4 与 Windows opt-in 新预览已实装，独立新v2目录首接/持续被动守恒通过，受控切换/重开及页面验收待补 |
 | S5.7 | #19 / 后续独立 PR | 单次业务总量、链/各跳与自定义配置身份 | planned；实际生效来源和必要迁移先隔离验证 |
 
 S5.5 使用已核实的 test.2，生成配置不写回。只对唯一 AnyTLS `proxy` 比较所选 ProfileItem 的端点、认证、TLS 及默认值，再核对父子进程、标准参数、监听、二进制摘要和文件代次。其他出站不参与 IndexId 证明，也不会按当前选中节点归账。当前仍拒绝目标 `proxy` 的 detour、TUN、非空 endpoints、已有自定义 V2Ray API，以及未核实连接字段。
@@ -93,11 +93,17 @@ test.3 的 `stats.monitor_members` 是显式 tag 数组，不是布尔开关。�
 
 Windows 入口复用原只读 ProfileItem/完整连接字段、固定客户端版本、进程/监听和配置前后稳定 guard，随后读取成员及三种独立总量，按完整目录退休并原子提交。仍需独立 AnyTLS proxy 锚点；proxy 的 IndexId 关联沿用既有活动配置约定，不证明核心能区分相同连接参数的逻辑 Profile。其他成员只用配置摘要/tag，组不按当前选择分配字节，链保留 unknown。
 
-test.4 叠加第三层 member-sidecar.patch，通过 listen 加显式 monitor_members 数组启用统计，不写节点/路由。要求 tag 为本配置中的支持独立成员，名称失配会拒绝；实际配置改变后必须重新核实成员名单，不承诺任意新配置仍能沿用旧名单。仅 opt-in 接受 README/STATUS 的本地候选摘要；候选、sidecar和预览未实际部署。
+test.4 叠加第三层 member-sidecar.patch，通过 listen 加显式 monitor_members 数组启用统计，不写节点/路由。要求 tag 为本配置中的支持独立成员，名称失配会拒绝；实际配置改变后必须重新核实成员名单，不承诺任意新配置仍能沿用旧名单。仅 opt-in 接受 README/STATUS 的本地候选摘要；第七批未部署，第八批实装结果见下文。
 
 默认 `/api/history` 查询当前主 basis，CSV 增加 basis；`/api/scope-history` 必填单 basis。同名筛选保留独立 scope 身份，成员、business、excluded、unknown、路由与 legacy 不相加。页面已有成员说明与 partial 状态；完整维度切换器和新模式实时速率未交付，旧 legacy 可经显式 API 查询。
 
 本地 Core311/Server34/前端52、Go5顶级/22子用例、真实核心隔离启动/成员 RPC/首接零基线通过，绑定为合成；精确提交 CI 另核对。Windows 源码接入已交付，实际 v2rayN 身份、受控流量/切换/重开及断电恢复仍待经授权验收，不自动迁移或部署。
+
+## S5.6 第八批：Windows 实机与独立新预览
+
+2026-10-15 经具体授权备份后，用户离线安装 test.4/sidecar 并重开客户端，代理恢复。真实生产发现连续 3 轮 connected，34 个成员及三种独立汇总全部可读。提醒后用户退出旧 Monitor，再启动精确 `6393629` CI 包与独立新 v2 目录；首个持久批次无历史回填，6 个批次的后续 5 段逐范围累计差与账本增量相等，无开放缺口。仅 1 个成员在观察期增长，不把被动观察当成所有节点或受控组切换验收。
+
+本次是实际 Windows 身份与持久记账证据，不再仅为合成绑定。旧验证数据、核心代次和配置在采集中不变，真实旧历史没有迁移。HTTP 页面/会话保护已核实，目视页面、受控切换/重开、完整维度页面和新模式速率仍待后续；S5.6 保持 in_progress。具体身份、时间和本机证据见 [STATUS](STATUS.md)。
 
 ## 实机边界
 

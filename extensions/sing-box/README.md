@@ -71,7 +71,7 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 
 test.3 本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，只描述这个本地实验构建，不自动授权安装。第二批当时尚未接入 Monitor；后续成员读取、v2 账本与 Windows opt-in 源码进度见下文和 STATUS。Monitor CI 不编译 Go 补丁，不能用它的绿灯替代核心验证。
 
-## test.4：显式 sidecar 成员开关与 Windows 接入（未部署）
+## test.4：显式 sidecar 成员开关与 Windows 接入
 
 第七批在前两层上叠加 [member-sidecar.patch](member-sidecar.patch)，候选为 `1.14.1-monitor-test.4`。sidecar 仍不允许写节点、路由或配置覆盖；新增唯一可选字段 `monitor_members`，值为明确的成员 tag 数组。缺省时保留原 listen-only 路由计数，不启用成员统计；拒绝重复、空、统计分隔符、未注册 tag、direct 或策略组 tag。
 
@@ -80,6 +80,8 @@ test.3 本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48
 本地已核实的 test.4 SHA256 为 `B1C6F3AA48F21AE070EF283D10AE946C189421F7C9F498CCAA5657D2B0E7E15E`。只有新增 `--scope-ledger` 源码入口接受此候选；默认入口的 test.2 白名单不变。Go 5 个顶级测试/22 个子用例及真实核心隔离启动→sidecar→只读成员 RPC→v2 首接零基线通过；该联测使用合成 Windows 绑定，不是实际 v2rayN 身份或实机全量验收。
 
 新模式必须使用新建 v2 验证目录或经授权离线迁移的 v2 文件。已有 v1 正常启动明确拒绝，不自动迁移；实际核心文件替换、sidecar 更新、重载、预览启动和真实迁移仍需具体授权。候选文件和过程证据仅 TempFiles；CI 构建可能有不同的 Go build ID/二进制摘要，不自动把 CI 产物加入白名单。
+
+2026-10-15 经具体授权备份后，用户已离线安装上述摘要的 test.4 与已核实名单 sidecar，并重开客户端。启用前提醒、退出旧 Monitor 后，新预览以 `--scope-ledger` 在独立新 v2 目录运行；真实 Windows 发现、34 个成员/三种独立汇总、首次无回填与 6 个持久批次的逐范围被动守恒通过。旧历史未迁移，受控切换/重开与完整实机验收仍待后续；详见 [STATUS](../../docs/STATUS.md)，不把本次部署授权用于新的重载或迁移。
 
 ## 独立扩展 CI
 
