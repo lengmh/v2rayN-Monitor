@@ -542,6 +542,71 @@ public sealed class ActiveConfigurationTests : IDisposable
             new Uri("http://127.0.0.1:10814/"), ["proxy"], CancellationToken.None));
     }
 
+    [Fact]
+    public void V2RayProbesAreSeparateFromBusinessAndMissingSupportIsUnavailable()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>uplink", 11),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>downlink", 12),
+            ("monitor>>>probe>>>urltest>>>business>>>traffic>>>uplink", 11),
+            ("monitor>>>probe>>>urltest>>>business>>>traffic>>>downlink", 12),
+            ("monitor>>>business>>>traffic>>>uplink", 901),
+            ("monitor>>>business>>>traffic>>>downlink", 902));
+        Assert.True(V2RayStatistics.TryReadProbesResponse(frame, ["proxy", "idle"], out var probes));
+        Assert.Equal("urltest", probes!.ProbeKind);
+        Assert.Equal(new XrayCounters(11, 12), Assert.Single(probes.Members).Value);
+        Assert.Equal(new XrayCounters(11, 12), Assert.Single(probes.Totals).Value);
+        Assert.Equal("missing_counter", probes.UnavailableMembers["idle"]);
+        Assert.Equal(2, probes.UnavailableTotals.Count);
+        Assert.True(V2RayStatistics.TryReadMembersResponse(frame, ["proxy"], out var business));
+        Assert.Empty(business!.Members);
+        Assert.Equal(new XrayCounters(901, 902), business.Totals["business"]);
+        Assert.True(V2RayStatistics.TryReadProbesResponse(StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 100),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 200)), ["proxy"], out var oldCore));
+        Assert.Empty(oldCore!.Members);
+        Assert.Empty(oldCore.Totals);
+        Assert.Equal("missing_counter", oldCore.UnavailableMembers["proxy"]);
+        Assert.All(oldCore.UnavailableTotals.Values, value => Assert.Equal("missing_counter", value));
+    }
+
+    [Fact]
+    public void V2RayProbesPreserveValidPairsAndRejectMalformedFrames()
+    {
+        const string prefix = "monitor>>>probe>>>urltest>>>";
+        var frame = StatisticsFrame(
+            (prefix + "member>>>good>>>traffic>>>uplink", (ulong)long.MaxValue),
+            (prefix + "member>>>good>>>traffic>>>downlink", 0),
+            (prefix + "member>>>duplicate>>>traffic>>>uplink", 1),
+            (prefix + "member>>>duplicate>>>traffic>>>uplink", 1),
+            (prefix + "member>>>duplicate>>>traffic>>>downlink", 2),
+            (prefix + "member>>>invalid>>>traffic>>>uplink", ulong.MaxValue),
+            (prefix + "member>>>invalid>>>traffic>>>downlink", 2));
+        Assert.True(V2RayStatistics.TryReadProbesResponse(frame, ["good", "duplicate", "invalid"], out var result));
+        Assert.Equal(new XrayCounters(long.MaxValue, 0), Assert.Single(result!.Members).Value);
+        Assert.Equal("duplicate_counter", result.UnavailableMembers["duplicate"]);
+        Assert.Equal("invalid_counter", result.UnavailableMembers["invalid"]);
+        Assert.False(V2RayStatistics.TryReadProbesResponse(frame[..^1], ["good"], out var malformed));
+        Assert.Null(malformed);
+        Assert.Throws<ArgumentException>(() => V2RayStatistics.TryReadProbesResponse(frame, ["a>>>b"], out _));
+    }
+
+    [Fact]
+    public async Task V2RayProbesUseOneBoundedReadOnlyRpc()
+    {
+        using var handler = new StatisticsHandler(StatisticsFrame(
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>uplink", 10),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>downlink", 20)));
+        using var client = new HttpClient(handler);
+        var result = await V2RayStatistics.ReadProbesAsync(client, new Uri("http://127.0.0.1:10814/"),
+            ["proxy"], CancellationToken.None);
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(new XrayCounters(10, 20), result!.Members["proxy"]);
+        await Assert.ThrowsAsync<ArgumentException>(() => V2RayStatistics.ReadProbesAsync(client,
+            new Uri("http://localhost:10814/"), ["proxy"], CancellationToken.None));
+        Assert.Equal(1, handler.Requests);
+    }
+
     private const string MemberConfiguration = """
         {"inbounds":[{"type":"mixed","tag":"in"}],"outbounds":[
         {"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},

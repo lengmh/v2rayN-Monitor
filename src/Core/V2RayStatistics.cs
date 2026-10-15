@@ -41,6 +41,15 @@ public static class V2RayStatistics
         return frame is not null && TryReadMembersResponse(frame, tags, out var counters) ? counters : null;
     }
 
+    /// <summary>Reads internal URLTest stream bytes; missing probe support remains unavailable.</summary>
+    public static async Task<V2RayProbeStatistics?> ReadProbesAsync(HttpClient client, Uri endpoint,
+        IReadOnlyCollection<string> memberTags, CancellationToken cancellationToken)
+    {
+        var tags = ValidateTags(memberTags, allowEmpty: true);
+        var frame = await ReadFrameAsync(client, endpoint, cancellationToken).ConfigureAwait(false);
+        return frame is not null && TryReadProbesResponse(frame, tags, out var counters) ? counters : null;
+    }
+
     private static async Task<byte[]?> ReadFrameAsync(HttpClient client, Uri endpoint, CancellationToken cancellationToken)
     {
         if (endpoint.Scheme != "http" || !IPAddress.TryParse(endpoint.Host.Trim('[', ']'), out var address)
@@ -112,6 +121,27 @@ public static class V2RayStatistics
                 .ToDictionary(total => total, total => complete[TotalPrefix(total)], StringComparer.Ordinal)),
             new ReadOnlyDictionary<string, string>(MemberTotals.Where(total => unavailable.ContainsKey(TotalPrefix(total)))
                 .ToDictionary(total => total, total => unavailable[TotalPrefix(total)], StringComparer.Ordinal)));
+        return true;
+    }
+
+    public static bool TryReadProbesResponse(ReadOnlySpan<byte> frame, IReadOnlyCollection<string> memberTags,
+        out V2RayProbeStatistics? counters)
+    {
+        counters = null;
+        var tags = ValidateTags(memberTags, allowEmpty: true);
+        static string Member(string tag) => "monitor>>>probe>>>urltest>>>member>>>" + tag + ">>>traffic";
+        static string Total(string total) => "monitor>>>probe>>>urltest>>>" + total + ">>>traffic";
+        var prefixes = tags.Select(Member).Concat(MemberTotals.Select(Total)).ToArray();
+        if (!TryReadCounterPairs(frame, prefixes, out var complete, out var unavailable)) return false;
+        counters = new(
+            new ReadOnlyDictionary<string, XrayCounters>(tags.Where(tag => complete.ContainsKey(Member(tag)))
+                .ToDictionary(tag => tag, tag => complete[Member(tag)], StringComparer.Ordinal)),
+            new ReadOnlyDictionary<string, string>(tags.Where(tag => unavailable.ContainsKey(Member(tag)))
+                .ToDictionary(tag => tag, tag => unavailable[Member(tag)], StringComparer.Ordinal)),
+            new ReadOnlyDictionary<string, XrayCounters>(MemberTotals.Where(total => complete.ContainsKey(Total(total)))
+                .ToDictionary(total => total, total => complete[Total(total)], StringComparer.Ordinal)),
+            new ReadOnlyDictionary<string, string>(MemberTotals.Where(total => unavailable.ContainsKey(Total(total)))
+                .ToDictionary(total => total, total => unavailable[Total(total)], StringComparer.Ordinal)));
         return true;
     }
 

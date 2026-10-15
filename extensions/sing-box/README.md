@@ -83,6 +83,14 @@ test.3 本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48
 
 2026-10-15 经具体授权备份后，用户已离线安装上述摘要的 test.4 与已核实名单 sidecar，并重开客户端。启用前提醒、退出旧 Monitor 后，新预览以 `--scope-ledger` 在独立新 v2 目录运行；真实 Windows 发现、34 个成员/三种独立汇总、首次无回填与 6 个持久批次的逐范围被动守恒通过。旧历史未迁移，受控切换/重开与完整实机验收仍待后续；详见 [STATUS](../../docs/STATUS.md)，不把本次部署授权用于新的重载或迁移。
 
+## test.5：URLTest 独立探测计数（未部署）
+
+test.4 后叠加 [probe-stats.patch](probe-stats.patch)，候选为 `1.14.1-monitor-test.5`。公共 URLTest 的启动/周期、预热/正式和延迟 API 调用单独累计；API 仅传入统计服务，保留既有目标、TLS 信任和超时。仅 `monitor_members` 启用时注册新计数，listen-only 行为不变。
+
+新前缀为 `monitor>>>probe>>>urltest>>>member>>>{tag}>>>traffic`，另有同命名空间的 business / excluded / unknown。实际叶成员、业务及路由分别计量，未知/链不猜归属。目标 TLS/HEAD 流字节不含代理外层、建连前消耗、填充和重传，不等同服务商扣费。
+
+构建脚本现按序应用四层补丁，并要求两个 URLTest 顶级回归与原五项通过。Monitor Core 有独立只读读取接口；Windows 采样、账本版本扩展及页面未接入，test.2/test.4 白名单不变，不自动安装。详见 [S5.8 计量口径](../../docs/proposals/probe-accounting.md)。
+
 ## 独立扩展 CI
 
 2026-10-14 用户授权新增 [扩展工作流](../../.github/workflows/sing-box-extension.yml)，不改现有 Monitor CI。第七批构建脚本扩展为按序应用 monitor/member-stats/member-sidecar 三层补丁，核实五个必需顶级测试后构建 test.4；工作流配置不变。Windows runner 仍固定 Go 1.26.8、公开源码提交及归档 SHA256 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`，保留原 Windows 标签/依赖版本/`-mod=readonly` 和 go.mod/go.sum 摘要核对，不自动切换工具链。`.gitattributes` 固定补丁 LF。
@@ -93,4 +101,4 @@ test.3 本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48
 ./extensions/sing-box/build-ci.ps1 -OutputRoot 'F:\AI playground\TempFiles\本轮独立构建目录'
 ```
 
-工作流只在扩展目录或工作流自身改动时触发 push / PR 检查。候选 artifact 包含 EXE、原始源码归档、三层补丁、GPLv3 LICENSE、说明及构建脚本；`build-provenance.json` 记录实际 checkout、CI 提交/运行 ID、源码/补丁/二进制摘要、Go 版本、标签和构建参数。PR checkout 可能是合并测试提交，不是 PR HEAD。artifact 不是正式 Release，不自动部署或更新白名单。远端结果以 [STATUS](../../docs/STATUS.md) 和具体运行记录为准，核心回归/构建不替代实机验收。
+工作流只在扩展目录或工作流自身改动时触发 push / PR 检查。候选 artifact 包含 EXE、原始源码归档、四层补丁、GPLv3 LICENSE、说明及构建脚本；`build-provenance.json` 记录实际 checkout、CI 提交/运行 ID、源码/补丁/二进制摘要、Go 版本、标签和构建参数。PR checkout 可能是合并测试提交，不是 PR HEAD。artifact 不是正式 Release，不自动部署或更新白名单。远端结果以 [STATUS](../../docs/STATUS.md) 和具体运行记录为准，核心回归/构建不替代实机验收。
