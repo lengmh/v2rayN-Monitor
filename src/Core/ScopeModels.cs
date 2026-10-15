@@ -29,4 +29,9 @@ public sealed record ScopeHistory(string Basis, string Upload, string Download,
     string RecoveredUpload, string RecoveredDownload, string PartialUpload, string PartialDownload,
     string UnbucketedUpload, string UnbucketedDownload, IReadOnlyList<SeriesPoint> Series,
     IReadOnlyList<ScopeTotal> Scopes, IReadOnlyList<ScopeTrafficRow> Records, long RecordCount,
-    IReadOnlyList<ScopeGap> Gaps);
+    IReadOnlyList<ScopeGap> Gaps)
+{
+    // Earliest saved interval for this basis/filter, independent of the requested date range.
+    // Minute rows are rounded to the minute; this is not the exact first sampling baseline.
+    public string? EarliestRecord { get; init; }
+}

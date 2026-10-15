@@ -70,7 +70,7 @@ public sealed class ApiTests : IAsyncLifetime
         V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
         V2rayNMonitor.Core.ScopeLedgerMigration.MigrateProbes(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v2-backup.db"));
         Assert.Equal(provider, File.ReadAllBytes(Path.Combine(root, "provider.db")));
-        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useProbeLedger: true);
         client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/scope-history?basis=probe_urltest_member")).StatusCode);
         await Login();
@@ -89,6 +89,18 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Equal("probe_urltest_member", probes.GetProperty("basis").GetString());
         Assert.Equal("9007199254740993", probes.GetProperty("upload").GetString());
         Assert.Equal("7", probes.GetProperty("download").GetString());
+        var page = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&basis=probe_urltest_member&nonZeroRecords=true");
+        Assert.Equal("9007199254740993", page.GetProperty("upload").GetString());
+        Assert.Equal("Synthetic probe", page.GetProperty("nodes")[0].GetProperty("name").GetString());
+        Assert.StartsWith("2026-01-01T00:00:00", page.GetProperty("earliestRecord").GetString());
+        var probeNodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes?basis=probe_urltest_member");
+        Assert.Single(probeNodes.EnumerateArray());
+        Assert.Equal("Synthetic probe", probeNodes[0].GetProperty("name").GetString());
+        Assert.False(probeNodes[0].TryGetProperty("identityValue", out _));
+        var probeCsv = await client.GetStringAsync("/api/export" + query + "&basis=probe_urltest_member");
+        Assert.Contains("\"probe_urltest_member\"", probeCsv);
+        Assert.Contains("Synthetic probe", probeCsv);
+        Assert.DoesNotContain("Synthetic business", probeCsv);
         var total = await client.GetFromJsonAsync<JsonElement>("/api/scope-history" + query + "&basis=probe_urltest_business");
         Assert.Equal(probes.GetProperty("upload").GetString(), total.GetProperty("upload").GetString());
         Assert.Equal(HttpStatusCode.BadRequest,
@@ -99,6 +111,36 @@ public sealed class ApiTests : IAsyncLifetime
         var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
         Assert.Single(nodes.EnumerateArray());
         Assert.Equal("Synthetic business", nodes[0].GetProperty("name").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&basis=business")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/nodes?basis=probe_urltest_member&basis=probe_urltest_business")).StatusCode);
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        Assert.True(status.GetProperty("probes").GetProperty("historyEnabled").GetBoolean());
+    }
+
+    [Fact] public async Task ProbeStartupCreatesV3ExplicitlyAndRejectsModeMismatchWithoutMigration()
+    {
+        var fresh = Path.Combine(root, "synthetic-probe-data");
+        await using (var probe = await MonitorServer.StartAsync(fresh, Path.Combine(root, "web"), useProbeLedger: true))
+            Assert.True(probe.Scopes!.SupportsProbes);
+        var v3 = File.ReadAllBytes(Path.Combine(fresh, "history.db"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MonitorServer.StartAsync(fresh, Path.Combine(root, "web"), useScopeLedger: true));
+        Assert.Equal(v3, File.ReadAllBytes(Path.Combine(fresh, "history.db")));
+        var old = Path.Combine(root, "synthetic-member-data");
+        await using (var member = await MonitorServer.StartAsync(old, Path.Combine(root, "web"), useScopeLedger: true))
+            Assert.False(member.Scopes!.SupportsProbes);
+        var v2 = File.ReadAllBytes(Path.Combine(old, "history.db"));
+        var provider = File.ReadAllBytes(Path.Combine(old, "provider.db"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MonitorServer.StartAsync(old, Path.Combine(root, "web"), useProbeLedger: true));
+        Assert.Equal(v2, File.ReadAllBytes(Path.Combine(old, "history.db")));
+        Assert.Equal(provider, File.ReadAllBytes(Path.Combine(old, "provider.db")));
+        await Login();
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        Assert.False(status.GetProperty("probes").GetProperty("historyEnabled").GetBoolean());
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z";
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&basis=probe_urltest_member")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/export" + query + "&basis=probe_urltest_member")).StatusCode);
     }
 
     [Fact] public async Task ScopeStartupDoesNotAutomaticallyMigrateOrTouchProviderDatabase()

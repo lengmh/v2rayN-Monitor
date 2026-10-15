@@ -74,6 +74,7 @@ summary:focus-visible { outline: 3px solid #38b7ac; outline-offset: 3px; }
   .metric-card { padding: 18px; }
 }
 @media (max-width: 640px) {
+  .sidebar nav { flex-wrap: wrap; justify-content: flex-end; }
   .content { padding: 22px 14px; }
   .page-heading { align-items: flex-start; gap: 12px; }
   .page-heading > .button { white-space: nowrap; }

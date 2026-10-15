@@ -30,6 +30,36 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('probe view separates dimensions and keeps a readable desktop and mobile layout', async ({ page }) => {
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic collector', demo: false,
+      currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'partial', message: 'Synthetic missing probe counter remains unknown' } })),
+    '/api/history': (route, request, url) => route.fulfill(json(url.searchParams.has('basis')
+      ? { ...history, basis: url.searchParams.get('basis'), earliestRecord: '2026-10-01T00:00:00Z',
+        upload: '1024', download: '3072', recordCount: 1,
+        nodes: [{ key: 'scope:7', name: 'Synthetic probe member', upload: '1024', download: '3072' }],
+        series: [{ label: '2026-10-01', upload: '1024', download: '3072' }],
+        records: [{ ...history.records[0], nodeKey: 'scope:7', nodeName: 'Synthetic probe member',
+          start: '2026-10-01T00:00:00Z', end: '2026-10-01T00:01:00Z', upload: '1024', download: '3072' }] } : history))
+  });
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#statistics-title')).toHaveText('探测流量');
+  await expect(page.locator('#total-exact')).toHaveText('4,096 bytes');
+  await expect(page.locator('#probe-state')).toHaveText('探测部分采集');
+  await expect(page.locator('#probe-coverage')).toContainText('不是精确的首次基线');
+  await expect(page.locator('#source-controls')).toBeHidden();
+  for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/probes-${suffix}.png`, fullPage: true });
+  }
+  await page.selectOption('#probe-basis', 'probe_urltest_excluded');
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('basis')).toBe('probe_urltest_excluded');
+  await page.click('.nav-item[data-view=overview]');
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+  expect(calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.has('basis')).toBe(false);
+});
 test('member group labels wrap fully and local details request nonzero rows', async ({ page }) => {
   const name = '【US-1x】 1-Synthetic member with a deliberately long readable name for the ranking';
   const calls = await mock(page, {

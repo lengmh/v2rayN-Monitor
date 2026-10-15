@@ -50,6 +50,16 @@ public static class V2RayStatistics
         return frame is not null && TryReadProbesResponse(frame, tags, out var counters) ? counters : null;
     }
 
+    /// <summary>Projects business and probes from the same bounded reset=false RPC response.</summary>
+    public static async Task<V2RayScopeStatistics?> ReadScopesAsync(HttpClient client, Uri endpoint,
+        IReadOnlyCollection<string> memberTags, CancellationToken cancellationToken)
+    {
+        var tags = ValidateTags(memberTags, allowEmpty: true);
+        var frame = await ReadFrameAsync(client, endpoint, cancellationToken).ConfigureAwait(false);
+        return frame is not null && TryReadMembersResponse(frame, tags, out var members) &&
+            TryReadProbesResponse(frame, tags, out var probes) ? new(members!, probes!) : null;
+    }
+
     private static async Task<byte[]?> ReadFrameAsync(HttpClient client, Uri endpoint, CancellationToken cancellationToken)
     {
         if (endpoint.Scheme != "http" || !IPAddress.TryParse(endpoint.Host.Trim('[', ']'), out var address)

@@ -551,13 +551,13 @@
       "title": "核心内部探测与后台请求独立计量",
       "depends_on": ["S5.6"],
       "status": "in_progress",
-      "work": "用户确认计费诊断收口，要求后续覆盖urltest等内部接口并单独统计。首批在#18 / PR #20实现test.5公共URLTest独立累计与Monitor Core只读读取；版本化账本、Windows采样和页面后续接入，DNS/规则集逐条核实。",
+      "work": "用户要求覆盖urltest等内部接口并单独统计。首两批在#18 / PR #20实现test.5/Core读取、显式v3历史与受控迁移；第三批接入Windows同一响应联合采样、能力说明及HTML四维独立页面，隔离验证通过，实机配套待具体授权。DNS/规则集逐条核实。",
       "outputs": ["每成员及代理/排除/未知探测累计", "版本化账本扩展与单维查询", "独立探测页面及覆盖/缺口说明"],
       "acceptance": "探测不污染业务/路由；预热与正式连接分别绑定实际成员，不读Now猜归属，失败前字节保留。首接不回填，增量/游标同事务，旧历史和独立provider保留。探测流字节不冒充服务商计费。",
       "stop_rule": "隔离回归、核心副本与精确提交CI分层记录；test.4实机不自动更新，启用新预览前提醒。扩展替换、重载及真实迁移须具体授权。",
       "issue": 18,
       "pull_request": 20,
-      "implementation_note": "2026-10-15首批新增probe-stats.patch、test.5构建及Core读取；第二批新增显式v3历史、联合原子批次/单维查询和受控v2→v3执行器。旧范围/历史/游标/缺口与指纹逐表保留，新探测首次建基线；失败回滚DDL/版本/数据。通用认证scope-history合成验证探测查询，默认历史/导出仍为业务。正常打开不迁移，默认新库仍v2。Windows同代批量采样、探测能力说明/页面及实机未接入，test.2/test.4白名单不变；真实v2和provider未操作，其他内部请求未宣称覆盖。见STATUS及docs/proposals/probe-accounting.md。"
+      "implementation_note": "2026-10-16第三批完成Windows同一响应联合采样、--probe-ledger、能力说明及HTML四维查询/显式导出。隔离Release零警告零错误，Core336/Server38/前端56/浏览器17通过，精确提交CI单独核对。候选CI38751295368/artifact11980964000包外层/EXE/溯源已核对并保存在授权TempFiles，源码固定接受该test.5摘要，test.2/test.4保留。正常启动不迁移，普通成员新库仍v2；earliestRecord为最早保存区间而非精确基线。真实核心/Monitor/v2/provider未操作，实机接入及其他内部请求待后续，启用新预览前提醒。见STATUS及docs/proposals/probe-accounting.md。"
     },
     {
       "id": "S6.1",

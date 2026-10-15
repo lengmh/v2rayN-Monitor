@@ -335,13 +335,27 @@ public sealed class ScopeLedger : IDisposable
                 while (reader.Read())
                     gaps.Add(new(reader.IsDBNull(0) ? null : reader.GetInt64(0), reader.GetString(1),
                         Iso(reader.GetInt64(2)), Iso(reader.GetInt64(3)), reader.GetString(4), reader.GetInt64(5) != 0));
+            string? earliest = null;
+            if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal))
+            {
+                using var command = Command(transaction, """
+                    SELECT MIN(r.start_ticks) FROM (
+                        SELECT scope_id,start_ticks FROM scope_minutes
+                        UNION ALL SELECT scope_id,start_ticks FROM scope_unallocated
+                    ) r JOIN measurement_scopes s ON s.scope_id=r.scope_id
+                    WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id)
+                        AND ($name IS NULL OR s.name=$name COLLATE BINARY);
+                    """, ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", query.ScopeName));
+                if (command.ExecuteScalar() is long ticks) earliest = Iso(ticks);
+            }
             transaction.Commit();
             return new(query.Basis, total.Up, total.Down, recovered.Up, recovered.Down, partial.Up, partial.Down,
                 unbucketed.Up, unbucketed.Down,
                 series.OrderBy(x => x.Value.At).Select(x => new SeriesPoint(x.Key, x.Value.Total.Up, x.Value.Total.Down,
                     x.Value.Recovered.Up, x.Value.Recovered.Down)).ToArray(),
                 scopes.OrderBy(x => x.Key).Select(x => new ScopeTotal(x.Key, x.Value.Name, x.Value.Total.Up,
-                    x.Value.Total.Down, x.Value.Recovered.Up, x.Value.Recovered.Down)).ToArray(), rows, count, gaps);
+                    x.Value.Total.Down, x.Value.Recovered.Up, x.Value.Recovered.Down)).ToArray(), rows, count, gaps)
+            { EarliestRecord = earliest };
         }
     }
 

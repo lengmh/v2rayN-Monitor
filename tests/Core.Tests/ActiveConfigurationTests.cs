@@ -607,6 +607,24 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal(1, handler.Requests);
     }
 
+    [Fact]
+    public async Task JointScopeReaderProjectsBothDimensionsFromOneReadOnlyResponse()
+    {
+        using var handler = new StatisticsHandler(StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 9007199254740993),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 7),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>uplink", 13),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>downlink", 17)));
+        using var client = new HttpClient(handler);
+        var result = await V2RayStatistics.ReadScopesAsync(client, new Uri("http://127.0.0.1:10814/"),
+            ["proxy", "missing"], CancellationToken.None);
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(new XrayCounters(9007199254740993, 7), result!.Members.Members["proxy"]);
+        Assert.Equal(new XrayCounters(13, 17), result.Probes.Members["proxy"]);
+        Assert.Equal("missing_counter", result.Probes.UnavailableMembers["missing"]);
+        Assert.Equal("missing_counter", result.Members.UnavailableMembers["missing"]);
+    }
+
     private const string MemberConfiguration = """
         {"inbounds":[{"type":"mixed","tag":"in"}],"outbounds":[
         {"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},
@@ -1140,15 +1158,18 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Throws<ArgumentException>(() => ScopeCollector.Project(ScopeFixture(["group"]), ScopeCounters(), Start));
     }
 
-    [Fact]
-    public async Task ScopeWindowsBoundaryRejectsChangedCoreBeforeAnyBatchCanBeCommitted()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScopeWindowsBoundaryRejectsChangedCoreBeforeAnyBatchCanBeCommitted(bool includeProbes)
     {
         using var discovery = new WindowsDiscovery();
         var first = ScopeFixture();
         var second = ScopeFixture(snapshot: first.Snapshot with { ProcessIdentity = "core-2" });
         var calls = 0;
         var reading = await discovery.ReadScopesBoundAsync(() => calls++ == 0 ? first : second,
-            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?)>((ScopeCounters(100, 200), null)), CancellationToken.None);
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((ScopeCounters(100, 200), null, null)),
+            CancellationToken.None, includeProbes);
         Assert.Null(reading.Batch);
         Assert.True(reading.InvalidateContinuity);
         Assert.True(discovery.RequiresBaseline);
@@ -1161,18 +1182,65 @@ public sealed class ActiveConfigurationTests : IDisposable
         using var ledger = ScopeLedger.CreateNew(History);
         var capture = ScopeFixture();
         var first = await discovery.ReadScopesBoundAsync(() => capture,
-            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?)>((ScopeCounters(100, 200), null)), CancellationToken.None);
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((ScopeCounters(100, 200), null, null)), CancellationToken.None);
         ScopeCollector.Commit(ledger, first.Batch! with { At = Start });
         discovery.AcknowledgePersistence();
         var partial = ScopeCounters(110, 220) with
         { Members = new Dictionary<string, XrayCounters> { ["proxy"] = new(110, 0) }, UnavailableMembers = new Dictionary<string, string> { ["other"] = "missing_counter" } };
         var next = await discovery.ReadScopesBoundAsync(() => capture,
-            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?)>((partial, null)), CancellationToken.None);
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((partial, null, null)), CancellationToken.None);
         ScopeCollector.Commit(ledger, next.Batch! with { At = Start.AddSeconds(1) });
         var query = new ScopeQuery("actual_member", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC");
         Assert.Equal("10", ledger.Query(query).Upload);
         Assert.Contains(ledger.Query(query).Gaps, x => x.IsOpen && x.Reason == "missing_counter");
         Assert.False(discovery.RequiresBaseline);
+    }
+
+    [Fact]
+    public async Task ProbeWindowsPipelinePersistsJointBatchAndOldCoreKeepsBusinessCollecting()
+    {
+        using var discovery = new WindowsDiscovery();
+        using var ledger = ScopeLedger.CreateNew(History, includeProbes: true);
+        var capture = ScopeFixture();
+        V2RayProbeStatistics Probes(long n) => new(
+            new Dictionary<string, XrayCounters> { ["proxy"] = new(n, 0), ["other"] = new(2 * n, 0) },
+            new Dictionary<string, string>(),
+            new Dictionary<string, XrayCounters> { ["business"] = new(3 * n, 0), ["excluded"] = new(0, 0), ["unknown"] = new(0, 0) },
+            new Dictionary<string, string>());
+        async Task<ScopeCollectorReading> Read(long business, V2RayProbeStatistics probes) =>
+            await discovery.ReadScopesBoundAsync(() => capture,
+                (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((ScopeCounters(business, business), null, probes)),
+                CancellationToken.None, includeProbes: true);
+        var first = await Read(100, Probes(1000));
+        Assert.Equal("partial", first.Probes!.State); // Synthetic catalog also contains unsupported chain/outbound paths.
+        ScopeCollector.Commit(ledger, first.Batch! with { At = Start });
+        discovery.AcknowledgePersistence();
+        var query = new ScopeQuery("probe_urltest_member", Start.AddMinutes(-1), Start.AddMinutes(1), "UTC");
+        Assert.Equal("0", ledger.Query(query).Upload);
+        Assert.Null(ledger.Query(query).EarliestRecord);
+        var next = await Read(110, Probes(1007));
+        ScopeCollector.Commit(ledger, next.Batch! with { At = Start.AddSeconds(1) });
+        discovery.AcknowledgePersistence();
+        Assert.Equal("21", ledger.Query(query).Upload);
+        Assert.Equal("20", ledger.Query(query with { Basis = "actual_member" }).Upload);
+        Assert.NotNull(ledger.Query(query with { Start = Start.AddDays(10), End = Start.AddDays(11) }).EarliestRecord);
+        var old = await Read(115, new(new Dictionary<string, XrayCounters>(), new Dictionary<string, string>(),
+            new Dictionary<string, XrayCounters>(), new Dictionary<string, string>()));
+        Assert.Equal("unsupported", old.Probes!.State);
+        ScopeCollector.Commit(ledger, old.Batch! with { At = Start.AddSeconds(2) });
+        Assert.Equal("30", ledger.Query(query with { Basis = "actual_member" }).Upload);
+        Assert.Equal("21", ledger.Query(query).Upload);
+        Assert.Contains(ledger.Query(query).Gaps, gap => gap.IsOpen && gap.Reason == "missing_counter");
+    }
+
+    [Fact]
+    public void ProbeExtensionIsPinnedAndDoesNotBroadenLegacyApproval()
+    {
+        Assert.True(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedMemberSingboxSha256, true));
+        Assert.True(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedProbeSingboxSha256, true));
+        Assert.False(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedProbeSingboxSha256, false));
+        Assert.True(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedSingboxSha256, false));
+        Assert.False(WindowsDiscovery.IsApprovedExtension(new string('0', 64), true));
     }
 
     [Fact]
@@ -1220,6 +1288,10 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal(scopeMode, command.Contains(" --scope-ledger ", StringComparison.Ordinal));
         Assert.NotEqual(command, MonitorStartup.Command(executable, root, !scopeMode));
         Assert.NotEqual(command, MonitorStartup.Command(executable, root + "-other", scopeMode));
+        var probes = MonitorStartup.Command(executable, root, scopeMode, probeMode: true);
+        Assert.Contains(" --scope-ledger --probe-ledger ", probes);
+        Assert.EndsWith("--data-dir \"" + root + "\"", probes);
+        Assert.NotEqual(command, probes);
     }
 
     public void Dispose() { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }

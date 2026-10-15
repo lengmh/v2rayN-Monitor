@@ -19,6 +19,7 @@ public sealed record HistoryResult(string Start, string End, string Upload, stri
     public string UnbucketedDownload { get; init; } = "0";
     public IReadOnlyList<GapInfo> Gaps { get; init; } = [];
     public bool PartialCoverage { get; init; }
+    public string? EarliestRecord { get; init; }
 }
 public sealed record QuerySpec(DateTimeOffset Start, DateTimeOffset End, string TimeZoneId, string Bucket = "day", string? NodeKey = null, int Page = 0, int PageSize = 50)
 {
