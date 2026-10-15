@@ -33,10 +33,13 @@ public sealed class MonitorServer : IAsyncDisposable
     public string Address { get; private set; } = "";
     public CancellationToken Stopping => app.Lifetime.ApplicationStopping;
     public AppSettings Settings { get { lock (settingsGate) return settings; } }
-    public void SetStatus(CollectorStatus value) => Volatile.Write(ref status, value);
+    public void SetStatus(CollectorStatus value) => Volatile.Write(ref status, value with { Probes = value.Probes ?? DefaultProbeStatus });
+    private ProbeCollectionStatus DefaultProbeStatus => Scopes?.SupportsProbes == true
+        ? new(true, "waiting", "探测账本已启用，等待有效采样。")
+        : new(false, "disabled", "此实例未启用探测历史。接入需配套核心和显式 v3 账本；当前业务采集不受影响。");
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    private MonitorServer(string directory, bool demoMode, bool useScopeLedger)
+    private MonitorServer(string directory, bool demoMode, bool useScopeLedger, bool useProbeLedger)
     {
         dataDir = directory; demo = demoMode; Directory.CreateDirectory(directory);
         var zone = TimeZoneInfo.Local.Id;
@@ -45,24 +48,32 @@ public sealed class MonitorServer : IAsyncDisposable
         var path = Path.Combine(dataDir, "settings.json");
         if (File.Exists(path)) settings = (JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Json) ?? settings) with { Demo = demo };
         _ = TimeZoneInfo.FindSystemTimeZoneById(settings.TimeZoneId);
+        useScopeLedger |= useProbeLedger;
         if (demoMode && useScopeLedger) throw new ArgumentException("Scope mode cannot use the v1 demo initializer.");
         var historyPath = Path.Combine(directory, "history.db");
         if (useScopeLedger)
-            Scopes = File.Exists(historyPath) ? new ScopeLedger(historyPath) : ScopeLedger.CreateNew(historyPath);
+        {
+            Scopes = File.Exists(historyPath) ? new ScopeLedger(historyPath) : ScopeLedger.CreateNew(historyPath, includeProbes: useProbeLedger);
+            if (Scopes.SupportsProbes != useProbeLedger)
+            {
+                Scopes.Dispose();
+                throw new InvalidOperationException("v2 requires --scope-ledger; v3 requires --probe-ledger. Startup never migrates history.");
+            }
+        }
         else legacyLedger = new(historyPath);
         imports = new(Path.Combine(directory, "provider.db"));
         status = new("setup", "选择 v2rayN 数据目录，开始只读采集。", Demo: demo,
-            CollectionBasis: useScopeLedger ? "actual_member" : "legacy_proxy");
+            CollectionBasis: useScopeLedger ? "actual_member" : "legacy_proxy", Probes: DefaultProbeStatus);
         if (demo) { Ledger.SeedDemo(DateTimeOffset.UtcNow); status = new("demo", "合成演示数据，不连接真实代理。", Demo: true); }
     }
     public static Task<MonitorServer> StartAsync(string directory, string webRoot, bool demo = false, CancellationToken ct = default,
-        bool useScopeLedger = false)
+        bool useScopeLedger = false, bool useProbeLedger = false)
         // The WinForms tray joins this task synchronously; nested framework awaits must not
         // inherit its UI synchronization context (the same applies to Kestrel shutdown).
-        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger), ct);
-    private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger)
+        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger), ct);
+    private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger, bool useProbeLedger)
     {
-        var server = new MonitorServer(directory, demo, useScopeLedger);
+        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger);
         try { await server.StartWebAsync(webRoot, ct).ConfigureAwait(false); return server; }
         catch { await server.DisposeAsync().ConfigureAwait(false); throw; }
     }
@@ -137,9 +148,13 @@ public sealed class MonitorServer : IAsyncDisposable
         app.MapGet("/api/settings", () => Settings);
         app.MapPost("/api/settings", (AppSettings value) => { UpdateSettings(value); return Results.Ok(Settings); });
         app.MapGet("/api/timezones", () => TimeZoneInfo.GetSystemTimeZones().Select(z => new { id = TimeZoneInfo.TryConvertWindowsIdToIanaId(z.Id, out var iana) ? iana : z.Id, name = z.DisplayName }).DistinctBy(z => z.id));
-        app.MapGet("/api/nodes", () => Scopes is null ? Ledger.GetNodes() :
-            Scopes.GetScopes(PrimaryBasis).Select(x => new NodeInfo("scope:" + x.Id.ToString(CultureInfo.InvariantCulture), x.Scope.Name)).ToArray());
-        app.MapGet("/api/history", (HttpRequest request) => QueryHistory(ParseQuery(request)));
+        app.MapGet("/api/nodes", (HttpRequest request) =>
+        {
+            var basis = RequestedBasis(request);
+            return Scopes is null ? Ledger.GetNodes() :
+                Scopes.GetScopes(basis).Select(x => new NodeInfo("scope:" + x.Id.ToString(CultureInfo.InvariantCulture), x.Scope.Name)).ToArray();
+        });
+        app.MapGet("/api/history", (HttpRequest request) => QueryHistory(ParseQuery(request), RequestedBasis(request)));
         app.MapGet("/api/scope-history", (HttpRequest request) =>
         {
             if (Scopes is null) throw new ArgumentException("当前实例未显式启用多范围账本。");
@@ -148,7 +163,7 @@ public sealed class MonitorServer : IAsyncDisposable
         app.MapGet("/api/export", (HttpRequest request) =>
         {
             var query = ParseQuery(request);
-            var basis = PrimaryBasis;
+            var basis = RequestedBasis(request);
             var rows = Scopes is null ? Ledger.Export(query) : Scopes.Export(ToScopeQuery(query, basis)).Select(ToTraffic).ToArray();
             var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality" + (Scopes is null ? "" : ",basis,scope_key") + "\r\n");
             foreach (var row in rows)
@@ -178,6 +193,15 @@ public sealed class MonitorServer : IAsyncDisposable
         Address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single().TrimEnd('/');
     }
     private string PrimaryBasis => Volatile.Read(ref status).CollectionBasis is "legacy_proxy" ? "legacy_proxy" : "actual_member";
+    private string RequestedBasis(HttpRequest request)
+    {
+        if (!request.Query.TryGetValue("basis", out var values)) return PrimaryBasis;
+        if (values.Count != 1 || values[0] is not ("probe_urltest_member" or "probe_urltest_business" or
+            "probe_urltest_excluded" or "probe_urltest_unknown"))
+            throw new ArgumentException("显式 basis 仅支持单个 URLTest 探测维度。");
+        if (Scopes?.SupportsProbes != true) throw new ArgumentException("此实例未启用 v3 探测历史，未知不能记为零。");
+        return values[0]!;
+    }
     private ScopeQuery ToScopeQuery(QuerySpec query, string basis)
     {
         long? id = null;
@@ -194,10 +218,10 @@ public sealed class MonitorServer : IAsyncDisposable
     private static TrafficRow ToTraffic(ScopeTrafficRow row) =>
         new(row.Start, row.End, "scope:" + row.ScopeId.ToString(CultureInfo.InvariantCulture),
             row.Name, row.Upload, row.Download, row.Quality, row.PartialCoverage);
-    private HistoryResult QueryHistory(QuerySpec query)
+    private HistoryResult QueryHistory(QuerySpec query, string basis)
     {
         if (Scopes is null) return Ledger.Query(query);
-        var result = Scopes.Query(ToScopeQuery(query, PrimaryBasis));
+        var result = Scopes.Query(ToScopeQuery(query, basis));
         string Add(string a, string b) => (BigInteger.Parse(a, CultureInfo.InvariantCulture) + BigInteger.Parse(b, CultureInfo.InvariantCulture)).ToString(CultureInfo.InvariantCulture);
         return new(query.Start.ToString("O", CultureInfo.InvariantCulture), query.End.ToString("O", CultureInfo.InvariantCulture),
             result.Upload, result.Download, Add(result.RecoveredUpload, result.PartialUpload), Add(result.RecoveredDownload, result.PartialDownload),
@@ -210,7 +234,8 @@ public sealed class MonitorServer : IAsyncDisposable
             PartialUpload = result.PartialUpload, PartialDownload = result.PartialDownload,
             UnbucketedUpload = result.UnbucketedUpload, UnbucketedDownload = result.UnbucketedDownload,
             Gaps = result.Gaps.Select(x => new GapInfo(x.Start, x.End, x.Reason, x.IsOpen, x.Origin)).ToArray(),
-            PartialCoverage = result.Gaps.Any(x => x.Reason == "uncollected_outbounds")
+            PartialCoverage = result.Gaps.Any(x => x.Reason == "uncollected_outbounds"),
+            EarliestRecord = result.EarliestRecord
         };
     }
     private QuerySpec ParseQuery(HttpRequest request)
