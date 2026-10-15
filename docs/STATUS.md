@@ -1,5 +1,21 @@
 # 初版实现与验证状态
 
+## 2026-10-15：S5.6 第九批续 / Monitor 更新与已有 v2 账本重开
+
+起点 `68b8a35a083edcbc9ce3f1d2a27eeac91e2b604c`，工作树干净。该提交的 Monitor PR `38683741202`、push `38683733806` 与独立扩展 PR `38683741103`（attempt 2）均成功；扩展首轮在下载固定 setup-go action 时失败，尚未检出或编译代码。最终成功元数据与首轮失败日志保留，末次扩展完整日志下载遇 EOF，未宣称原始日志齐全。Monitor 双平台 Core 314 / Server 36 / 前端 54、Linux 浏览器 16 项通过；这些是上一源码批次的远端结果，本次不重复作为新执行的测试。
+
+用户收到只更新 Monitor、保留当前 v2 数据且不动代理的具体方案后退出旧 Monitor。本次先实查旧进程不存在，核对候选 EXE 摘要、路径无重解析点及客户端/核心代次。通过只读 SQLite 源连接备份当前 history.db、独立 provider.db 并复制 settings.json，两个备份完整性检查均为 ok，没有覆盖已有备份或创建新空账本。
+
+13:24:58（北京时间）启动精确 `68b8a35` CI 候选，显式保留 `--scope-ledger --data-dir <第八批 live-scope-data>`。程序 ProductVersion 为 `0.2.0-preview.2+439f5053c08b6224b76766667b4f8aae0b038179`，后缀是 PR 合并测试提交；EXE SHA256 为 `EABFD84C536A9861389EDA2CD521D492A1A8E56F8075B8F89B9E3FD635B43566`。没有替换核心/sidecar、重载 v2rayN、切节点、修改启动项、迁移或清空历史。
+
+只读事务观察取得 6 个新持久批次，后续 5 段全部范围累计差与分钟/未分时账本增量一致。既有 37 个范围身份、分钟历史、未分时记录和缺口保留，33 个成员开始保存友好名。跨本次停机重开的全部范围累计差也与账本增量相等；37 条 `recovered-unallocated` 记录保留恢复未分时量，对应 37 条 `long_interval` 缺口已关闭。没有摊分停机期间流量、补算首接前累计或移除早先快照变化缺口。
+
+settings 摘要不变；provider 原库与 SQLite backup 的物理摘要不同，差异仅在 SQLite 文件头，逐项逻辑 Schema/数据一致且完整性为 ok，不能把备份摘要相等当作本轮证据。唯一新 Monitor 的路径/模式/数据目录与回环监听已核对：首页 HTTP 200，未认证状态 API 401。初次猜测的 `/app.js` 为 404，改按首页实际引用核实 `/assets/index-DMiwFH1i.js` 为 200 且含非零明细参数；没有读取浏览器令牌或会话。真实页面名称、换行和非零明细效果仍待用户目视确认。
+
+证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-member-display-20261015\activation-132423`：`preflight.json`、`backup/`、`backup-result.json`、`start.json`、`verification-result.json`、`supplemental-verification.json`、`http-process-result.json`、`actual-page-assets.json` 及本机逐范围样本。运行包与真实账本均须保留，不因位于 TempFiles 而清理。需回退时先退出新版 Monitor；旧包可显式指向同一现有 v2 数据目录，不自动还原旧备份而丢弃新增历史。
+
+本次补齐同一核心代次下已有 v2 账本的 Monitor 重开恢复及持续被动守恒；受控 proxy/direct、组成员切换、完整维度切换/新模式速率及真实页面验收仍待完成。S5.6 保持 in_progress，S5.7 planned；没有修改生产源码、依赖或 CI 配置，不合并或发布。本次文档提交与对应 CI 单独核对，不需要因此再次更换运行包。
+
 ## 2026-10-15：S5.6 第九批 / 成员友好名、非零明细与偏少诊断
 
 起点 `8db3ff20d84e0d031672ad6996b12334cb1ab68a`，工作树干净。用户反馈机器 tag 遮挡排行、流量偏少和零字节明细过多。本批不重载核心、不切换节点、不改配置或真实账本，也不自动替换正在运行的第八批预览。
