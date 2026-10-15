@@ -62,6 +62,45 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Contains("9007199254740993", csv);
     }
 
+    [Fact] public async Task ProbeHistoryUsesExplicitBasisWhileDefaultHistoryAndExportRemainBusinessOnly()
+    {
+        await server.DisposeAsync();
+        client.Dispose();
+        var provider = File.ReadAllBytes(Path.Combine(root, "provider.db"));
+        V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
+        V2rayNMonitor.Core.ScopeLedgerMigration.MigrateProbes(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v2-backup.db"));
+        Assert.Equal(provider, File.ReadAllBytes(Path.Combine(root, "provider.db")));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/scope-history?basis=probe_urltest_member")).StatusCode);
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var member = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "synthetic", "Synthetic business", "synthetic", "proxy");
+        var probe = member with { Basis = "probe_urltest_member", Name = "Synthetic probe" };
+        var aggregate = new V2rayNMonitor.Core.MeasurementScope("probe_urltest_business", "aggregate", "probe_urltest_business", "Synthetic probes");
+        foreach (var second in new[] { 0, 1 })
+            server.Scopes!.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at.AddSeconds(second),
+                [new(member, second * 17, 0), new(probe, second * 9007199254740993, second * 7),
+                 new(aggregate, second * 9007199254740993, second * 7)], []));
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var business = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("17", business.GetProperty("upload").GetString());
+        var probes = await client.GetFromJsonAsync<JsonElement>("/api/scope-history" + query + "&basis=probe_urltest_member");
+        Assert.Equal("probe_urltest_member", probes.GetProperty("basis").GetString());
+        Assert.Equal("9007199254740993", probes.GetProperty("upload").GetString());
+        Assert.Equal("7", probes.GetProperty("download").GetString());
+        var total = await client.GetFromJsonAsync<JsonElement>("/api/scope-history" + query + "&basis=probe_urltest_business");
+        Assert.Equal(probes.GetProperty("upload").GetString(), total.GetProperty("upload").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.GetAsync("/api/scope-history" + query + "&basis=actual_member,probe_urltest_member")).StatusCode);
+        var csv = await client.GetStringAsync("/api/export" + query);
+        Assert.DoesNotContain("Synthetic probe", csv);
+        Assert.DoesNotContain("probe_urltest", csv);
+        var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
+        Assert.Single(nodes.EnumerateArray());
+        Assert.Equal("Synthetic business", nodes[0].GetProperty("name").GetString());
+    }
+
     [Fact] public async Task ScopeStartupDoesNotAutomaticallyMigrateOrTouchProviderDatabase()
     {
         await server.DisposeAsync();

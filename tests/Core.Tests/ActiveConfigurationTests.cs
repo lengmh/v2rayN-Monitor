@@ -1070,6 +1070,39 @@ public sealed class ActiveConfigurationTests : IDisposable
             new Dictionary<string, string>());
 
     [Fact]
+    public void ProbeProjectionUsesVerifiedMembersAndKeepsUnavailableScopesInTheJointBatch()
+    {
+        var capture = ScopeFixture(enabled: ["proxy"]);
+        var probes = new V2RayProbeStatistics(new Dictionary<string, XrayCounters>
+            { ["proxy"] = new(100, 200), ["other"] = new(999, 999), ["unverified"] = new(999, 999) },
+            new Dictionary<string, string>(), new Dictionary<string, XrayCounters>
+            { ["business"] = new(100, 200) }, new Dictionary<string, string>());
+        var batch = ScopeCollector.ProjectWithProbes(capture, ScopeCounters(10, 20), probes, Start);
+        var member = batch.Readings.Single(x => x.Scope.Basis == "probe_urltest_member" && x.Scope.OutboundTag == "proxy");
+        var business = batch.Readings.Single(x => x.Scope.Basis == "actual_member" && x.Scope.OutboundTag == "proxy");
+        Assert.Equal(business.Scope with { Basis = "probe_urltest_member" }, member.Scope);
+        Assert.Equal(100L, member.Upload);
+        var disabled = batch.Readings.Single(x => x.Scope.Basis == "probe_urltest_member" && x.Scope.OutboundTag == "other");
+        Assert.Equal("probe_statistics_disabled", disabled.UnavailableReason);
+        Assert.Null(disabled.Upload);
+        Assert.DoesNotContain(batch.Readings, x => x.Scope.OutboundTag == "unverified");
+        Assert.Equal("missing_counter", batch.Readings.Single(x => x.Scope.Basis == "probe_urltest_excluded").UnavailableReason);
+        using var ledger = ScopeLedger.CreateNew(History, includeProbes: true);
+        ScopeCollector.Commit(ledger, batch);
+        var next = ScopeCollector.ProjectWithProbes(capture, ScopeCounters(15, 20), probes with
+        {
+            Members = new Dictionary<string, XrayCounters> { ["proxy"] = new(107, 211) },
+            Totals = new Dictionary<string, XrayCounters> { ["business"] = new(107, 211) }
+        }, Start.AddSeconds(1));
+        ScopeCollector.Commit(ledger, next);
+        var query = new ScopeQuery("probe_urltest_member", Start.AddSeconds(-1), Start.AddMinutes(1), "UTC");
+        Assert.Equal("7", ledger.Query(query).Upload);
+        Assert.Equal("11", ledger.Query(query).Download);
+        Assert.Equal("5", ledger.Query(query with { Basis = "actual_member" }).Upload);
+        Assert.Contains(ledger.Query(query).Gaps, x => x.IsOpen);
+    }
+
+    [Fact]
     public void ScopeSidecarIsStrictAndLegacyParserDoesNotSilentlyEnableMembers()
     {
         var json = Bytes("""{"listen":"127.0.0.1:10814","monitor_members":["proxy","other"]}""");

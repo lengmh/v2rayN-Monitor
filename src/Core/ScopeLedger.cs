@@ -6,7 +6,7 @@ using Microsoft.Data.Sqlite;
 
 namespace V2rayNMonitor.Core;
 
-/// <summary>Opt-in, single-writer v2 ledger. Existing v1 files are never initialized or migrated here.</summary>
+/// <summary>Opt-in, single-writer v2/v3 ledger. Existing files are never initialized or migrated here.</summary>
 public sealed class ScopeLedger : IDisposable
 {
     private const long Minute = TimeSpan.TicksPerMinute;
@@ -14,7 +14,12 @@ public sealed class ScopeLedger : IDisposable
     private readonly object gate = new();
     private readonly SqliteConnection connection;
     private bool disposed;
-    internal static readonly string SchemaSql = ReadSchema();
+    internal static readonly string SchemaSql = ReadSchema("ScopeLedgerV2.sql");
+    internal static readonly string ProbeUpgradeSql = ReadSchema("ScopeLedgerV3.sql");
+    private static readonly string[] BusinessBases = ["legacy_proxy", "actual_member", "business", "excluded", "unknown", "routed_outbound"];
+    private static readonly string[] ProbeBases = ["probe_urltest_member", "probe_urltest_business", "probe_urltest_excluded", "probe_urltest_unknown"];
+    public bool SupportsProbes { get; }
+    public IReadOnlyList<string> Bases => Array.AsReadOnly(SupportsProbes ? [.. BusinessBases, .. ProbeBases] : BusinessBases);
 
     public ScopeLedger(string dbPath)
     {
@@ -27,16 +32,18 @@ public sealed class ScopeLedger : IDisposable
         {
             connection.Open();
             // Check before any persistent PRAGMA: opening a v1 file must not change it.
-            if (Scalar(null, "PRAGMA user_version;") != 2)
-                throw new InvalidOperationException("An explicitly initialized v2 history ledger is required.");
-            ValidateSchema();
+            var version = Scalar(null, "PRAGMA user_version;");
+            if (version is not (2 or 3))
+                throw new InvalidOperationException("An explicitly initialized v2 or v3 history ledger is required.");
+            SupportsProbes = version == 3;
+            ValidateSchema(connection, null, version);
             Execute(null, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;");
         }
         catch { connection.Dispose(); throw; }
     }
 
     /// <summary>Reserves a new file; refuses every existing path, including an empty file. No migration API.</summary>
-    public static ScopeLedger CreateNew(string dbPath)
+    public static ScopeLedger CreateNew(string dbPath, bool includeProbes = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
         if (dbPath == ":memory:") throw new ArgumentException("Use a new, explicit file path.", nameof(dbPath));
@@ -61,8 +68,9 @@ public sealed class ScopeLedger : IDisposable
                 throw new InvalidOperationException("New history initialization requires an empty ledger.");
             using var transaction = db.BeginTransaction();
             command.Transaction = transaction;
-            command.CommandText = SchemaSql;
+            command.CommandText = SchemaSql + (includeProbes ? "\n" + ProbeUpgradeSql : "");
             command.ExecuteNonQuery();
+            ValidateSchema(db, transaction, includeProbes ? 3 : 2);
             transaction.Commit();
         }
         return new ScopeLedger(path);
@@ -460,7 +468,7 @@ public sealed class ScopeLedger : IDisposable
             """, ("$start", start), ("$end", end), ("$id", id), ("$reason", reason), ("$open", open ? 1 : 0));
     }
 
-    private static void Validate(ScopeReading reading, string instance)
+    private void Validate(ScopeReading reading, string instance)
     {
         ArgumentNullException.ThrowIfNull(reading);
         ArgumentNullException.ThrowIfNull(reading.Scope);
@@ -476,9 +484,9 @@ public sealed class ScopeLedger : IDisposable
         {
             "legacy_proxy" => scope.IdentityKind == "legacy_node" && !string.IsNullOrWhiteSpace(scope.NodeId) &&
                 scope.IdentityValue == Key(instance, scope.NodeId) && scope.OutboundTag is null,
-            "actual_member" when scope.IdentityKind == "index_id" => !string.IsNullOrWhiteSpace(scope.NodeId) &&
+            "actual_member" or "probe_urltest_member" when scope.IdentityKind == "index_id" => !string.IsNullOrWhiteSpace(scope.NodeId) &&
                 scope.IdentityValue == scope.NodeId && !string.IsNullOrWhiteSpace(scope.OutboundTag),
-            "actual_member" or "routed_outbound" => scope.IdentityKind == "outbound" && scope.NodeId is null &&
+            "actual_member" or "routed_outbound" or "probe_urltest_member" => scope.IdentityKind == "outbound" && scope.NodeId is null &&
                 OutboundIdentity(scope.IdentityValue, scope.OutboundTag),
             _ => scope.IdentityKind == "aggregate" && scope.IdentityValue == scope.Basis &&
                 scope.NodeId is null && scope.OutboundTag is null
@@ -502,33 +510,42 @@ public sealed class ScopeLedger : IDisposable
         reason.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
     private static (string, string, string) Identity(MeasurementScope scope) =>
         (scope.Basis, scope.IdentityKind, scope.IdentityValue);
-    private static void ValidateBasis(string basis)
+    private void ValidateBasis(string basis)
     {
-        if (basis is not ("legacy_proxy" or "actual_member" or "business" or "excluded" or "unknown" or "routed_outbound"))
+        if (!BusinessBases.Contains(basis, StringComparer.Ordinal) &&
+            !(SupportsProbes && ProbeBases.Contains(basis, StringComparer.Ordinal)))
             throw new ArgumentException("Select exactly one supported measurement basis.", nameof(basis));
     }
 
-    private void ValidateSchema()
+    internal static void ValidateSchema(SqliteConnection db, SqliteTransaction? transaction, long version)
     {
-        foreach (Match match in Regex.Matches(SchemaSql, @"CREATE (?:TABLE|(?:UNIQUE )?INDEX) (\w+)[\s\S]*?;"))
+        if (version is not (2 or 3)) throw new InvalidOperationException("Unsupported history version.");
+        var schema = SchemaSql;
+        if (version == 3)
         {
-            using var command = Command(null, "SELECT sql FROM sqlite_master WHERE name=$name;", ("$name", match.Groups[1].Value));
+            var directory = Regex.Match(ProbeUpgradeSql, @"CREATE TABLE measurement_scopes_v3 [\s\S]*?;").Value
+                .Replace("CREATE TABLE measurement_scopes_v3", "CREATE TABLE measurement_scopes", StringComparison.Ordinal);
+            schema = Regex.Replace(schema, @"CREATE TABLE measurement_scopes [\s\S]*?;", _ => directory);
+        }
+        foreach (Match match in Regex.Matches(schema, @"CREATE (?:TABLE|(?:UNIQUE )?INDEX) (\w+)[\s\S]*?;"))
+        {
+            using var command = db.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT sql FROM sqlite_master WHERE name=$name;";
+            command.Parameters.AddWithValue("$name", match.Groups[1].Value);
             var actual = command.ExecuteScalar() as string;
             if (actual is null || NormalizeSql(actual) != NormalizeSql(match.Value))
-                throw new InvalidOperationException("Unsupported v2 history schema.");
+                throw new InvalidOperationException("Unsupported history schema for its declared version.");
         }
-        using var integrity = Command(null, "PRAGMA integrity_check;");
-        if ((string?)integrity.ExecuteScalar() != "ok") throw new InvalidOperationException("History integrity check failed.");
-        using var foreign = Command(null, "PRAGMA foreign_key_check;");
-        using var reader = foreign.ExecuteReader();
-        if (reader.Read()) throw new InvalidOperationException("History foreign key check failed.");
+        ScopeLedgerMigration.CheckIntegrity(db, transaction);
     }
 
-    private static string NormalizeSql(string sql) => Regex.Replace(sql.Trim().TrimEnd(';'), @"\s+", " ");
-    private static string ReadSchema()
+    private static string NormalizeSql(string sql) => Regex.Replace(sql.Trim().TrimEnd(';'), @"\s+", " ")
+        .Replace("CREATE TABLE \"measurement_scopes\"", "CREATE TABLE measurement_scopes", StringComparison.Ordinal);
+    private static string ReadSchema(string resource)
     {
-        using var stream = typeof(ScopeLedger).Assembly.GetManifestResourceStream("V2rayNMonitor.Core.ScopeLedgerV2.sql")
-            ?? throw new InvalidOperationException("Missing v2 schema resource.");
+        using var stream = typeof(ScopeLedger).Assembly.GetManifestResourceStream("V2rayNMonitor.Core." + resource)
+            ?? throw new InvalidOperationException("Missing history schema resource.");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     }

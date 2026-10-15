@@ -1129,6 +1129,286 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal(1L, check.ExecuteScalar());
     }
 
+    private static MeasurementScope ProbeMember(string id = "a") =>
+        Member(id) with { Basis = "probe_urltest_member" };
+    private static MeasurementScope ProbeTotal(string total = "business") =>
+        new("probe_urltest_" + total, "aggregate", "probe_urltest_" + total, "Synthetic URLTest " + total);
+
+    [Fact]
+    public void ProbeLedgerRequiresExplicitV3AndNeverUpgradesV2OnOpen()
+    {
+        using (var ledger = ScopeLedger.CreateNew(Database))
+        {
+            Assert.False(ledger.SupportsProbes);
+            Assert.Throws<ArgumentException>(() => ledger.Accept(Batch(0, new ScopeReading(ProbeMember(), 50, 0))));
+            Assert.Throws<ArgumentException>(() => ledger.Query(ScopeAll("probe_urltest_member")));
+        }
+        var before = HistorySnapshot(Database);
+        using (var reopened = new ScopeLedger(Database)) Assert.False(reopened.SupportsProbes);
+        Assert.Equal(before, HistorySnapshot(Database));
+        Assert.Throws<IOException>(() => ScopeLedger.CreateNew(Database, includeProbes: true));
+        var path = Path.Combine(directory, "explicit-v3.db");
+        using (var probes = ScopeLedger.CreateNew(path, includeProbes: true))
+        {
+            Assert.True(probes.SupportsProbes);
+            Assert.Equal(10, probes.Bases.Count);
+            Assert.Empty(probes.GetScopes("probe_urltest_member"));
+        }
+        using (var reopened = new ScopeLedger(path)) Assert.True(reopened.SupportsProbes);
+        RunSql("PRAGMA user_version=3;");
+        Assert.Throws<InvalidOperationException>(() => new ScopeLedger(Database));
+    }
+
+    [Fact]
+    public void ProbeLedgerSeparatesBusinessMembersTotalsAndExactLargeIntegers()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true);
+        const long initial = 9007199254740993;
+        ScopeBatch Complete(int second, long business, long probe) => Batch(second,
+            Reading("a", business), new(ProbeMember(), probe, 0), new(ProbeTotal(), probe, 0),
+            new(ProbeTotal("excluded"), 0, 0), new(ProbeTotal("unknown"), 0, 0));
+        Assert.All(ledger.Accept(Complete(0, 100, initial)).Scopes.Values, x => Assert.Equal("baseline", x));
+        var next = Complete(1, 130, initial + 7);
+        ledger.Accept(next);
+        Assert.Equal("duplicate", ledger.Accept(next).Status);
+        Assert.Equal("30", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal("7", ledger.Query(ScopeAll("probe_urltest_member")).Upload);
+        Assert.Equal("7", ledger.Query(ScopeAll("probe_urltest_business")).Upload);
+        Assert.Equal("0", ledger.Query(ScopeAll("probe_urltest_excluded")).Upload);
+        Assert.Equal("0", ledger.Query(ScopeAll("probe_urltest_unknown")).Upload);
+        Assert.All(ledger.Export(ScopeAll("probe_urltest_member")), row => Assert.Equal("probe_urltest_member", row.Basis));
+        Assert.Throws<ArgumentException>(() => ledger.Query(ScopeAll("actual_member,probe_urltest_member")));
+        Assert.Throws<ArgumentException>(() => ledger.Accept(Complete(2, 140, initial + 10) with
+        {
+            Readings = [Reading("a", 140), new(ProbeMember() with { NodeId = "guessed" }, initial + 10, 0)]
+        }));
+        Assert.Throws<SqliteException>(() => RunSql("UPDATE scope_cursors SET upload=1.5 WHERE scope_id=2;"));
+    }
+
+    [Fact]
+    public void ProbeLedgerMissingRecoveryAndGenerationChangesRemainSeparateAcrossReopen()
+    {
+        using (var ledger = ScopeLedger.CreateNew(Database, includeProbes: true))
+        {
+            ledger.Accept(Batch(0, Reading("a", 100), new(ProbeMember(), 500, 0)));
+            ledger.Accept(Batch(1, Reading("a", 110), new(ProbeMember(), UnavailableReason: "missing_counter")));
+            Assert.True(Assert.Single(ledger.Query(ScopeAll("probe_urltest_member")).Gaps).IsOpen);
+            Assert.Empty(ledger.Query(ScopeAll()).Gaps);
+        }
+        using var reopened = new ScopeLedger(Database);
+        reopened.Accept(Batch(2, Reading("a", 120), new(ProbeMember(), 550, 0)));
+        var recovered = reopened.Query(ScopeAll("probe_urltest_member"));
+        Assert.Equal("50", recovered.Upload);
+        Assert.Equal("50", recovered.RecoveredUpload);
+        Assert.All(recovered.Gaps, x => Assert.False(x.IsOpen));
+        Assert.Equal("20", reopened.Query(ScopeAll()).Upload);
+        reopened.Accept(Batch(3, Reading("a", 130), new(ProbeMember(), UnavailableReason: "missing_counter"))
+            with { Generation = "config-2" });
+        reopened.Accept(Batch(4, Reading("a", 140), new(ProbeMember(), 900, 0)));
+        Assert.Equal("50", reopened.Query(ScopeAll("probe_urltest_member")).Upload);
+        reopened.Accept(Batch(5, Reading("a", 150), new(ProbeMember(), 905, 0)));
+        Assert.Equal("55", reopened.Query(ScopeAll("probe_urltest_member")).Upload);
+    }
+
+    [Fact]
+    public void ProbeLedgerOverflowRollsBackBusinessNamesScopesAndCursorsTogether()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true);
+        ledger.Accept(Batch(0, Reading("a", 0), new(ProbeMember(), 0, 0)));
+        ledger.Accept(Batch(1, Reading("a", 10), new(ProbeMember(), 5, 0)));
+        RunSql("UPDATE scope_minutes SET upload=9223372036854775807 WHERE scope_id IN " +
+            "(SELECT scope_id FROM measurement_scopes WHERE basis='probe_urltest_member');");
+        var before = HistorySnapshot(Database);
+        Assert.Throws<OverflowException>(() => ledger.Accept(Batch(2,
+            new(Member() with { Name = "Not committed" }, 20, 0), Reading("new", 100),
+            new(ProbeMember(), 6, 0))));
+        Assert.Equal(before, HistorySnapshot(Database));
+        Assert.Equal("10", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal("Synthetic member", Assert.Single(ledger.GetScopes("actual_member")).Scope.Name);
+    }
+
+    [Fact]
+    public void ProbeLedgerCommitRetiresMissingProbeScopesAndReturningMembersStartAtBaseline()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true);
+        ScopeCollector.Commit(ledger, Batch(0, Reading("a", 0), new(ProbeMember(), 100, 0)));
+        ScopeCollector.Commit(ledger, Batch(1, Reading("a", 10), new(ProbeMember(), 110, 0)));
+        ScopeCollector.Commit(ledger, Batch(2, Reading("a", 20)));
+        Assert.True(Assert.Single(ledger.Query(ScopeAll("probe_urltest_member")).Gaps).IsOpen);
+        ScopeCollector.Commit(ledger, Batch(3, Reading("a", 30), new(ProbeMember(), 900, 0)));
+        ScopeCollector.Commit(ledger, Batch(4, Reading("a", 40), new(ProbeMember(), 905, 0)));
+        Assert.Equal("15", ledger.Query(ScopeAll("probe_urltest_member")).Upload);
+        Assert.Equal("40", ledger.Query(ScopeAll()).Upload);
+    }
+
+    [Fact]
+    public void ProbeMigrationPreservesEveryOldRowAndBusinessContinuityWithoutBackfillingProbes()
+    {
+        using (var old = new Ledger(Database))
+        {
+            old.Accept(Sample(0, 100));
+            old.Accept(Sample(1, 110));
+            old.RecordGap(Epoch.AddSeconds(2), "legacy_gap");
+        }
+        ScopeLedgerMigration.Migrate(Database, Path.Combine(directory, "before-v2.db"));
+        using (var ledger = new ScopeLedger(Database))
+        {
+            ScopeCollector.Commit(ledger, Batch(3, Reading("a", 100)));
+            ScopeCollector.Commit(ledger, Batch(4, Reading("a", 120)));
+            ScopeCollector.Commit(ledger, Batch(65, Reading("a", 150)));
+            ScopeCollector.Commit(ledger, Batch(66, Reading("a", 151),
+                new(ProbeTotal() with { Basis = "unknown", IdentityValue = "unknown" }, UnavailableReason: "missing_counter")));
+        }
+        RunSql("UPDATE scope_minutes SET upload=9007199254740993,approximate=1,synthetic=1;");
+        var providerPath = Path.Combine(directory, "provider.db");
+        using (var imports = new ProviderImports(providerPath))
+            imports.Commit(new("Synthetic provider", "UTC",
+                "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic node,0.125,9007199254740993,1125899906842624.125,synthetic,2024-02-28 23:59:00\n"));
+        var providerBefore = File.ReadAllBytes(providerPath);
+        var oldRows = HistorySnapshot(Database, includeSchema: false);
+        var oldSchema = HistorySnapshot(Database);
+        var backup = Path.Combine(directory, "v2-backup", "before-probes.db");
+        var migration = ScopeLedgerMigration.MigrateProbes(Database, backup);
+        Assert.Equal(3, migration.PreservedScopes);
+        Assert.Equal(oldSchema, HistorySnapshot(backup));
+        Assert.Equal(oldRows, HistorySnapshot(Database, includeSchema: false));
+        Assert.Equal(providerBefore, File.ReadAllBytes(providerPath));
+        using var upgraded = new ScopeLedger(Database);
+        Assert.True(upgraded.SupportsProbes);
+        var oldBusiness = upgraded.Query(ScopeAll()).Upload;
+        var unknown = new MeasurementScope("unknown", "aggregate", "unknown", "Synthetic URLTest business");
+        ScopeCollector.Commit(upgraded, Batch(67, Reading("a", 161),
+            new(unknown, UnavailableReason: "missing_counter"), new(ProbeMember(), 800, 0)));
+        Assert.Equal((BigInteger.Parse(oldBusiness, CultureInfo.InvariantCulture) + 10).ToString(CultureInfo.InvariantCulture),
+            upgraded.Query(ScopeAll()).Upload);
+        Assert.Equal("0", upgraded.Query(ScopeAll("probe_urltest_member")).Upload);
+        ScopeCollector.Commit(upgraded, Batch(68, Reading("a", 166),
+            new(unknown, UnavailableReason: "missing_counter"), new(ProbeMember(), 807, 0)));
+        Assert.Equal("7", upgraded.Query(ScopeAll("probe_urltest_member")).Upload);
+        Assert.Contains(upgraded.Query(ScopeAll("legacy_proxy")).Gaps, x => x.Origin == "legacy" && x.IsOpen);
+    }
+
+    [Fact]
+    public void ProbeMigrationSupportsEmptyV2AndRefusesExistingBackupV1ProviderOrV3()
+    {
+        using (ScopeLedger.CreateNew(Database)) { }
+        var backup = Path.Combine(directory, "before-probes.db");
+        File.WriteAllText(backup, "Synthetic existing backup");
+        Assert.Throws<IOException>(() => ScopeLedgerMigration.MigrateProbes(Database, backup));
+        Assert.Equal("Synthetic existing backup", File.ReadAllText(backup));
+        Assert.Equal(0, ScopeLedgerMigration.MigrateProbes(Database, Path.Combine(directory, "fresh.db")).PreservedScopes);
+        var v1 = Path.Combine(directory, "v1.db");
+        var provider = Path.Combine(directory, "provider.db");
+        using (new Ledger(v1)) { }
+        using (new ProviderImports(provider)) { }
+        foreach (var path in new[] { Database, v1, provider })
+        {
+            var before = File.ReadAllBytes(path);
+            var rejected = path + ".rejected-backup";
+            Assert.Throws<InvalidOperationException>(() => ScopeLedgerMigration.MigrateProbes(path, rejected));
+            Assert.False(File.Exists(rejected));
+            Assert.Equal(before, File.ReadAllBytes(path));
+        }
+    }
+
+    [Theory]
+    [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
+    [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    [InlineData("DROP INDEX scope_gap_open;")]
+    public void ProbeMigrationRejectsUnsupportedV2BeforeCreatingBackup(string mutation)
+    {
+        using (ScopeLedger.CreateNew(Database)) { }
+        RunSql(mutation);
+        var before = File.ReadAllBytes(Database);
+        var backup = Path.Combine(directory, "rejected.db");
+        Assert.Throws<InvalidOperationException>(() => ScopeLedgerMigration.MigrateProbes(Database, backup));
+        Assert.False(File.Exists(backup));
+        Assert.Equal(before, File.ReadAllBytes(Database));
+    }
+
+    [Theory]
+    [InlineData("SELECT * FROM synthetic_missing_table;")]
+    [InlineData("UPDATE scope_minutes SET upload=upload+1;")]
+    [InlineData("INSERT INTO scope_minutes VALUES(0,999,0,0,0,0);")]
+    public void ProbeMigrationRollsBackRebuiltDirectoryAndVersionAfterSqlDataOrForeignKeyFailure(string injectedSql)
+    {
+        using (var ledger = ScopeLedger.CreateNew(Database))
+        {
+            ledger.Accept(Batch(0, Reading("a", 0)));
+            ledger.Accept(Batch(1, Reading("a", 10)));
+        }
+        var before = HistorySnapshot(Database);
+        ApplyProbeUpgradeForTest(injectedSql);
+        Assert.Equal(before, HistorySnapshot(Database));
+        using var reopened = new ScopeLedger(Database);
+        Assert.False(reopened.SupportsProbes);
+    }
+
+    [Fact]
+    public void ProbeMigrationRejectsChangesAfterBackupWithoutDiscardingNewerData()
+    {
+        using (var ledger = ScopeLedger.CreateNew(Database)) ledger.Accept(Batch(0, Reading("a", 100)));
+        ApplyProbeUpgradeForTest("", changeAfterBackup: true);
+        using var check = new SqliteConnection($"Data Source={Database};Pooling=False");
+        check.Open();
+        using var command = check.CreateCommand();
+        command.CommandText = "SELECT upload FROM scope_cursors;";
+        Assert.Equal(150L, command.ExecuteScalar());
+        command.CommandText = "PRAGMA user_version;";
+        Assert.Equal(2L, command.ExecuteScalar());
+    }
+
+    private void ApplyProbeUpgradeForTest(string injectedSql, bool changeAfterBackup = false)
+    {
+        using var source = new SqliteConnection($"Data Source={Database};Pooling=False");
+        source.Open();
+        using var snapshot = new SqliteConnection($"Data Source={Path.Combine(directory, "synthetic-v2-backup.db")};Pooling=False");
+        snapshot.Open();
+        source.BackupDatabase(snapshot);
+        using (var command = source.CreateCommand())
+        {
+            command.CommandText = "PRAGMA foreign_keys=OFF;" +
+                (changeAfterBackup ? "UPDATE scope_cursors SET upload=150;" : "");
+            command.ExecuteNonQuery();
+        }
+        using var stream = typeof(ScopeLedger).Assembly.GetManifestResourceStream("V2rayNMonitor.Core.ScopeLedgerV3.sql")!;
+        using var reader = new StreamReader(stream);
+        var apply = typeof(ScopeLedgerMigration).GetMethod("ApplyProbes",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            apply.Invoke(null, [source, snapshot, reader.ReadToEnd() + "\n" + injectedSql]));
+    }
+
+    // Logical values retain SQLite types and ordering; only the directory DDL/version should change on upgrade.
+    private static string HistorySnapshot(string path, bool includeSchema = true)
+    {
+        using var db = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        db.Open();
+        var queries = new List<string>();
+        using (var command = db.CreateCommand())
+        {
+            command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) queries.Add($"SELECT * FROM \"{reader.GetString(0)}\" ORDER BY rowid;");
+        }
+        if (includeSchema)
+        {
+            queries.Add("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name;");
+            queries.Add("PRAGMA user_version;");
+        }
+        var result = new List<object?[]>();
+        foreach (var query in queries)
+        {
+            using var command = db.CreateCommand();
+            command.CommandText = query;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                result.Add([query, .. Enumerable.Range(0, reader.FieldCount)
+                    .Select(i => reader.IsDBNull(i) ? null : reader.GetValue(i))]);
+        }
+        return System.Text.Json.JsonSerializer.Serialize(result);
+    }
+
     private void RunSql(string sql)
     {
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Database, Pooling = false }.ToString());
