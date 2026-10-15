@@ -18,6 +18,7 @@ public sealed record ScopeQuery(string Basis, DateTimeOffset Start, DateTimeOffs
     string Bucket = "day", long? ScopeId = null, int Page = 0, int PageSize = 50)
 {
     public string? ScopeName { get; init; }
+    public bool NonZeroRecords { get; init; }
 }
 public sealed record ScopeTrafficRow(string Basis, long ScopeId, string Name, string Start, string End,
     string Upload, string Download, string Quality, bool PartialCoverage);

@@ -72,10 +72,11 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 const post = <T>(path: string, body: unknown): Promise<T> => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
 const errorText = (error: unknown): string => error instanceof Error ? error.message : '操作失败，请检查本机采集器。';
-function query(localComparison = false): string {
+function query(localComparison = false, nonZeroRecords = false): string {
   const params = new URLSearchParams({ start: range.start, end: range.end, timeZoneId: settings.timeZoneId, bucket, page: String(page), pageSize: String(pageSize) });
   if (nodeKey) params.set(localComparison ? 'nodeName' : 'nodeKey', nodeKey);
   if (statisticsSource && !localComparison) params.set('source', statisticsSource);
+  if (nonZeroRecords) params.set('nonZeroRecords', 'true');
   return params.toString();
 }
 function updateRange(): void {
@@ -165,6 +166,11 @@ function renderHistory(history: HistoryResult): void {
   latestHistory = history;
   latestProvider = null;
   statisticLabels();
+  const attribution = el('attribution-note');
+  attribution.dataset.legacyText ??= attribution.textContent ?? '';
+  attribution.textContent = history.basis === 'actual_member'
+    ? '当前按实际成员分账，从首次采样基线后开始计量，接入前累计不回填。直连量单独保存在 excluded，不计入成员合计；business、unknown 和旧 proxy 历史也不与成员量相加。组名仅辅助展示，成员身份不合并；只有独立 AnyTLS proxy 关联已核实的 IndexId，其他成员按配置和 tag 区分。历史缺口不是零流量。'
+    : attribution.dataset.legacyText;
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
@@ -215,7 +221,7 @@ function renderHistory(history: HistoryResult): void {
   });
   const records = el('records'); records.replaceChildren();
   const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
-  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有采集记录。请检查采集器状态或选择其他日期。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
+  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有非零采集明细。零字节记录已隐藏，采集缺口仍单独显示。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr');
     const time = element('td', timestamp(record.start, settings.timeZoneId)); time.title = `${record.start} → ${record.end}`;
@@ -229,12 +235,12 @@ function renderHistory(history: HistoryResult): void {
     qualityCell.append(label);
     row.append(time, name, download, upload, qualityCell); records.append(row);
   }
-  pagination(history.recordCount);
+  pagination(history.recordCount, true);
   el('summary').setAttribute('aria-busy', 'false');
 }
-function pagination(count: number): void {
+function pagination(count: number, nonZeroRecords = false): void {
   const pages = Math.max(1, Math.ceil(count / pageSize));
-  put('record-count', `${count.toLocaleString('zh-CN')} 条记录`); put('page-label', `第 ${page + 1} / ${pages} 页 · 每页 ${pageSize} 条`);
+  put('record-count', `${count.toLocaleString('zh-CN')} 条${nonZeroRecords ? '非零' : ''}记录`); put('page-label', `第 ${page + 1} / ${pages} 页 · 每页 ${pageSize} 条`);
   el<HTMLButtonElement>('previous-page').disabled = page === 0;
   el<HTMLButtonElement>('next-page').disabled = (page + 1) * pageSize >= count;
 }
@@ -258,7 +264,7 @@ function statisticLabels(): void {
   put('download-legend', provider ? metric : '下载');
   put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
   put('records-heading', provider ? '服务商记录' : '采集明细');
-  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : `本机独立账本 · 自动单位（${unit === 'GB' ? '1000' : '1024'} 进制）· 悬停查看原始 bytes`);
+  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : `仅显示非零明细 · 自动单位（${unit === 'GB' ? '1000' : '1024'} 进制）· 导出保留零记录`);
   put('download-column', provider ? '原始量' : '下载'); put('upload-column', provider ? '计费量' : '上传');
   put('quality-column', provider ? '倍率' : '质量');
 }
@@ -417,7 +423,7 @@ async function refresh(force = false): Promise<void> {
     const results = await Promise.allSettled([
       api<CollectorStatus>('/api/status', { signal: controller.signal }),
       api<NodeInfo[]>(statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : '/api/nodes', { signal: controller.signal }),
-      api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query()}`, { signal: controller.signal })
+      api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal })
     ]);
     if (controller.signal.aborted || refreshController !== controller) return;
     const [status, nodes, history] = results;

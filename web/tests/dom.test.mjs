@@ -69,12 +69,40 @@ test('opt-in member basis stays explicit without adding aggregate dimensions', a
   assert.ok(get('quality-notice').textContent.includes('实际成员维度'));
   assert.ok(get('quality-notice').textContent.includes('business、excluded、unknown'));
   assert.ok(get('quality-notice').textContent.includes('历史遗留开放缺口'));
+  assert.ok(get('attribution-note').textContent.includes('接入前累计不回填'));
+  assert.ok(get('attribution-note').textContent.includes('直连量单独保存在 excluded'));
+  assert.ok(!get('attribution-note').textContent.includes('test.2'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
 test('backend node labels are inserted as text, not HTML', async t => {
   const name = '<img src=x onerror=alert(1)>';
   const { w, get } = await fixture(t, { '/api/history': () => Response.json({ ...history, nodes: [{ ...history.nodes[0], name }], records: [{ ...history.records[0], nodeName: name }] }) });
   assert.ok(get('ranking').textContent.includes(name)); assert.deepEqual([...w.document.querySelectorAll('img')], [w.document.querySelector('.brand > img.brand-symbol')]);
+});
+test('local details request nonzero rows while export retains its raw query', async t => {
+  const { w, calls, get } = await fixture(t, {
+    '/api/history': parsed => Response.json({ ...history, recordCount: 1,
+      records: parsed.searchParams.get('nonZeroRecords') === 'true' ? history.records : [
+        { ...history.records[0], upload: '0', download: '0' }, ...history.records] })
+  });
+  assert.equal(calls.find(c => c.path === '/api/history').query.get('nonZeroRecords'), 'true');
+  assert.equal(get('records').rows.length, 1);
+  assert.equal(get('record-count').textContent, '1 条非零记录');
+  assert.equal(get('next-page').disabled, true);
+  w.URL.createObjectURL = () => 'blob:synthetic-export';
+  w.URL.revokeObjectURL = () => {};
+  w.HTMLAnchorElement.prototype.click = () => {};
+  get('export-button').click();
+  await until(() => calls.some(c => c.path === '/api/export'));
+  assert.equal(calls.find(c => c.path === '/api/export').query.has('nonZeroRecords'), false);
+});
+test('zero-only local details explain that records are hidden without hiding quality warnings', async t => {
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, recordCount: 0, records: [], gapCount: 1,
+      gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', reason: 'snapshot_changed', isOpen: false }] })
+  });
+  assert.ok(get('records').textContent.includes('零字节记录已隐藏'));
+  assert.ok(get('gap-list').textContent.includes('快照'));
 });
 test('custom dates, bucket, node and pagination retain independent semantics', async t => {
   const { w, get, change, calls, submit } = await fixture(t);

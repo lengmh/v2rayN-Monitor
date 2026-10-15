@@ -150,8 +150,13 @@ public static class SingboxParser
                     : type is not ("socks" or "http" or "shadowsocks" or "vmess" or "vless" or "trojan" or "anytls" or "hysteria2" or "tuic")
                         ? "unsupported_member_type" : null;
                 if (unavailableReason is not null) unavailable.Add(tag, unavailableReason);
-                else candidates.Add(tag, new(tag, type, tag == "proxy" && type == "anytls"
-                    && !string.IsNullOrEmpty(snapshot.NodeId) ? snapshot.NodeId : null));
+                else
+                {
+                    var nodeId = tag == "proxy" && type == "anytls" && !string.IsNullOrEmpty(snapshot.NodeId)
+                        ? snapshot.NodeId : null;
+                    candidates.Add(tag, new(tag, type, nodeId)
+                    { DisplayName = nodeId is null ? MemberDisplayName(entries, tag) : null });
+                }
             }
             catalog = new(snapshot.InstanceId, snapshot.Generation, snapshot.ProcessIdentity,
                 new ReadOnlyDictionary<string, SingboxMemberIdentity>(candidates),
@@ -160,6 +165,21 @@ public static class SingboxParser
             return true;
         }
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { return false; }
+    }
+
+    private static string? MemberDisplayName(JsonElement[] entries, string tag)
+    {
+        JsonElement[] Parents(string type) => entries.Where(x => Text(x, "type") == type
+            && Read(x, "outbounds") is { ValueKind: JsonValueKind.Array } members
+            && members.EnumerateArray().Any(y => y.ValueKind == JsonValueKind.String && y.GetString() == tag)).ToArray();
+        var parents = Parents("selector");
+        if (parents.Length == 0) parents = Parents("urltest");
+        if (parents.Length != 1) return null; // A shared member does not prove which group routed its traffic.
+        var group = Text(parents[0], "tag");
+        var separator = group.IndexOf("-proxy-", StringComparison.Ordinal);
+        var label = separator > 0 && group[..separator].All(char.IsAsciiDigit) ? group[(separator + 7)..] : group;
+        var member = tag.StartsWith(group + "-", StringComparison.Ordinal) ? tag[(group.Length + 1)..] : tag;
+        return $"【{label}】 {member}";
     }
 
     public static bool MatchesSelectedConnection(IReadOnlyDictionary<string, string?> profile,
