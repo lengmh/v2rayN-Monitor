@@ -291,10 +291,12 @@ public sealed class Ledger : IDisposable
                 }
             var count = checked((int)Scalar(transaction, """
                 SELECT (SELECT COUNT(*) FROM minutes WHERE start_ticks >= $start AND start_ticks < $end AND ($node IS NULL OR node_key=$node)
-                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY)))
+                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY))
+                            AND ($nonzero=0 OR upload<>0 OR download<>0))
                      + (SELECT COUNT(*) FROM unallocated WHERE start_ticks < $end AND end_ticks > $start AND ($node IS NULL OR node_key=$node)
-                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY)));
-                """, parameters));
+                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY))
+                            AND ($nonzero=0 OR upload<>0 OR download<>0));
+                """, [.. parameters, ("$nonzero", query.NonZeroRecords ? 1 : 0)]));
             var gaps = checked((int)Scalar(transaction, """
                 SELECT COUNT(*) FROM gaps
                 WHERE ((start_ticks < $end AND end_ticks > $start)
@@ -323,7 +325,7 @@ public sealed class Ledger : IDisposable
                 while (reader.Read())
                     gapDetails.Add(new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2), reader.GetInt64(3) != 0));
             var records = new List<TrafficRow>();
-            using (var command = RecordCommand(transaction, query, query.PageSize, checked((long)query.Page * query.PageSize)))
+            using (var command = RecordCommand(transaction, query, query.PageSize, checked((long)query.Page * query.PageSize), query.NonZeroRecords))
             using (var reader = command.ExecuteReader())
                 while (reader.Read()) records.Add(ReadRecord(reader));
             transaction.Commit();
@@ -363,7 +365,7 @@ public sealed class Ledger : IDisposable
         }
     }
 
-    private SqliteCommand RecordCommand(SqliteTransaction? transaction, QuerySpec query, int limit, long offset) =>
+    private SqliteCommand RecordCommand(SqliteTransaction? transaction, QuerySpec query, int limit, long offset, bool nonZero = false) =>
         Command(transaction, """
             SELECT m.start_ticks AS start_ticks,m.start_ticks+$minute AS end_ticks,m.node_key AS node_key,n.name,m.upload,m.download,
                 CASE WHEN m.synthetic=1 THEN 'synthetic' WHEN m.approximate=1 THEN 'approximate' ELSE 'measured' END AS quality,
@@ -373,6 +375,7 @@ public sealed class Ledger : IDisposable
             FROM minutes m JOIN nodes n ON n.node_key=m.node_key
             WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
                 AND ($name IS NULL OR n.name=$name COLLATE BINARY)
+                AND ($nonzero=0 OR m.upload<>0 OR m.download<>0)
             UNION ALL
             SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download,
                 CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
@@ -382,10 +385,11 @@ public sealed class Ledger : IDisposable
             FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
             WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
                 AND ($name IS NULL OR n.name=$name COLLATE BINARY)
+                AND ($nonzero=0 OR u.upload<>0 OR u.download<>0)
             ORDER BY start_ticks DESC,node_key,kind,row_id LIMIT $limit OFFSET $offset;
             """,
             ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey), ("$name", query.NodeName),
-            ("$minute", Minute), ("$limit", limit), ("$offset", offset));
+            ("$minute", Minute), ("$limit", limit), ("$offset", offset), ("$nonzero", nonZero ? 1 : 0));
 
     private static TrafficRow ReadRecord(SqliteDataReader reader) =>
         new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2),

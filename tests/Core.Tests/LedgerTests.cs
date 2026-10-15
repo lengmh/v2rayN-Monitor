@@ -639,6 +639,29 @@ public sealed class LedgerTests : IDisposable
         new(basis, Epoch.AddYears(-2), Epoch.AddYears(3), "UTC", ScopeId: id, Page: page, PageSize: size);
 
     [Fact]
+    public void ScopeNonZeroDetailsFilterBeforePagingWithoutChangingTotalsGapsOrExport()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        ledger.Accept(Batch(0, Reading("a", 0), Reading("idle", 0)));
+        ledger.Accept(Batch(1, Reading("a", 5, 7), Reading("idle", 0)));
+        ledger.Accept(Batch(61, Reading("a", 5, 7), Reading("idle", 0)));
+        var all = ledger.Query(ScopeAll());
+        var filtered = ledger.Query(ScopeAll(size: 1) with { NonZeroRecords = true });
+        Assert.Equal(4, all.RecordCount);
+        Assert.Equal(1, filtered.RecordCount);
+        var row = Assert.Single(filtered.Records);
+        Assert.Equal("5", row.Upload);
+        Assert.Equal("7", row.Download);
+        Assert.Equal(all.Upload, filtered.Upload);
+        Assert.Equal(all.Download, filtered.Download);
+        Assert.Equal(all.Scopes, filtered.Scopes);
+        Assert.Equal(all.Series, filtered.Series);
+        Assert.Equal(all.Gaps, filtered.Gaps);
+        Assert.Empty(ledger.Query(ScopeAll(page: 1, size: 1) with { NonZeroRecords = true }).Records);
+        Assert.Equal(4, ledger.Export(ScopeAll() with { NonZeroRecords = true }).Count);
+    }
+
+    [Fact]
     public void ScopeLedgerIsOptInAndNeverMigratesAnExistingFile()
     {
         using (var original = new Ledger(Database)) original.Accept(Sample(0, 50));

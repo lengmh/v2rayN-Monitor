@@ -19,7 +19,10 @@ public sealed record V2RayMemberStatistics(
 {
     public string Basis => "actual_member";
 }
-public sealed record SingboxMemberIdentity(string OutboundTag, string Protocol, string? IndexId);
+public sealed record SingboxMemberIdentity(string OutboundTag, string Protocol, string? IndexId)
+{
+    public string? DisplayName { get; init; }
+}
 // Candidates come from an independently verified configuration, not names returned by the RPC.
 public sealed record SingboxMemberCatalog(string InstanceId, string Generation, string ProcessIdentity,
     IReadOnlyDictionary<string, SingboxMemberIdentity> Candidates,

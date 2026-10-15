@@ -74,6 +74,48 @@ public sealed class ApiTests : IAsyncLifetime
         server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NonZeroDetailOptionFiltersPaginationButNeverTotalsOrRawExport(bool scopeMode)
+    {
+        if (scopeMode)
+        {
+            await server.DisposeAsync();
+            client.Dispose();
+            V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
+            server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+            client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        }
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        foreach (var second in new[] { 0, 1, 61 })
+        {
+            if (scopeMode)
+                server.Scopes!.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at.AddSeconds(second),
+                    [new(new("actual_member", "index_id", "active", "Synthetic active", "active", "active"), second == 0 ? 0 : 5, second == 0 ? 0 : 7),
+                     new(new("actual_member", "index_id", "idle", "Synthetic idle", "idle", "idle"), 0, 0)], []));
+            else
+            {
+                server.Ledger.Accept(new("synthetic-active-instance", "active", "Synthetic active", "core", "config", at.AddSeconds(second), second == 0 ? 0 : 5, second == 0 ? 0 : 7));
+                server.Ledger.Accept(new("synthetic-idle-instance", "idle", "Synthetic idle", "core", "config", at.AddSeconds(second), 0, 0));
+            }
+        }
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var all = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        var filtered = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nonZeroRecords=true&pageSize=1");
+        Assert.Equal(4, all.GetProperty("recordCount").GetInt32());
+        Assert.Equal(1, filtered.GetProperty("recordCount").GetInt32());
+        Assert.Equal("5", filtered.GetProperty("records")[0].GetProperty("upload").GetString());
+        foreach (var field in new[] { "upload", "download", "series", "nodes", "gaps" })
+            Assert.Equal(all.GetProperty(field).GetRawText(), filtered.GetProperty(field).GetRawText());
+        var secondPage = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nonZeroRecords=true&pageSize=1&page=1");
+        Assert.Empty(secondPage.GetProperty("records").EnumerateArray());
+        Assert.Equal(await client.GetStringAsync("/api/export" + query),
+            await client.GetStringAsync("/api/export" + query + "&nonZeroRecords=true"));
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&nonZeroRecords=invalid")).StatusCode);
+    }
+
     [Fact] public async Task ReadAndWriteApisRequireSession()
     {
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/status")).StatusCode);
