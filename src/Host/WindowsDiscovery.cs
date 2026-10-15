@@ -33,6 +33,8 @@ public sealed class WindowsDiscovery : IDisposable
     private readonly SemaphoreSlim gate = new(1, 1);
     internal const string ApprovedSingboxSha256 = "C053F7C9D82C7FC241E60045ADFB399A44F4FDEB4E12CEF91C5F95244E3301BA";
     internal const string ApprovedMemberSingboxSha256 = "B1C6F3AA48F21AE070EF283D10AE946C189421F7C9F498CCAA5657D2B0E7E15E";
+    // CI 38751295368, artifact 11980964000: outer digest, provenance and inner EXE verified.
+    internal const string ApprovedProbeSingboxSha256 = "595B4B3FEDE70FC23CA645DCF7B5A4AB6F91E5E7938DB0CA77D50EB0F8376695";
     private string? verifiedExtension;
 
     // The single collection loop calls this only after Ledger.Accept/RecordGap commits.
@@ -96,7 +98,8 @@ public sealed class WindowsDiscovery : IDisposable
         finally { gate.Release(); }
     }
 
-    public async Task<ScopeCollectorReading> ReadScopesAsync(string dataRoot, CancellationToken cancellationToken)
+    public async Task<ScopeCollectorReading> ReadScopesAsync(string dataRoot, CancellationToken cancellationToken,
+        bool includeProbes = false)
     {
         if (!OperatingSystem.IsWindows()) return new(null, "unsupported_platform", "多范围发现只支持 Windows。");
         if (string.IsNullOrWhiteSpace(dataRoot))
@@ -118,14 +121,15 @@ public sealed class WindowsDiscovery : IDisposable
             {
                 try
                 {
-                    return capture.Snapshot.CoreName == "sing-box"
-                        ? (await V2RayStatistics.ReadMembersAsync(client, capture.Snapshot.MetricsEndpoint,
-                            capture.Catalog!.Candidates.Keys.ToArray(), token).ConfigureAwait(false), null)
-                        : (null, await ReadXrayCounters(capture.Snapshot.MetricsEndpoint, token).ConfigureAwait(false));
+                    if (capture.Snapshot.CoreName != "sing-box")
+                        return (null, await ReadXrayCounters(capture.Snapshot.MetricsEndpoint, token).ConfigureAwait(false), null);
+                    var statistics = await V2RayStatistics.ReadScopesAsync(client, capture.Snapshot.MetricsEndpoint,
+                        capture.Catalog!.Candidates.Keys.ToArray(), token).ConfigureAwait(false);
+                    return (statistics?.Members, null, statistics?.Probes);
                 }
                 catch (IOException) { throw new HttpRequestException("Statistics response interrupted."); }
             },
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken, includeProbes).ConfigureAwait(false);
         }
         catch (DiscoveryException e)
         { guard.InvalidateContinuity(); return new(null, e.State, e.SafeMessage, InvalidateContinuity: true); }
@@ -141,8 +145,8 @@ public sealed class WindowsDiscovery : IDisposable
 
     // The test seam supplies synthetic captures/counters; native process discovery is not bypassed in production.
     internal async Task<ScopeCollectorReading> ReadScopesBoundAsync(Func<ScopeCapture> capture,
-        Func<ScopeCapture, CancellationToken, Task<(V2RayMemberStatistics? Members, XrayCounters? Legacy)>> read,
-        CancellationToken cancellationToken)
+        Func<ScopeCapture, CancellationToken, Task<(V2RayMemberStatistics? Members, XrayCounters? Legacy, V2RayProbeStatistics? Probes)>> read,
+        CancellationToken cancellationToken, bool includeProbes = false)
     {
         var before = capture();
         if (!guard.Observe(before.Snapshot, out var reason))
@@ -155,19 +159,41 @@ public sealed class WindowsDiscovery : IDisposable
         if (!guard.Accept(before.Snapshot, after.Snapshot, out reason))
             return new(null, reason, "采样前后核心、配置或身份变化，本次保留缺口。", after.Snapshot.NodeName, true);
         ScopeBatch batch;
+        ProbeCollectionStatus? probeStatus = null;
         if (after.Snapshot.CoreName == "sing-box")
         {
             // An unusable whole RPC remains a complete directory of unavailable scopes.
             var stats = counters.Members ?? new V2RayMemberStatistics(new Dictionary<string, XrayCounters>(),
                 new Dictionary<string, string>(), new Dictionary<string, XrayCounters>(), new Dictionary<string, string>());
-            batch = ScopeCollector.Project(after, stats, at, guard.RequiresBaseline);
+            if (includeProbes)
+            {
+                var probes = counters.Probes ?? new V2RayProbeStatistics(new Dictionary<string, XrayCounters>(),
+                    new Dictionary<string, string>(), new Dictionary<string, XrayCounters>(), new Dictionary<string, string>());
+                batch = ScopeCollector.ProjectWithProbes(after, stats, probes, at, guard.RequiresBaseline);
+                var readings = batch.Readings.Where(x => x.Scope.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal)).ToArray();
+                var state = counters.Probes is null ? "unavailable"
+                    : probes.Members.Count == 0 && probes.Totals.Count == 0 &&
+                        probes.UnavailableMembers.Values.Concat(probes.UnavailableTotals.Values).All(x => x == "missing_counter") ? "unsupported"
+                    : readings.Any(x => x.UnavailableReason is not null || x.PartialCoverage) ? "partial" : "available";
+                probeStatus = new(true, state, state switch
+                {
+                    "unsupported" => "当前核心未提供 URLTest 探测计数；业务采集继续，探测量保持未知。",
+                    "unavailable" => "URLTest 探测响应不可用，保留缺口。",
+                    "partial" => "URLTest 探测部分范围计数未知，未补零。",
+                    _ => "已读取 URLTest 探测流字节；业务与探测分别保存，首次基线不回填。"
+                });
+            }
+            else batch = ScopeCollector.Project(after, stats, at, guard.RequiresBaseline);
         }
         else if (counters.Legacy is { } legacy)
+        {
             batch = ScopeCollector.ProjectLegacy(after.Snapshot, legacy, at, guard.RequiresBaseline);
+            if (includeProbes) probeStatus = new(true, "unsupported", "当前 Xray 路径未接入内部探测计量；业务采集继续。");
+        }
         else return new(null, "missing_counters", "proxy 计数不可用。", after.Snapshot.NodeName, guard.RequiresBaseline);
         return new(batch, "connected", after.Snapshot.CoreName == "sing-box"
             ? "实际成员维度；business、excluded、unknown 单独保存，不相加。"
-            : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。", after.Snapshot.NodeName, guard.RequiresBaseline);
+            : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。", after.Snapshot.NodeName, guard.RequiresBaseline, probeStatus);
     }
 
     private async Task<XrayCounters?> ReadXrayCounters(Uri endpoint, CancellationToken cancellationToken)
@@ -276,10 +302,14 @@ public sealed class WindowsDiscovery : IDisposable
         if (identity == verifiedExtension) return;
         using var stream = new FileStream(core.ExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
-        if (hash != (memberMode ? ApprovedMemberSingboxSha256 : ApprovedSingboxSha256) || Stamp(core.ExecutablePath) != stamp)
+        if (!IsApprovedExtension(hash, memberMode) || Stamp(core.ExecutablePath) != stamp)
             throw Fail("unsupported_core", "sing-box 扩展与此预览已核实的构建不一致；当前流量保持未知。");
         verifiedExtension = identity;
     }
+
+    internal static bool IsApprovedExtension(string hash, bool memberMode) => memberMode
+        ? hash is ApprovedMemberSingboxSha256 or ApprovedProbeSingboxSha256
+        : hash == ApprovedSingboxSha256;
 
     private static bool IsCoreName(string name) => name.Equals("xray.exe", StringComparison.OrdinalIgnoreCase)
         || name.Equals("sing-box.exe", StringComparison.OrdinalIgnoreCase)

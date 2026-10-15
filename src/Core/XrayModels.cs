@@ -28,6 +28,7 @@ public sealed record V2RayProbeStatistics(
 {
     public string ProbeKind => "urltest";
 }
+public sealed record V2RayScopeStatistics(V2RayMemberStatistics Members, V2RayProbeStatistics Probes);
 public sealed record SingboxMemberIdentity(string OutboundTag, string Protocol, string? IndexId)
 {
     public string? DisplayName { get; init; }
@@ -39,7 +40,7 @@ public sealed record SingboxMemberCatalog(string InstanceId, string Generation, 
 public sealed record ScopeCapture(XraySnapshot Snapshot, SingboxMemberCatalog? Catalog,
     IReadOnlyList<string> EnabledMembers);
 public sealed record ScopeCollectorReading(ScopeBatch? Batch, string State, string Message,
-    string? CurrentNode = null, bool InvalidateContinuity = false);
+    string? CurrentNode = null, bool InvalidateContinuity = false, ProbeCollectionStatus? Probes = null);
 public sealed record XrayGuiSelection(string IndexId, bool EnableStatistics, bool DisplayRealTimeSpeed, bool EnableTun)
 {
     public bool StatisticsRequested => EnableStatistics || DisplayRealTimeSpeed;

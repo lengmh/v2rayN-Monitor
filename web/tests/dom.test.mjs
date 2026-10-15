@@ -74,6 +74,61 @@ test('opt-in member basis stays explicit without adding aggregate dimensions', a
   assert.ok(!get('attribution-note').textContent.includes('test.2'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
+test('probe page keeps basis, filters, export and business navigation separate', async t => {
+  const { w, get, change, calls } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Synthetic collection', demo: false,
+      currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'available', message: 'Synthetic probes available' } }),
+    '/api/history': url => {
+      const basis = url.searchParams.get('basis');
+      return Response.json(basis ? { ...history, basis, upload: '100', download: '23',
+        earliestRecord: '2026-10-01T10:00:00Z',
+        nodes: [{ key: 'scope:99', name: 'Synthetic probe', upload: '100', download: '23' }],
+        records: [{ ...history.records[0], nodeKey: 'scope:99', nodeName: 'Synthetic probe', upload: '100', download: '23' }], recordCount: 1 } : history);
+    },
+    '/api/nodes': url => Response.json(url.searchParams.has('basis') ? [{ key: 'scope:99', name: 'Synthetic probe' }] : [{ key: 'a', name: 'Synthetic A' }])
+  });
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('total-exact').textContent === '123 bytes');
+  assert.equal(get('statistics-title').textContent, '探测流量');
+  assert.equal(get('source-controls').hidden, true);
+  assert.equal(get('probe-controls').hidden, false);
+  assert.ok(get('probe-coverage').textContent.includes('2026-10-01'));
+  assert.ok(get('probe-coverage').textContent.includes('不是精确的首次基线'));
+  assert.ok(get('probe-notice').textContent.includes('不能直接换算服务商计费'));
+  change('node-filter', 'scope:99');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === 'scope:99');
+  for (const basis of ['probe_urltest_business', 'probe_urltest_excluded', 'probe_urltest_unknown']) {
+    change('probe-basis', basis);
+    await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === basis);
+    assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('nodeKey'), false);
+    await until(() => get('total-exact').textContent === '123 bytes');
+  }
+  w.URL.createObjectURL = () => 'blob:synthetic-probes';
+  w.URL.revokeObjectURL = () => {};
+  w.HTMLAnchorElement.prototype.click = () => {};
+  get('export-button').click();
+  await until(() => calls.some(c => c.path === '/api/export'));
+  const exported = calls.find(c => c.path === '/api/export').query;
+  assert.equal(exported.get('basis'), 'probe_urltest_unknown');
+  assert.equal(exported.has('nonZeroRecords'), false);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '16.106 GB');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+  assert.equal(get('probe-notice').hidden, true);
+});
+test('disabled probe history remains unknown without querying or exporting business as probes', async t => {
+  const { w, get, calls } = await fixture(t);
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('total-exact').textContent === '探测量未知');
+  assert.equal(get('total-value').textContent, '—');
+  assert.equal(get('export-button').disabled, true);
+  assert.equal(get('probe-state').textContent, '探测历史未启用');
+  assert.equal(calls.some(c => c.path === '/api/history' && c.query.has('basis')), false);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '16.106 GB');
+  assert.equal(get('export-button').disabled, false);
+});
 test('backend node labels are inserted as text, not HTML', async t => {
   const name = '<img src=x onerror=alert(1)>';
   const { w, get } = await fixture(t, { '/api/history': () => Response.json({ ...history, nodes: [{ ...history.nodes[0], name }], records: [{ ...history.records[0], nodeName: name }] }) });
