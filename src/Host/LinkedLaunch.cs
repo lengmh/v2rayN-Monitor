@@ -106,8 +106,12 @@ internal static class LinkedLaunch
                     throw new InvalidOperationException("存在多个 v2rayN 进程，暂不尝试启动另一实例。");
                 if (running.Length == 1)
                 {
-                    // Only an exact executable-path match proves that the selected target is already running.
-                    // The limited-access query also works for many elevated processes; unreadable stays unknown.
+                    // A same-path client in another Windows login session is not our active instance.
+                    using var current = Process.GetCurrentProcess();
+                    if (running[0].SessionId != current.SessionId)
+                        throw new InvalidOperationException("v2rayN 在另一 Windows 登录会话运行，暂不复用该进程。");
+                    // The limited-access path query also works for many elevated processes;
+                    // unreadable stays unknown instead of being treated as a confirmed match.
                     var existing = WindowsProcessReader.Read(running[0].Id);
                     if (existing is null || !existing.IsAlive || string.IsNullOrWhiteSpace(existing.ExecutablePath))
                         throw new InvalidOperationException("无法核实已运行的 v2rayN 程序路径，暂不重复启动。");
