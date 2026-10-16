@@ -20,6 +20,8 @@ v2rayN 本机采集是主来源，CSV 只是偶尔补充。HTML 为主要管理�
 
 ## 当前阶段
 
+2026-10-16 17:41:01，用户退出Monitor后已启用精确9e51a8d push CI包，原--probe-ledger/原v3目录。三项精确CI成功；锁下备份和独立逐值比较通过。实际8批次首接不回填、后续7段Xray proxy累计与入账一致，旧109范围/分钟及未分时历史、provider/设置保留，新增一个legacy_proxy范围。唯一进程/回环HTTP/未认证401通过，Xray未重启、sing-box未替换、启动项未改。仅恢复Xray proxy部分采集，其他出站/探测未覆盖；此前sing-box连通性异常尚未归因。临时验收查询派生字段误用已修正并用原保存批次复核；详情见STATUS。本次文档CI另核。
+
 2026-10-16用户因连通性异常自行切换Xray后，确认metrics可用但Monitor被多出站/balancer旧限制阻断。本批源码允许独立已核实proxy与额外出站/组共存，仍仅计proxy并持久披露部分覆盖，legacy_proxy不变；链/身份/代次保护保持，Xray内部探测未拆分。Core344/Server38/前端57/Host Release通过，当前Xray真实只读发现3轮connected，未写真实账本/启用新包；精确CI及Monitor接入待核。无需重启Xray/替换sing-box/迁移v3，启用前提醒用户退出Monitor。sing-box此前连接异常尚未复现归因，不把本修复说成解决其连通性。详见STATUS。
 
 2026-10-16 用户退出Monitor后，15:21:46已启用精确d2dcae4 push CI包，原--probe-ledger/原v3目录，test.5及核心代次不变。锁下SQLite备份后独立比较11表历史/2表provider/全部DDL和设置一致；109范围保留，74当前游标匹配。8个新批次含停机恢复逐范围累计差与入账差一致，业务/直连/自然探测停机量全部保存为未分时，collector_stopped关闭，provider/设置保留。15:26:13自然GUI原样保存跨窗，实际运行包16批次/15段/74范围对账一致且无新缺口。唯一进程/参数/回环HTTP与未认证401通过；实际启动项未改，新页目视待验。本次文档提交CI另核。详见STATUS；旧6c280ca支持v3，可在退出新Monitor后同目录接回，不自动恢复旧备份丢新历史。
