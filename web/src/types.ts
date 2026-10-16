@@ -1,5 +1,5 @@
 export interface Settings { v2rayNPath: string; timeZoneId: string; demo: boolean }
-export interface ProxyCollectionScope { basis: 'routed_proxy'; isPartial: boolean; uncollectedOutbounds: number; uncollectedGroups: number; description: string }
+export interface ProxyCollectionScope { basis: 'routed_proxy' | 'xray_outbound_proxy'; isPartial: boolean; uncollectedOutbounds: number; uncollectedGroups: number; description: string }
 export interface CollectorStatus { state: string; message: string; currentNode: string | null; lastSample: string | null; uploadPerSecond: string | null; downloadPerSecond: string | null; demo: boolean; scope?: ProxyCollectionScope | null; collectionBasis?: string; probes?: { historyEnabled: boolean; state: string; message: string } | null }
 export interface NodeInfo { key: string; name: string }
 export interface TrafficRow { start: string; end: string; nodeKey: string; nodeName: string; upload: string; download: string; quality: string; partialCoverage?: boolean }

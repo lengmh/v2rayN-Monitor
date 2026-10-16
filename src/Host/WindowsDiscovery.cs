@@ -193,7 +193,8 @@ public sealed class WindowsDiscovery : IDisposable
         else return new(null, "missing_counters", "proxy 计数不可用。", after.Snapshot.NodeName, guard.RequiresBaseline);
         return new(batch, "connected", after.Snapshot.CoreName == "sing-box"
             ? "实际成员维度；business、excluded、unknown 单独保存，不相加。"
-            : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。", after.Snapshot.NodeName, guard.RequiresBaseline, probeStatus);
+            : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。", after.Snapshot.NodeName, guard.RequiresBaseline, probeStatus,
+            after.Snapshot.CoreName == "Xray" ? after.Snapshot.Scope : null);
     }
 
     private async Task<XrayCounters?> ReadXrayCounters(Uri endpoint, CancellationToken cancellationToken)
@@ -364,7 +365,7 @@ public sealed class WindowsDiscovery : IDisposable
                     ? Fail(configurationReason, "有效配置没有可用的回环 Xray metrics 统计；请在 v2rayN 中检查统计设置。")
                     : type == 11
                     ? Fail("unsupported_mode", "无法核实独立的 AnyTLS proxy 计量范围；proxy 链、TUN、endpoints 或已有自定义统计配置尚未支持。")
-                    : Fail("unsupported_mode", "仅支持可核实的单 proxy 出站；自定义配置、策略组、代理链和多代理出站暂不支持。");
+                    : Fail("unsupported_mode", "无法核实 Xray proxy 出站及统计范围；代理链或无效出站配置暂不支持。");
             configuration = parsedConfiguration!;
             if ((type == 11 ? "anytls" : XrayParser.ProtocolForConfigType(type)) != configuration.Protocol)
                 throw Fail("unsupported_mode", "当前节点类型或内核与已读取的 Xray 配置不一致。");

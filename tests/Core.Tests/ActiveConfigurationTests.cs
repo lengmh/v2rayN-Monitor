@@ -1311,6 +1311,46 @@ public sealed class ActiveConfigurationTests : IDisposable
     }
 
     [Fact]
+    public async Task XrayPartialDiscoveryPersistsCoverageAndDoesNotMixPreviousMemberCounters()
+    {
+        CreateProfiles(Profile());
+        var config = Change(Configuration, root =>
+        {
+            root["outbounds"]!.AsArray().Add(new JsonObject { ["tag"] = "other", ["protocol"] = "vless" });
+            root["routing"] = JsonNode.Parse("""{"balancers":[{"tag":"group","selector":["other"]}]}""");
+        });
+        Assert.Equal("Same synthetic name", WindowsDiscovery.ReadProfile(Profiles, "A", Bytes(Gui),
+            Bytes(config), out var configuration));
+        var snapshot = Snapshot() with { Scope = configuration.Scope };
+        var capture = new ScopeCapture(snapshot, null, []);
+        using var discovery = new WindowsDiscovery();
+        using var ledger = ScopeLedger.CreateNew(History, includeProbes: true);
+        async Task<ScopeCollectorReading> Read(long up, long down) =>
+            await discovery.ReadScopesBoundAsync(() => capture,
+                (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((null, new(up, down), null)),
+                CancellationToken.None, includeProbes: true);
+        var previous = ScopeCollector.ProjectWithProbes(ScopeFixture(), ScopeCounters(900, 800),
+            new(new Dictionary<string, XrayCounters>(), new Dictionary<string, string>(),
+                new Dictionary<string, XrayCounters>(), new Dictionary<string, string>()), Start.AddSeconds(-1));
+        ScopeCollector.Commit(ledger, previous);
+        var first = await Read(100, 200);
+        Assert.Equal("connected", first.State);
+        Assert.Equal(configuration.Scope, first.Scope);
+        Assert.Equal("unsupported", first.Probes!.State);
+        Assert.All(ScopeCollector.Commit(ledger, first.Batch! with { At = Start }).Scopes.Values,
+            status => Assert.Equal("baseline", status));
+        discovery.AcknowledgePersistence();
+        var second = await Read(113, 229);
+        ScopeCollector.Commit(ledger, second.Batch! with { At = Start.AddSeconds(1) });
+        var result = ledger.Query(new ScopeQuery("legacy_proxy", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC"));
+        Assert.Equal("13", result.Upload);
+        Assert.Equal("29", result.Download);
+        Assert.All(result.Records, row => Assert.True(row.PartialCoverage));
+        Assert.Contains(result.Gaps, gap => gap.Reason == "uncollected_outbounds");
+        Assert.Equal("0", ledger.Query(new ScopeQuery("actual_member", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC")).Upload);
+    }
+
+    [Fact]
     public void ScopeXrayProjectionPreservesLegacyBasisAndIntegerCounters()
     {
         var batch = ScopeCollector.ProjectLegacy(Snapshot(), new(9007199254740993, 7), Start, true);

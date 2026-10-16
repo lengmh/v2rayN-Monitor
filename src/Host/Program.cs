@@ -178,7 +178,7 @@ internal sealed class TrayContext : ApplicationContext
                     var baseline = result.Scopes.Values.All(x => x is "baseline" or "reset");
                     server.SetStatus(new(unavailable != 0 ? "partial" : baseline ? "baseline" : "collecting",
                         reading.Message + (unavailable == 0 ? "" : $" {unavailable} 个范围计数未知，未补零。"),
-                        reading.CurrentNode, batch.At, CollectionBasis: basis, Probes: reading.Probes));
+                         reading.CurrentNode, batch.At, Scope: reading.Scope, CollectionBasis: basis, Probes: reading.Probes));
                 }
                 else
                 {
