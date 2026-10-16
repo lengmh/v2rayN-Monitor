@@ -49,6 +49,7 @@ let latestStatus: CollectorStatus | null = null;
 let lastBatchList: ImportBatch[] = [];
 let activeView = 'overview';
 let probeBasis = 'probe_urltest_member';
+let rankingMode: 'ranking' | 'share' = 'ranking';
 const probeView = (): boolean => activeView === 'probes';
 let importRequest: { source: string; timeZoneId: string; csv: string } | null = null;
 let importRevision = 0;
@@ -168,6 +169,106 @@ function recordTrafficCell(value: string): HTMLTableCellElement {
   cell.append(amount);
   return cell;
 }
+type RankingItem = { key: string; name: string; total: bigint; upload?: bigint; download?: bigint; recovered?: bigint };
+function renderRanking(items: RankingItem[], provider = false): void {
+  const ranking = el('ranking'); ranking.replaceChildren();
+  const metric = (item: RankingItem): bigint => item.total;
+  const total = items.reduce((sum, item) => sum + metric(item), 0n);
+  const sorted = [...items].sort((a, b) => {
+    const x = metric(a), y = metric(b);
+    return x > y ? -1 : x < y ? 1 : a.name.localeCompare(b.name);
+  });
+  const aggregate = probeView() && probeBasis !== 'probe_urltest_member';
+  const share = rankingMode === 'share' && !aggregate;
+  ranking.classList.toggle('show-shares', share);
+  el<HTMLButtonElement>('ranking-share').disabled = aggregate;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-ranking-mode]')) {
+    const selected = button.dataset.rankingMode === (share ? 'share' : 'ranking');
+    button.classList.toggle('selected', selected); button.setAttribute('aria-pressed', String(selected));
+  }
+  const display = (value: bigint): string => provider ? formatProviderTotal(providerUnitsText(value), unit) : formatBytes(value, unit);
+  const precise = (value: bigint): string => provider ? exactProviderTotal(providerUnitsText(value)) : exactBytes(value);
+  const colors = ['#087f79', '#477da5', '#a27038', '#785a9c', '#b15369', '#557a39', '#4d8291', '#717b87'];
+  if (!sorted.length) {
+    ranking.append(element('p', '所选范围尚无节点记录', 'empty-state'));
+    return;
+  }
+  if (share && total === 0n) {
+    ranking.append(element('p', sorted.length ? '所选范围只有零值记录' : '所选范围尚无节点记录', 'empty-state'));
+    return;
+  }
+  if (share) {
+    const chart = element('div', '', 'share-chart');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 120 120');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', '节点流量占比，分母为当前筛选下全部节点的合计；明细见下方列表');
+    let cumulative = 0n, previous = 0;
+    sorted.forEach((node, index) => {
+      cumulative += node.total;
+      const end = percentage(cumulative, total), length = end - previous;
+      if (length > 0) {
+        const circle = document.createElementNS(svg.namespaceURI, 'circle');
+        for (const [name, value] of Object.entries({ cx: '60', cy: '60', r: '44', fill: 'none', stroke: colors[index % colors.length],
+          'stroke-width': '16', pathLength: '100', 'stroke-dasharray': `${length} ${100 - length}`,
+          'stroke-dashoffset': String(-previous), transform: 'rotate(-90 60 60)' })) circle.setAttribute(name, value);
+        svg.append(circle);
+      }
+      previous = end;
+    });
+    chart.append(svg, element('span', display(total), 'share-total'));
+    ranking.append(chart);
+  }
+  const max = metric(sorted[0]);
+  sorted.forEach((node, index) => {
+    const row = element('div', '', `rank-row ${share ? 'share-mode' : ''}`);
+    const heading = element('div', '', 'rank-heading');
+    const name = element('button', node.name || '未归属', 'rank-node');
+    name.type = 'button'; name.title = node.name || '未归属';
+    name.addEventListener('click', () => {
+      nodeKey = provider ? node.name : node.key;
+      el<HTMLSelectElement>('node-filter').value = nodeKey; page = 0; void refresh(true);
+    });
+    const value = metric(node);
+    const recovery = node.recovered ?? 0n;
+    const valueBox = element('span', '', 'rank-value-box');
+    const marker = element('button', recovery > 0n ? '[恢复]' : '', 'rank-recovery-marker');
+    marker.type = 'button';
+    if (recovery > 0n) {
+      marker.title = `已计入恢复量 ${exactBytes(recovery)}`;
+      marker.addEventListener('click', () => showExactValue(marker.title));
+    } else {
+      marker.classList.add('vacant'); marker.disabled = true; marker.setAttribute('aria-hidden', 'true');
+    }
+    const known = node.upload !== undefined && node.download !== undefined;
+    const amount = element('button', known ? `↑ ${display(node.upload!)} | ↓ ${display(node.download!)} | ${display(value)}` : display(value), 'rank-value');
+    amount.type = 'button';
+    amount.title = known ? `上传 ${precise(node.upload!)}\n下载 ${precise(node.download!)}\n合计 ${precise(value)}` : `合计 ${precise(value)}\n方向未提供`;
+    amount.addEventListener('click', () => showExactValue(amount.title));
+    valueBox.append(marker, amount);
+    const shareText = value > 0n && percentage(value, total) < .01 ? '<0.01%' : `${percentage(value, total).toFixed(2)}%`;
+    heading.append(element('span', share ? shareText : String(index + 1).padStart(2, '0'), 'rank-index'), name, valueBox);
+    const track = element('div', '', 'rank-track');
+    const bar = element('div', '', 'rank-bar');
+    bar.style.width = `${percentage(value, share ? total : max)}%`;
+    if (known) {
+      const down = element('span', '', 'rank-download'), up = element('span', '', 'rank-upload');
+      down.style.width = `${percentage(node.download!, value)}%`; up.style.flex = '1';
+      bar.append(down, up);
+    } else bar.classList.add('rank-neutral');
+    if (share) {
+      const swatch = element('span', '', 'share-swatch');
+      swatch.style.backgroundColor = colors[index % colors.length]; name.prepend(swatch);
+    }
+    track.append(bar);
+    row.append(heading, track);
+    ranking.append(row);
+  });
+}
+function showExactValue(text: string): void {
+  put('exact-value-text', text);
+  el<HTMLDialogElement>('exact-value-dialog').showModal();
+}
 function renderHistory(history: HistoryResult): void {
   latestHistory = history;
   latestProvider = null;
@@ -215,23 +316,9 @@ function renderHistory(history: HistoryResult): void {
   put('gap-summary', `查看历史间断与覆盖缺口（${history.gapCount} 段）`);
   put('trend-subtitle', `${({ hour: '小时', day: '日', week: '周', month: '月', year: '年' } as const)[bucket]}分桶 · ${settings.timeZoneId}`);
   renderChart(history);
-  const ranking = el('ranking'); ranking.replaceChildren();
-  const sorted = [...history.nodes].sort((a, b) => { const x = bytes(a.upload) + bytes(a.download), y = bytes(b.upload) + bytes(b.download); return x > y ? -1 : x < y ? 1 : 0; });
-  put('node-count', String(sorted.length));
-  if (!sorted.length) ranking.append(element('p', '所选范围尚无节点记录', 'empty-state'));
-  const max = sorted.length ? bytes(sorted[0].upload) + bytes(sorted[0].download) : 0n;
-  sorted.forEach((node, index) => {
-    const row = element('div', '', 'rank-row'), heading = element('div', '', 'rank-heading'), name = element('button', node.name || '未归属', 'rank-node');
-    name.type = 'button'; name.title = node.name; name.addEventListener('click', () => { nodeKey = node.key; el<HTMLSelectElement>('node-filter').value = nodeKey; page = 0; void refresh(true); });
-    const value = bytes(node.upload) + bytes(node.download);
-    heading.append(element('span', String(index + 1).padStart(2, '0'), 'rank-index'), name, element('span', formatBytes(value, unit), 'rank-value'));
-    const track = element('div', '', 'rank-track'), bar = element('div', '', 'rank-bar'); bar.style.width = `${percentage(value, max)}%`; track.append(bar); row.append(heading, track); ranking.append(row);
-    const recovered = bytes(node.recoveredUpload ?? '0') + bytes(node.recoveredDownload ?? '0');
-    if (recovered > 0n) {
-      const note = element('small', `其中恢复量 ${formatBytes(recovered, unit)}`, 'rank-recovery');
-      note.title = exactBytes(recovered); row.append(note);
-    }
-  });
+  put('node-count', String(history.nodes.length));
+  renderRanking(history.nodes.map(node => ({ key: node.key, name: node.name, total: bytes(node.upload) + bytes(node.download),
+    upload: bytes(node.upload), download: bytes(node.download), recovered: bytes(node.recoveredUpload ?? '0') + bytes(node.recoveredDownload ?? '0') })));
   const records = el('records'); records.replaceChildren();
   const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
   if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有非零采集明细。零字节记录已隐藏，采集缺口仍单独显示。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
@@ -371,22 +458,8 @@ function renderProviderHistory(history: ProviderHistory): void {
   show('gap-details', false);
   put('trend-subtitle', `${providerMetric === 'raw' ? '原始量' : '计费量'} · ${settings.timeZoneId}`);
   renderChart({ series: history.series.map(point => ({ label: point.label, upload: '0', download: providerUnits(metric(point)).toString() })) }, true);
-  const ranking = el('ranking'); ranking.replaceChildren();
-  const sorted = [...history.nodes].sort((a, b) => {
-    const x = providerUnits(metric(a)), y = providerUnits(metric(b)); return x > y ? -1 : x < y ? 1 : a.name.localeCompare(b.name);
-  });
-  put('node-count', String(sorted.length));
-  if (!sorted.length) ranking.append(element('p', '所选范围没有导入的节点记录', 'empty-state'));
-  const max = sorted.length ? providerUnits(metric(sorted[0])) : 0n;
-  sorted.forEach((node, index) => {
-    const row = element('div', '', 'rank-row'), heading = element('div', '', 'rank-heading');
-    const name = element('button', node.name, 'rank-node'); name.type = 'button'; name.title = node.name;
-    name.addEventListener('click', () => { nodeKey = node.name; el<HTMLSelectElement>('node-filter').value = nodeKey; page = 0; void refresh(true); });
-    const amount = element('span', formatProviderTotal(metric(node), unit), 'rank-value'); amount.title = exactProviderTotal(metric(node));
-    heading.append(element('span', String(index + 1), 'rank-index'), name, amount);
-    const track = element('div', '', 'rank-track'), bar = element('div', '', 'rank-bar');
-    bar.style.width = `${percentage(providerUnits(metric(node)), max)}%`; track.append(bar); row.append(heading, track); ranking.append(row);
-  });
+  put('node-count', String(history.nodes.length));
+  renderRanking(history.nodes.map(node => ({ key: node.name, name: node.name, total: providerUnits(metric(node)) })), true);
   const records = el('records'); records.replaceChildren();
   if (!history.records.length) { const row = element('tr'), cell = element('td', '这个范围没有已导入记录，请调整日期或来源。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
   for (const record of history.records) {
@@ -577,6 +650,18 @@ el('provider-metric').addEventListener('change', () => {
   if (latestProvider) renderProviderHistory(latestProvider);
   if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
 });
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-ranking-mode]')) {
+  button.addEventListener('click', () => {
+    rankingMode = button.dataset.rankingMode === 'share' ? 'share' : 'ranking';
+    for (const peer of document.querySelectorAll<HTMLButtonElement>('[data-ranking-mode]')) {
+      const selected = peer.dataset.rankingMode === rankingMode;
+      peer.classList.toggle('selected', selected);
+      peer.setAttribute('aria-pressed', String(selected));
+    }
+    if (latestHistory) renderHistory(latestHistory);
+    else if (latestProvider) renderProviderHistory(latestProvider);
+  });
+}
 el('compare-toggle').addEventListener('change', () => {
   comparison = el<HTMLInputElement>('compare-toggle').checked && statisticsSource !== '';
   chooseSource(statisticsSource); void refresh(true);
