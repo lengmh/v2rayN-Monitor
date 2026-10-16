@@ -2,13 +2,14 @@ import './style.css';
 import './ui.css';
 import { chartSlots, shortLabel } from './lib/chart.ts';
 import { compareNames, compareBuckets } from './lib/comparison.ts';
+import { displayNodes } from './lib/display.ts';
 import type { ComparisonRow } from './lib/comparison.ts';
 import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
 import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProviderTotal, providerUnits, providerUnitsText } from './lib/provider-format.ts';
 import type { Unit } from './lib/format.ts';
 import { dateInZone, dateRange, periodRange, shiftAnchor, timestamp } from './lib/ranges.ts';
 import type { Bucket, Period, Range } from './lib/ranges.ts';
-import type { CollectorStatus, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings, ProviderHistory } from './types.ts';
+import type { CollectorStatus, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings, ProviderHistory, TrafficDisplay } from './types.ts';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -151,7 +152,7 @@ function renderChart(history: HistoryPointInput, provider = false): void {
     const stack = element('div', '', 'chart-stack');
     if (!point) stack.append(element('span', '', 'chart-missing'));
     else if (total === 0n) stack.append(element('span', '', 'chart-zero'));
-    else { const download = element('span', '', 'bar-part bar-download'); download.style.height = `${percentage(bytes(point.download), max)}%`; const upload = element('span', '', 'bar-part bar-upload'); upload.style.height = `${percentage(bytes(point.upload), max)}%`; stack.append(download, upload); }
+    else { const download = element('span', '', `bar-part ${provider ? 'bar-provider' : 'bar-download'}`); download.style.height = `${percentage(bytes(point.download), max)}%`; const upload = element('span', '', 'bar-part bar-upload'); upload.style.height = `${percentage(bytes(point.upload), max)}%`; stack.append(download, upload); }
     column.append(stack);
     if (index === 0 || index === slots.length - 1 || (index % labelEvery === 0 && slots.length - 1 - index >= labelEvery / 2))
       column.append(element('span', label, 'chart-label'));
@@ -169,7 +170,7 @@ function recordTrafficCell(value: string, provider = false): HTMLTableCellElemen
   cell.append(amount);
   return cell;
 }
-type RankingItem = { key: string; name: string; total: bigint; upload?: bigint; download?: bigint; recovered?: bigint };
+type RankingItem = { key: string; name: string; total: bigint; upload?: bigint; download?: bigint; recovered?: bigint; groups?: string[] };
 function renderRanking(items: RankingItem[], provider = false): void {
   const ranking = el('ranking'); ranking.replaceChildren();
   const metric = (item: RankingItem): bigint => item.total;
@@ -225,6 +226,7 @@ function renderRanking(items: RankingItem[], provider = false): void {
     const heading = element('div', '', 'rank-heading');
     const name = element('button', node.name || '未归属', 'rank-node');
     name.type = 'button'; name.title = node.name || '未归属';
+    if (node.groups?.length) name.append(element('small', node.groups.map(x => `【${x}】`).join(' '), 'node-groups'));
     name.addEventListener('click', () => {
       nodeKey = provider ? node.name : node.key;
       el<HTMLSelectElement>('node-filter').value = nodeKey; page = 0; void refresh(true);
@@ -267,7 +269,15 @@ function renderRanking(items: RankingItem[], provider = false): void {
 }
 function showExactValue(text: string): void {
   put('exact-value-text', text);
+  put('copy-value-result', '');
   el<HTMLDialogElement>('exact-value-dialog').showModal();
+}
+function renderEstimate(display: TrafficDisplay | null | undefined): void {
+  const covered = display?.estimateCoveredBytes ?? '0', unknown = display?.estimateUnknownBytes;
+  put('billing-value', display?.estimatedBilledBytes == null ? '—' : formatProviderTotal(display.estimatedBilledBytes, unit));
+  put('billing-exact', display?.estimatedBilledBytes == null ? '没有可估算的倍率快照' : exactProviderTotal(display.estimatedBilledBytes));
+  put('billing-note', display?.estimatedBilledBytes == null ? '未估算，不表示计费为零' :
+    `名称倍率估算 · 覆盖 ${formatBytes(covered, unit)}${unknown && bytes(unknown) > 0n ? ` · 未估算 ${formatBytes(unknown, unit)}` : ''} · 非服务商扣费`);
 }
 function renderHistory(history: HistoryResult): void {
   latestHistory = history;
@@ -280,6 +290,8 @@ function renderHistory(history: HistoryResult): void {
     ? '包含当前账本中的 sing-box 成员和 Xray／旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。'
     : '按已核实的节点或出站身份分账，名称和策略组前缀仅用于展示。';
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
+  renderEstimate(history.display);
+  if (history.displayMetadataEnabled === false) put('billing-exact', '倍率快照未启用，原始量正常记录');
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
   put('upload-value', formatBytes(up, unit)); put('upload-exact', exactBytes(up));
@@ -316,8 +328,9 @@ function renderHistory(history: HistoryResult): void {
   put('gap-summary', `查看历史间断与覆盖缺口（${history.gapCount} 段）`);
   put('trend-subtitle', `${({ hour: '小时', day: '日', week: '周', month: '月', year: '年' } as const)[bucket]}分桶 · ${settings.timeZoneId}`);
   renderChart(history);
-  put('node-count', String(history.nodes.length));
-  renderRanking(history.nodes.map(node => ({ key: node.key, name: node.name, total: bytes(node.upload) + bytes(node.download),
+  const nodes = displayNodes(history.nodes);
+  put('node-count', String(nodes.length));
+  renderRanking(nodes.map(node => ({ key: node.key, name: node.name, groups: node.display?.groups, total: bytes(node.upload) + bytes(node.download),
     upload: bytes(node.upload), download: bytes(node.download), recovered: bytes(node.recoveredUpload ?? '0') + bytes(node.recoveredDownload ?? '0') })));
   const records = el('records'); records.replaceChildren();
   const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
@@ -325,7 +338,8 @@ function renderHistory(history: HistoryResult): void {
   for (const record of history.records) {
     const row = element('tr');
     const time = element('td', timestamp(record.start, settings.timeZoneId)); time.title = `${record.start} → ${record.end}`;
-    const name = element('td', record.nodeName || '未归属', 'node-cell'); name.title = record.nodeName || '未归属';
+    const name = element('td', record.display?.originalName ?? record.nodeName ?? '未归属', 'node-cell'); name.title = record.nodeName || '未归属';
+    if (record.display?.groups.length) name.append(element('small', record.display.groups.map(x => `【${x}】`).join(' '), 'node-groups'));
     const download = recordTrafficCell(record.download);
     const upload = recordTrafficCell(record.upload);
     const approximate = ['approximate', 'estimated', 'interpolated', 'apportioned'].includes(record.quality);
@@ -333,11 +347,13 @@ function renderHistory(history: HistoryResult): void {
     if (approximate) label.title = '区间流量按分钟分配，分时用量为近似值；原始总量保持不变。';
     if (record.quality === 'recovered-partial') label.title = '恢复区间仅与当前查询范围部分重叠，范围内用量未知，未计入本范围合计。';
     qualityCell.append(label);
-    const multiplier = element('td', '—', 'numeric');
-    multiplier.title = '此历史记录没有保存可核实的倍率，不按当前名称推算';
+    const multiplier = element('td', record.display?.rate ?? '—', 'numeric');
+    multiplier.title = record.display?.rate ? '采集时节点名或明确倍率组的标记，仅用于估算' : '此历史记录没有保存可核实的倍率，不按当前名称推算';
+    const estimated = record.display?.estimatedBilledBytes == null ? element('td', '—', 'numeric') :
+      recordTrafficCell(record.display.estimatedBilledBytes, true);
     row.append(time, name, element('td', '无'), upload, download,
       recordTrafficCell((bytes(record.upload) + bytes(record.download)).toString()), multiplier,
-      element('td', '—', 'numeric'), qualityCell); records.append(row);
+      estimated, qualityCell); records.append(row);
   }
   pagination(history.recordCount, true);
   el('summary').setAttribute('aria-busy', 'false');
@@ -376,7 +392,7 @@ function statisticLabels(): void {
   put('download-legend', provider ? metric : '下载');
   put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
   put('records-heading', provider ? '服务商记录' : probe ? '探测明细' : '采集明细');
-  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未提供 · 点击数值查看精确值' : '仅显示非零明细 · 点击数值查看精确值 · 历史倍率未核实，暂不估算计费');
+  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未提供 · 点击数值查看精确值' : '仅显示非零明细 · 点击数值查看精确值 · 仅按采集时倍率快照估算，旧记录保持未知');
   put('billing-column', provider ? '计费量' : '估算计费量');
 }
 function renderComparison(local: HistoryResult, provider: ProviderHistory): void {
@@ -564,7 +580,7 @@ async function refresh(force = false): Promise<void> {
       ]);
       if (controller.signal.aborted || refreshController !== controller) return;
       renderStatus(status);
-      const names = [...new Set([...localNodes, ...providerNodes].map(node => node.name))].sort();
+      const names = [...new Set([...localNodes, ...providerNodes, ...(local.comparisonNodes ?? [])].map(node => node.name))].sort();
       renderNodes(names.map(name => ({ key: name, name })));
       renderComparison(local, provider);
       put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)} · 对照按操作刷新`);
@@ -699,6 +715,10 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-ranking
 el('compare-toggle').addEventListener('change', () => {
   comparison = el<HTMLInputElement>('compare-toggle').checked && statisticsSource !== '';
   chooseSource(statisticsSource); void refresh(true);
+});
+el('copy-exact-value').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(el('exact-value-text').textContent ?? ''); put('copy-value-result', '已复制'); }
+  catch { put('copy-value-result', '复制未完成，可选中文本复制'); }
 });
 el('settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const button = el<HTMLButtonElement>('save-settings'); button.disabled = true; formResult('settings-result', '正在保存…');
