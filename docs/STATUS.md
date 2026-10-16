@@ -1,5 +1,23 @@
 # 初版实现与验证状态
 
+## 2026-10-16：S5.8 第四批 / test.5、真实 v3 迁移与配套预览启用
+
+起点 `6c280ca62c646e64aa52522e2694175bf85ef439`，工作树干净，PR #20 仍 Open / Draft，base 为 `docs/issue15-singbox-capability`。上一源码提交的 Monitor push / PR CI `38789602471` / `38789609578` 与扩展 PR CI `38789609582` 均成功，完整清单在第三批本机证据。本批沿用用户对核心替换、备份、真实 v2→v3 迁移及配套 Monitor 启用的具体授权；通讯依赖代理，因此先准备离线脚本与回退步骤，由用户退出两个程序、执行替换并重开 v2rayN。
+
+替换前连续 3 轮生产只读发现稳定，37 个当前范围逐项匹配现有游标；账本另有 35 个已退休历史成员，不能以历史目录总数要求等于当前目录。旧定制核心、sidecar、设置已备份；一致 SQLite 初步快照在副本上迁到 v3，全部旧记录保留、探测范围为零。离线脚本仅覆盖定制 `sing-box-client.exe`，检查程序已退出、路径无重解析点、源/目标摘要及保留文件；安装、回退和运行中拒绝覆盖均用合成文件验证，真实安装回执另存。
+
+用户执行后核实 test.5 摘要为 `595B4B3FEDE70FC23CA645DCF7B5A4AB6F91E5E7938DB0CA77D50EB0F8376695`，客户端与核心已形成新代次，路径、父子、标准参数和生产发现通过。连续 3 轮 `ReadScopesAsync(includeProbes:true)` 均 connected，34 个业务成员及三种汇总、34 个探测成员及三种汇总共 74 个范围可读，探测能力 available。旧 Monitor 已退出；原始 `sing-box.exe`、sidecar 保留，代理由用户恢复，没有由代理工具停止核心或切换节点。
+
+确认无 Monitor 写入者并取得同数据目录 mutex 后，重新备份最新 provider、设置，并调用已验证 `ScopeLedgerMigration.MigrateProbes` 为真实 history 创建全新 v2 备份后迁至 v3；未使用初步快照覆盖实际历史。执行器逐值核对全部旧数据，保留 72 个既有范围，首次探测仍为空。另用独立只读 SQLite 连接比较备份和迁移后 11 张历史表的全部旧值/未改 DDL，以及独立 provider 两表的全部值与设置文件；完整性、外键和生产 v3 打开均通过。
+
+启用前已明确提醒用户。10:31:34（北京时间）启动 push CI `38789602471` / artifact `11998814861` 的 Monitor，ProductVersion 为 `0.2.0-preview.2+6c280ca62c646e64aa52522e2694175bf85ef439`，EXE SHA256 为 `5624C7B55C82E1A5D8F5269C6C9390B2D38ADE6B81C70B5DE491C5161E3AC4DA`。显式 `--probe-ledger --data-dir <原 live-scope-data>`，未改实际开机启动项。唯一进程、参数及回环监听核对通过：首页和实际引用的新探测 JS 资源 HTTP 200，未认证状态/探测历史 API 为 401，没有读取浏览器令牌或会话；新探测页的真实目视确认仍待用户。
+
+启动前就绪的只读观察器取得 6 个新持久批次：首批业务/探测均只建基线，没有回填此前累计；后续 5 段全部 74 个当前范围的累计差与分钟/未分时账本增量一致。业务和直连有非零增量，本段 URLTest 探测增量为零，没有主动触发测速或测活，不能写成非零探测事件已实测。当前范围无开放缺口；历史 35 条开放缺口保留，不推断全历史无缺口。provider 逻辑数据及设置继续一致，各 basis 分开比较，没有相加为总量。
+
+本机证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-probe-windows-20261016\activation-20261016-101506`：`verified-preparation/`、离线脚本及合成验证、真实 `core-install-*.json`、`post-core-readonly.json`、`final-backup/`、`migration-result.json`、`migration-independent.json`、`activation-start.json`、`observed-batch-*.json`、`activation-observation.json` 和 `activation-http-process.json`。真实库、sidecar、逐范围样本和运行包仅留本机，不提交或清理。临时工具的进程枚举、平台分析器、历史目录数量及 PowerShell 保留变量错误已修正并保留失败日志；生产源码、依赖和 CI 配置未改。
+
+S5.8 保持 in_progress：本批完成配套 Windows 启用、真实历史保留、首接基线及被动持久化对账；非零探测事件的被动核对、新探测页面目视、DNS/规则集等其他内部请求仍待后续。S5.6 受控 proxy/direct 与组切换验收、名称对照/覆盖说明及 S5.7 planned 保留。新的核心重载/切换和真实数据回退仍按具体授权处理；已迁 v3 不能直接用旧 v2 Monitor 打开，不自动恢复备份丢弃新增历史。本批仅更新文档，计划/差异检查及精确文档提交 CI 单独核对。
+
 ## 2026-10-16：S5.8 第三批 / Windows 与 HTML 显式探测接入
 
 起点 `871b12b484eaf4dab6e46738b84f9d76e8f8cc77`，原工作树干净，PR #20 仍 Open / Draft，base 为 `docs/issue15-singbox-capability`。本批按用户「可以继续」接入 Windows 同代次探测采样及 HTML 入口；早先的 TempFiles 写入审批阻塞已在用户具体确认、恢复任务后的最小目录创建中解除，未丢弃未提交改动。
