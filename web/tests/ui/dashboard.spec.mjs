@@ -197,9 +197,11 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await page.check('#compare-toggle');
   await expect(page.locator('#comparison-view')).toBeVisible();
   await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
-  await expect(page.locator('#comparison-nodes')).toContainText('3,200,000,000.000123 bytes');
+  await page.selectOption('#provider-metric', 'billed');
+  await expect(page.locator('#comparison-nodes .paired-value').last()).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
   const only = page.locator('#comparison-nodes tr').filter({ hasText: 'CSV only' });
-  await expect(only).toContainText('无记录'); await expect(only).toContainText('0 bytes');
+  await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
+  await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);
   await expect(page.locator('#comparison-recovery')).toContainText('500 bytes');
   await expect(page.locator('#export-button')).toBeHidden();
   await page.click('[data-period=day]');
@@ -255,7 +257,7 @@ test('year of hourly comparison buckets stays paged and keeps the full exact tot
   await page.selectOption('#bucket', 'hour');
   await page.check('#compare-toggle');
   await expect(page.locator('#comparison-local-exact')).toHaveText('8,760 bytes');
-  await expect(page.locator('#comparison-buckets tr')).toHaveCount(50);
+  await expect(page.locator('#comparison-buckets tr')).toHaveCount(100);
   await expect(page.locator('#comparison-bucket-page')).toContainText('8,760');
   await expect(page.locator('#comparison-chart')).toContainText('请缩小日期范围或选择周/月');
   const queries = calls.filter(c => c.path === '/api/history').length;
