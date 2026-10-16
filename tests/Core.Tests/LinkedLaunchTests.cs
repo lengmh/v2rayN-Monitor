@@ -43,6 +43,42 @@ public class LinkedLaunchTests
     }
 
     [Fact]
+    public void ConfiguredRootMatchesOnlyPortableDirectoryOrDedicatedAppDataRoot()
+    {
+        var portable = Path.Combine(Path.GetTempPath(), "portable instance");
+        var executable = Path.Combine(portable, "v2rayN.exe");
+        var other = Path.Combine(Path.GetTempPath(), "other install");
+        var localAppData = Path.Combine(Path.GetTempPath(), "synthetic user", "AppData", "Local");
+        Assert.True(LinkedLaunch.MatchesConfiguredDataRoot(executable, portable, localAppData));
+        Assert.True(LinkedLaunch.MatchesConfiguredDataRoot(executable,
+            Path.Combine(localAppData, "v2rayN"), localAppData));
+        Assert.False(LinkedLaunch.MatchesConfiguredDataRoot(executable, other, localAppData));
+        Assert.False(LinkedLaunch.MatchesConfiguredDataRoot(executable, "", localAppData));
+        Assert.False(LinkedLaunch.MatchesConfiguredDataRoot("v2rayN.exe", portable, localAppData));
+        Assert.False(LinkedLaunch.MatchesConfiguredDataRoot(Path.Combine(portable, "not-v2rayN.exe"),
+            portable, localAppData));
+    }
+
+    [Fact]
+    public void ReadsPersistedConfiguredRootWithoutEditingIt()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "v2rayn-monitor-synthetic-settings-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            Assert.Equal("", LinkedLaunch.ReadConfiguredDataRoot(directory));
+            var settings = Path.Combine(directory, "settings.json");
+            var root = Path.Combine(directory, "合成数据目录");
+            File.WriteAllText(settings, System.Text.Json.JsonSerializer.Serialize(
+                new V2rayNMonitor.Core.AppSettings(root, "UTC"),
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+            Assert.Equal(root, LinkedLaunch.ReadConfiguredDataRoot(directory));
+            Assert.True(File.Exists(settings));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
     public void RejectsInvalidOrMissingExecutableWithoutStartingAnything()
     {
         Assert.Throws<ArgumentException>(() => LinkedLaunch.StartV2rayNIfNeeded("not-v2rayN.exe"));
@@ -70,8 +106,11 @@ public class LinkedLaunchTests
                 try
                 {
                     LinkedLaunch.CreateShortcut(shortcut, monitor, v2rayN, directory);
+                    var bytes = File.ReadAllBytes(shortcut);
                     Assert.Throws<IOException>(() =>
                         LinkedLaunch.CreateShortcut(shortcut, monitor, v2rayN, directory));
+                    Assert.Equal(bytes, File.ReadAllBytes(shortcut));
+                    Assert.Empty(Directory.GetFiles(directory, ".v2rayn-monitor-*.lnk"));
                 }
                 catch (Exception ex) { failure = ex; }
             });
