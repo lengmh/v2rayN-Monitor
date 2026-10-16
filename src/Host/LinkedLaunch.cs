@@ -1,5 +1,9 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using V2rayNMonitor.Core;
 
 namespace V2rayNMonitor.Host;
 
@@ -48,24 +52,80 @@ internal static class LinkedLaunch
                " " + Option + " " + QuoteWindowsArgument(v2rayNExecutable);
     }
 
+    // Match WindowsDiscovery's portable-root / local-AppData-root instance selection.
+    // Refuse a stale shortcut instead of launching a different client than the collector reads.
+    internal static bool MatchesConfiguredDataRoot(string executable, string configuredRoot, string localAppData)
+    {
+        if (!IsV2rayNExecutable(executable) || !Path.IsPathFullyQualified(executable) ||
+            string.IsNullOrWhiteSpace(configuredRoot) || !Path.IsPathFullyQualified(configuredRoot))
+            return false;
+        var executableDirectory = Path.GetDirectoryName(Path.GetFullPath(executable));
+        return executableDirectory is not null &&
+            (ProcessBinding.SamePath(executableDirectory, configuredRoot)
+                || ProcessBinding.SamePath(configuredRoot, Path.Combine(localAppData, "v2rayN")));
+    }
+
+    internal static string ReadConfiguredDataRoot(string monitorDirectory)
+    {
+        var settingsFile = Path.Combine(monitorDirectory, "settings.json");
+        if (!File.Exists(settingsFile)) return "";
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(settingsFile), options)?.V2rayNPath ?? "";
+    }
+
+    internal static void EnsureConfiguredDataRoot(string executable, string configuredRoot)
+    {
+        if (!MatchesConfiguredDataRoot(executable, configuredRoot,
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)))
+            throw new InvalidOperationException(
+                "联动程序与 Monitor 配置的数据目录不对应或尚未设置。请核对统计设置，并重新创建联动快捷方式。");
+    }
+
     internal static void StartV2rayNIfNeeded(string executable)
     {
-        if (!IsV2rayNExecutable(executable)) throw new ArgumentException("目标必须是 v2rayN.exe。");
+        if (!IsV2rayNExecutable(executable) || !Path.IsPathFullyQualified(executable))
+            throw new ArgumentException("需要选择 v2rayN.exe 的绝对路径。");
         executable = Path.GetFullPath(executable);
         if (!File.Exists(executable)) throw new FileNotFoundException("v2rayN.exe 不存在。");
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
 
-        // v2rayN instances are already outside the supported multi-instance collector scope.
-        // A second start here could disturb the selected running instance.
-        var running = Process.GetProcessesByName("v2rayN");
-        try { if (running.Length != 0) return; }
-        finally { foreach (var process in running) process.Dispose(); }
-
-        using var started = Process.Start(new ProcessStartInfo(executable)
+        // Serialize launches from rapidly repeated shortcut clicks, including a delayed UAC prompt.
+        var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(executable.ToUpperInvariant())))[..24];
+        using var launchMutex = new Mutex(false, @"Local\V2rayNMonitor-Launch-" + identity);
+        var owned = false;
+        try
         {
-            UseShellExecute = true,
-            WorkingDirectory = Path.GetDirectoryName(executable)!
-        });
-        if (started is null) throw new InvalidOperationException("Windows 未能启动 v2rayN。");
+            try { owned = launchMutex.WaitOne(TimeSpan.FromSeconds(30)); }
+            catch (AbandonedMutexException) { owned = true; }
+            if (!owned) throw new IOException("另一次联动启动尚未完成，已取消本次重复请求。");
+
+            var running = Process.GetProcessesByName("v2rayN");
+            try
+            {
+                if (running.Length > 1)
+                    throw new InvalidOperationException("存在多个 v2rayN 进程，暂不尝试启动另一实例。");
+                if (running.Length == 1)
+                {
+                    // Only an exact executable-path match proves that the selected target is already running.
+                    // The limited-access query also works for many elevated processes; unreadable stays unknown.
+                    var existing = WindowsProcessReader.Read(running[0].Id);
+                    if (existing is null || !existing.IsAlive || string.IsNullOrWhiteSpace(existing.ExecutablePath))
+                        throw new InvalidOperationException("无法核实已运行的 v2rayN 程序路径，暂不重复启动。");
+                    if (!ProcessBinding.SamePath(existing.ExecutablePath, executable))
+                        throw new InvalidOperationException("另一目录下的 v2rayN 已运行；不会静默改用其他实例。");
+                    return;
+                }
+            }
+            finally { foreach (var process in running) process.Dispose(); }
+
+            using var started = Process.Start(new ProcessStartInfo(executable)
+            {
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(executable)!
+            });
+            if (started is null) throw new InvalidOperationException("Windows 未能启动 v2rayN。");
+        }
+        finally { if (owned) launchMutex.ReleaseMutex(); }
     }
 
     internal static string CreateDesktopShortcut(string v2rayNExecutable, string monitorDataDirectory)
@@ -83,7 +143,8 @@ internal static class LinkedLaunch
             var name = i == 1 ? "v2rayN + Monitor.lnk" : $"v2rayN + Monitor ({i}).lnk";
             var shortcut = Path.Combine(desktop, name);
             if (File.Exists(shortcut)) continue;
-            CreateShortcut(shortcut, monitorExecutable, v2rayNExecutable, monitorDataDirectory);
+            try { CreateShortcut(shortcut, monitorExecutable, v2rayNExecutable, monitorDataDirectory); }
+            catch (IOException) when (File.Exists(shortcut)) { continue; }
             return shortcut;
         }
         throw new IOException("桌面已有太多同名快捷方式，请先清理。");
@@ -97,32 +158,46 @@ internal static class LinkedLaunch
             throw new FileNotFoundException("启动程序已移动或不存在。");
         if (File.Exists(shortcutPath)) throw new IOException("快捷方式已存在，不会覆盖。");
         var arguments = BuildArguments(v2rayNExecutable, monitorDataDirectory);
-        var shellType = Type.GetTypeFromProgID("WScript.Shell")
-            ?? throw new InvalidOperationException("Windows 快捷方式组件不可用。");
-        var shell = Activator.CreateInstance(shellType)
-            ?? throw new InvalidOperationException("无法创建 Windows 快捷方式组件。");
+        var shortcutDirectory = Path.GetDirectoryName(Path.GetFullPath(shortcutPath))
+            ?? throw new ArgumentException("快捷方式目标目录无效。");
+        var temporary = Path.Combine(shortcutDirectory, ".v2rayn-monitor-" + Guid.NewGuid().ToString("N") + ".lnk");
         try
         {
-            dynamic shellObject = shell;
-            object shortcut = shellObject.CreateShortcut(shortcutPath);
+            var shellType = Type.GetTypeFromProgID("WScript.Shell")
+                ?? throw new InvalidOperationException("Windows 快捷方式组件不可用。");
+            var shell = Activator.CreateInstance(shellType)
+                ?? throw new InvalidOperationException("无法创建 Windows 快捷方式组件。");
             try
             {
-                dynamic link = shortcut;
-                link.TargetPath = monitorExecutable;
-                link.Arguments = arguments;
-                link.WorkingDirectory = Path.GetDirectoryName(monitorExecutable)!;
-                link.IconLocation = v2rayNExecutable + ",0";
-                link.Description = "联动启动 v2rayN 和 Monitor；采集在后台持续运行";
-                link.Save();
+                dynamic shellObject = shell;
+                object shortcut = shellObject.CreateShortcut(temporary);
+                try
+                {
+                    dynamic link = shortcut;
+                    link.TargetPath = monitorExecutable;
+                    link.Arguments = arguments;
+                    link.WorkingDirectory = Path.GetDirectoryName(monitorExecutable)!;
+                    link.IconLocation = v2rayNExecutable + ",0";
+                    link.Description = "联动启动 v2rayN 和 Monitor；采集在后台持续运行";
+                    link.Save();
+                }
+                finally
+                {
+                    if (Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
+                }
             }
             finally
             {
-                if (Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
+                if (Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
             }
+
+            // File.Move without overwrite is atomic on the same directory. An existing shortcut
+            // is never clobbered, including if another creator wins between check and save.
+            File.Move(temporary, shortcutPath);
         }
         finally
         {
-            if (Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+            if (File.Exists(temporary)) File.Delete(temporary);
         }
     }
 }
