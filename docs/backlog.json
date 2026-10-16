@@ -516,7 +516,7 @@
       "stop_rule": "交付预览及精确提交 CI；真实预览替换须授权，不宣称完整复杂配置计量已通过。",
       "issue": 15,
       "pull_request": 17,
-      "implementation_note": "2026-10-14 c8ea870 的双平台 CI 与隔离回归通过；用户退出旧预览后已启动真实 preview.2，沿用独立验证目录。首接无回填、持续字节/游标守恒及4轮 reset=false 参考 RPC 范围核对通过；未取得同刻 RPC 精确匹配。真实受控 proxy/direct、切换与页面目视验收未补齐，仍 in_progress。见 docs/STATUS.md。"
+      "implementation_note": "2026-10-14 c8ea870 的双平台 CI 与隔离回归通过；用户退出旧预览后已启动真实 preview.2，沿用独立验证目录。首接无回填、持续字节/游标守恒及4轮 reset=false 参考 RPC 范围核对通过；未取得同刻 RPC 精确匹配。真实受控 proxy/direct、切换与页面目视验收未补齐，仍 in_progress。见 docs/STATUS.md。 2026-10-16用户切换Xray后发现多出站/balancer整体拒绝；已补独立proxy部分采集源码，legacy_proxy及部分覆盖持久化，Xray专属范围说明，其他出站/内部探测未覆盖，链和身份代次保护保持。Core344/Server38/前端57/Host Release通过，当前Xray只读生产发现3轮connected；新包尚未启用、精确CI待核。此前sing-box连接异常尚未归因，不以本修复代替其诊断。"
     },
     {
       "id": "S5.6",

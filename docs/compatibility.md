@@ -8,6 +8,7 @@ v0.1.0 目标为 Windows x64 + v2rayN **7.25.1** + Xray 普通单节点。2026-1
 |---|---|---|
 | Windows x64 托盘 / 本地 HTML | 已实现 | 用户报告 `a3f2d80` 人工页面检查、关闭页面继续采集通过；无图标预览整体确认见上文，未追加逐项记录 |
 | v2rayN 7.25.1 + Xray 普通单节点 | 只读发现 / 原始累计量 / 按活动配置归属 | 固定源码 + 合成回归；用户报告 `a3f2d80` 的重复配置切换失败，新规则的逐项实机记录未补充 |
+| Xray 独立 proxy 与其他出站 / balancer 共存 | 源码已恢复 proxy 部分采集，沿用 `legacy_proxy`；其他出站未知，内部探测未拆分 | Core 344 / Server 38 / 前端 57、Host Release及当前 Xray 26.7.28 的 3 轮只读生产发现通过；新包尚未启用。proxy 自身计数含组选中该出站的连接，历史/导出保留部分覆盖；链、重复 tag、畸形组及原身份/代次检查保持 |
 | VMess / VLESS / Trojan / Shadowsocks / SOCKS / HTTP | 仅对应单 proxy 出站映射 | 解析器合成回归；实机待验收 |
 | V2free 7.25.1 的 Hysteria2 + Xray | 按精确 fork 生成规则匹配服务器和 transport auth | 用户报告 `a3f2d80` 普通权限 Monitor 采集提升权限客户端、首次基线、连续记账、Monitor 重启恢复及字节守恒通过 |
 | V2free 7.25.1 的 AnyTLS | 该 fork 强制使用 sing-box；指定 test.2 扩展的只读路径已实现 | 用户已安装并重载扩展；真实 preview.2 已通过首接基线、持续持久化与被动守恒，完整受控节点验收仍未完成 |
