@@ -26,7 +26,7 @@ v0.1.1 已正式发布。v0.2.0 的 #15 为内核线、#16 为 CSV 线。S5.5 / 
 
 第九批增加明确组引用的友好成员名及换行，HTML明细以nonZeroRecords=true先筛零再分页；汇总/缺口和原始导出不变，不删除零记录。旧 Monitor 退出后，仅启动68b8a35 CI包，SQLite backup后沿用同一live-scope-data；身份/旧历史保留、友好名、采样批次逐范围被动守恒通过。同核心代次重开增量与账本一致，停机量保存为恢复未分时，long_interval缺口关闭；未动v2rayN、核心/sidecar、路由或启动项，页面人工使用确认通过，本次友好名/排行展示及非零明细的页面使用确认通过，不扩展为切换或全量计量验收。偏少诊断中的首接前不回填、直连排除及历史snapshot_changed/identity_change窗口不变；不能将无开放缺口写成全历史无缺口。真实计数/图谱及备份只留TempFiles，运行目录不得当临时垃圾清理，详见STATUS。
 
-S5.8 内部探测独立计量：test.5/Core、v3历史及受控迁移已有隔离证据；2026-10-16第三批接入Windows同一响应联合采样、--probe-ledger、能力说明及HTML四维探测入口/显式导出。隔离写权限已恢复，Release零警告零错误，Core336/Server38/前端56/浏览器17通过，精确提交CI另核；合成截图不冒充实机。CI38751295368/artifact11980964000包及EXE摘要/溯源已核对，源码固定接受该test.5摘要，test.2/test.4保留；未部署。普通成员新库仍v2，启动不迁移；最早保存区间不冒充精确基线。真实核心/Monitor/v2/provider未操作，目标TLS/HEAD流字节不等同计费，其他内部请求逐条验证。下一步经具体授权配套实机接入，启用新预览前提醒，通讯依赖代理时由用户离线替换。详见STATUS及docs/proposals/probe-accounting.md。
+S5.8 内部探测独立计量：第三批Windows同一响应联合采样、--probe-ledger及HTML四维探测入口经隔离Release/Core336/Server38/前端56/浏览器17与6c280ca精确CI验证。2026-10-16第四批，由离线安装固定test.5并重开v2rayN；连续3轮业务/探测共范围可读。Monitor停止及同目录mutex下做最新备份、真实v2→v3受控迁移，旧范围及11表旧值保留，provider/设置独立一致。启用前提醒后，启动6c280ca push CI包，--probe-ledger接回原live-scope-data；采样批次首接不回填，后续相邻区间逐范围被动守恒。业务/直连有增量，本段探测为0，未主动测活；非零探测与新页目视待验。当前范围无开放缺口，历史缺口保留。实际启动项未改，旧v2 Monitor不能直接打开现v3。test.2/test.4保留，普通成员新库仍v2、启动不迁移；目标TLS/HEAD流字节不等同计费，DNS/规则集逐条验证，S5.8仍in_progress。证据/路径及边界见STATUS和docs/proposals/probe-accounting.md；新的重载/切换/数据回退另按具体授权。
 
 ## 公开仓库边界
 
