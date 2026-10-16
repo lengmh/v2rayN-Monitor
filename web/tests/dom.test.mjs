@@ -250,11 +250,14 @@ test('unified statistics switch provider source without mixing local totals or d
   change('statistics-source', 'source-one');
   await until(() => get('records').textContent.includes('CSV node'));
   assert.equal(get('total-exact').textContent, '1,300 bytes');
-  assert.equal(get('upload-exact').textContent, '1,000.800000000123 bytes');
-  assert.equal(get('download-title').textContent, '服务商原始量');
+  assert.equal(get('billing-exact').textContent, '1,000.800000000123 bytes');
+  assert.equal(get('download-title').textContent, '下载');
+  assert.equal(get('download-value').textContent, '—');
+  assert.equal(get('upload-value').textContent, '—');
   assert.equal(get('records').closest('.records-panel').classList.contains('local-records'), false);
   change('provider-metric', 'billed');
-  assert.equal(get('total-exact').textContent, '1,000.800000000123 bytes');
+  assert.equal(get('total-exact').textContent, '1,300 bytes');
+  assert.equal(get('billing-exact').textContent, '1,000.800000000123 bytes');
   assert.ok(calls.some(c => c.path === '/api/provider/history' && c.query.get('source') === 'source-one'));
   change('statistics-source', '');
   await until(() => get('total-value').textContent === '16.106 GB');
@@ -537,31 +540,33 @@ test('local history explains cross-core records without obsolete setup claims', 
   assert.ok(!w.document.body.textContent.includes('策略组实际成员、代理链和自定义配置尚未支持'));
 });
 
-test('local minute records show useful small units, exact tooltips and subdued approximation', async t => {
+test('local details use selected units, preserve exact totals and unknown metadata', async t => {
   const { get, change } = await fixture(t, { '/api/history': () => Response.json({ ...history, records: [
     { ...history.records[0], download: '12345', upload: '0', quality: 'approximate' },
     { ...history.records[0], download: '9007199254740993', upload: '1', quality: 'recovered-partial' }
   ] }) });
   const cells = get('records').rows[0].cells;
-  assert.equal(cells[2].textContent, '12.35 KB'); assert.equal(cells[2].title, '12,345 bytes');
-  assert.equal(cells[3].textContent, '0 B');
+  assert.equal(cells.length, 9);
+  assert.equal(cells[2].textContent, '无');
+  assert.equal(cells[4].textContent, '< 0.001 GB'); assert.equal(cells[4].title, '12,345 bytes');
+  assert.equal(cells[3].textContent, '0.000 GB');
   assert.ok(cells[3].classList.contains('zero'));
-  assert.equal(cells[2].querySelector('.traffic-value').textContent, '12.35');
-  assert.equal(cells[2].querySelector('.traffic-unit').textContent, 'KB');
-  assert.equal(cells[2].classList.contains('zero'), false);
-  assert.equal(cells[4].querySelector('.approximate').textContent, '分时近似');
-  assert.ok(cells[4].querySelector('span').title.includes('近似值'));
+  assert.equal(cells[5].title, '12,345 bytes');
+  assert.equal(cells[6].textContent, '—'); assert.equal(cells[7].textContent, '—');
+  assert.equal(get('billing-value').textContent, '—');
+  assert.equal(cells[8].querySelector('.approximate').textContent, '分时近似');
+  assert.ok(cells[8].querySelector('span').title.includes('近似值'));
   assert.ok(get('records').rows[1].querySelector('.warning'));
   assert.equal(get('records').rows[1].querySelector('.warning').textContent, '部分重叠 · 未计入');
   assert.ok(get('records').rows[1].querySelector('.warning').title.includes('当前查询范围'));
   assert.equal(get('records').rows[1].cells[1].title, history.records[0].nodeName);
-  assert.equal(get('records').rows[1].cells[2].title, '9,007,199,254,740,993 bytes');
+  assert.equal(get('records').rows[1].cells[4].title, '9,007,199,254,740,993 bytes');
+  assert.equal(get('records').rows[1].cells[5].title, '9,007,199,254,740,994 bytes');
   assert.ok(get('records').closest('.local-records'));
   change('unit', 'GiB');
-  assert.equal(get('records').rows[0].cells[2].textContent, '12.06 KiB');
-  assert.equal(get('records').rows[0].querySelector('.traffic-unit').textContent, 'KiB');
-  assert.equal(get('records').rows[0].cells[2].title, '12,345 bytes');
-  assert.ok(get('records-caption').textContent.includes('1024'));
+  assert.equal(get('records').rows[0].cells[4].textContent, '< 0.001 GiB');
+  assert.equal(get('records').rows[0].cells[4].title, '12,345 bytes');
+  assert.ok(get('records-caption').textContent.includes('历史倍率未核实'));
 });
 
 test('partial-only local recovery keeps summary unknown while measured idle remains zero', async t => {
