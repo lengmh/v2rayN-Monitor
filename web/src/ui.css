@@ -25,7 +25,9 @@
 .metric-card p { color: #526d78; font-size: 12px; line-height: 1.6; }
 .metric-note { color: #526571; font-size: 12px; line-height: 1.6; }
 .metric-card > strong { font-size: clamp(26px, 2.5vw, 36px); letter-spacing: -.7px; }
-.summary-grid.provider-summary { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
+#summary.summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+#summary .metric-card { grid-column: auto; min-width: 0; }
+#summary .metric-card p, #summary .metric-card > strong { overflow-wrap: anywhere; }
 .provider-summary .metric-icon { display: none; }
 .quality-panel, .history-details { margin-bottom: 15px; border: 1px solid #dce5e9; border-radius: 10px; background: #fff; font-size: 12px; line-height: 1.8; color: #49616e; }
 .quality-panel summary, .history-details summary { padding: 12px 17px; cursor: pointer; }
@@ -94,6 +96,7 @@ summary:focus-visible { outline: 3px solid #38b7ac; outline-offset: 3px; }
 .comparison-bar.local { background: #278a7e; }
 .comparison-bar.provider { background: #86aebd; }
 #compare-control input { min-height: auto; accent-color: #087f79; }
+.source-controls #compare-control { display: flex; flex-direction: row; align-items: center; gap: 6px; width: auto; white-space: nowrap; }
 @media (max-width: 940px) {
   #source-caption { margin-left: 0; flex-basis: 100%; }
   .source-controls { flex-wrap: wrap; }
@@ -145,8 +148,20 @@ summary:focus-visible { outline: 3px solid #38b7ac; outline-offset: 3px; }
 .local-records .quality-pill.approximate { color: #4c637d; background: #edf2f8; }
 .local-records tbody tr:hover { background: #f3f7fa; }
 .local-records .panel-heading { padding-bottom: 14px; }
+.records-panel table { table-layout: fixed; min-width: 1250px; width: 100%; }
+.records-panel th, .records-panel td { padding: 9px 12px; }
+.records-panel th:first-child { width: 145px; }
+.records-panel th:nth-child(2) { width: 220px; }
+.records-panel th:nth-child(3) { width: 105px; }
+.records-panel th:nth-child(4), .records-panel th:nth-child(5), .records-panel th:nth-child(6), .records-panel th:nth-child(8) { width: 145px; }
+.records-panel th:nth-child(7) { width: 75px; }
+.records-panel th:last-child { width: 180px; }
+.records-panel .node-cell { white-space: normal; overflow-wrap: anywhere; }
+.records-panel .traffic-amount { display: inline; padding: 0; border: 0; background: none; color: inherit; font: inherit; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 1100px) { #summary.summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) {
-  .local-records table { min-width: 680px; }
+  #summary .metric-card > strong { font-size: 22px; letter-spacing: -.5px; }
+  .local-records table { min-width: 1250px; }
   .local-records th, .local-records td { padding: 9px 10px; }
   .local-records th:first-child { width: 132px; }
   .local-records th:nth-child(3), .local-records th:nth-child(4) { width: 128px; }
