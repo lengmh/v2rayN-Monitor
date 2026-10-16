@@ -80,10 +80,10 @@ test('opt-in member basis stays explicit without adding aggregate dimensions', a
   assert.equal(get('collector-state').textContent, '部分采集');
   assert.ok(get('status-dot').classList.contains('partial'));
   assert.ok(get('quality-notice').textContent.includes('实际成员维度'));
-  assert.ok(get('quality-notice').textContent.includes('business、excluded、unknown'));
+  assert.ok(get('quality-notice').textContent.includes('直连和汇总分别保存'));
   assert.ok(get('quality-notice').textContent.includes('历史遗留开放缺口'));
-  assert.ok(get('attribution-note').textContent.includes('接入前累计不回填'));
-  assert.ok(get('attribution-note').textContent.includes('直连量单独保存在 excluded'));
+  assert.ok(get('quality-notice').textContent.includes('接入前累计不回填'));
+  assert.ok(get('attribution-note').textContent.includes('按已核实的节点或出站身份分账'));
   assert.ok(!get('attribution-note').textContent.includes('test.2'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
@@ -501,9 +501,14 @@ test('provider list preserves large exact decimal values and source names remain
   assert.equal(errors.length, 0);
 });
 
-test('local attribution note states active configuration identity without exposing identifiers', async t => {
-  const { get } = await fixture(t);
-  assert.ok(get('attribution-note').textContent.includes('本机统计按 v2rayN 活动配置归属，连接参数相同的不同 IndexId 分账；名称仅用于展示。'));
+test('local history explains cross-core records without obsolete setup claims', async t => {
+  const { get, w } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, basis: 'local_proxy' })
+  });
+  assert.ok(get('attribution-note').textContent.includes('切换核心不隐藏记录'));
+  assert.ok(get('attribution-note').textContent.includes('同名记录仍按原身份分账'));
+  assert.ok(!w.document.body.textContent.includes('test.2'));
+  assert.ok(!w.document.body.textContent.includes('策略组实际成员、代理链和自定义配置尚未支持'));
 });
 
 test('local minute records show useful small units, exact tooltips and subdued approximation', async t => {
