@@ -2,7 +2,7 @@
 
 计划版本：1.4 · 状态更新：2026-10-16 · v0.1.1 已发布；v0.2.0 原 sing-box / AnyTLS 与 CSV 范围保留，另登记复杂出站扩展与内部探测计量，插件继续 deferred。
 
-用户切换 Xray 后确认原 metrics 可用、Monitor 因多出站/balancer 整体拒绝。当前补充独立 proxy 部分采集修复：保留 `legacy_proxy` 历史，标记其他出站未知，使用独立 Xray 覆盖说明；链和身份/代次保护不变，不扩展为全量成员/探测支持。Core 344、Server 38、前端 57 和 Host Release 通过，真实只读发现连续 3 轮 connected；新包尚未启用，精确提交 CI 和接入见 STATUS。用户此前报告的 sing-box 连接异常尚未归因。
+用户切换 Xray 后确认原 metrics 可用、Monitor 因多出站/balancer 整体拒绝。独立 proxy 部分采集修复保留 `legacy_proxy` 历史，标记其他出站未知，使用独立 Xray 覆盖说明；链和身份/代次保护不变，不扩展为全量成员/探测支持。Core 344、Server 38、前端 57 和 Host Release 通过，真实只读发现连续 3 轮 connected。精确 `9e51a8d` 三项 CI 成功， 已启用 push CI 包：采样批次首接及后续 相邻区间持续记账对账通过，旧 范围和历史、provider/设置保留；Xray 未重启，原 v3 未迁移。详情见 STATUS。用户此前报告的 sing-box 连接异常尚未归因。
 
 > S5.5 / PR #17 的 test.2 与 routed-proxy 预览已有首次基线、持续持久化和被动守恒证据。2026-10-15 test.4 已安装并重开客户端；S5.6 / PR #20 新模式的 成员及三种汇总已在独立 v2 目录持续记账。第九批，仅更新 Monitor 为 `68b8a35` CI 包，沿用同一 v2 数据；友好名、既有历史保留、同代次重开恢复与 采样批次被动守恒通过，代理未重载。该批页面人工使用确认通过；受控 proxy/direct、组切换及完整维度页面/新模式速率仍待完成，S5.6 in_progress，S5.7 / #19 planned。旧 v1 历史未迁移，完整真实节点验收仍 blocked；#16 尚未开始。当前进度以 [STATUS](STATUS.md) 为准。
 
