@@ -12,6 +12,8 @@ Xray 使用独立 `xray_outbound_proxy` 覆盖说明，明确计数属于 proxy 
 
 失败记录保留：首次全量运行的一项旧断言仍要求多出站拒绝；新增测试随后纠正了对 `ScopeHistory` 不存在字段的断言。红例还原源码保留旧时间戳，增量构建曾复用旧解析器 DLL；核对源码逐字节一致后强制重建，才取得上述最终通过结果。没有把失败或缓存构建当成修复验证。
 
+首个修复提交 `83cfe52` 的 Windows CI 通过，Linux 浏览器回归因一处遗漏的旧文案断言失败。仅将既有浏览器测试同步为「未覆盖范围的流量未知」，已有 Chromium 的对应桌面/手机定向回归 1 项通过；生产源码不变，后续提交的完整 CI 另核，不将首次失败记为通过。
+
 修复后的生产 Windows 发现对当前实际 Xray 连续 3 轮只读验证均 connected，同会话/代次，读取 1 个 `legacy_proxy` 范围；披露其他 34 个代理出站和 2 个策略组，探测状态 unsupported。该 helper 未写真实账本，也未更换运行 Monitor；当前 `d2dcae4` 仍在运行，需精确 CI 包核对并在提醒用户退出 Monitor 后接入。无需重开 Xray、覆盖 sing-box、改变路由或迁移 v3。
 
 证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-xray-partial-20261016`：隔离源码、红例/失败/最终日志和 TRX、`live-discovery.json`。提交后精确 CI、包身份与后续实机启用分别记录，不借本地只读发现宣称已恢复生产记账。S5.5 / S5.6 / S5.8 保持 in_progress；Xray 其他出站和内部探测、受控切换、既有页面尾项继续保留，#19 planned，#23 独立安排。

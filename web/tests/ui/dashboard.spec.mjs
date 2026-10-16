@@ -91,7 +91,7 @@ test('partial sing-box coverage is visible on desktop and mobile after collectio
   await expect(page.locator('#collector-message')).toContainText(description);
   await expect(page.locator('#records')).toContainText('部分出站');
   await page.locator('#quality-summary').click();
-  await expect(page.locator('#quality-notice')).toContainText('组和其他代理的流量未知');
+  await expect(page.locator('#quality-notice')).toContainText('未覆盖范围的流量未知');
   await page.locator('#gap-summary').click();
   await expect(page.locator('#gap-list')).toContainText('其他出站未采集，流量未知');
   await page.screenshot({ path: 'test-results/partial-singbox-desktop.png', fullPage: true });
