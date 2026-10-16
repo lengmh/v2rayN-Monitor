@@ -95,6 +95,17 @@ summary:focus-visible { outline: 3px solid #38b7ac; outline-offset: 3px; }
 .comparison-bar { width: min(40%, 15px); min-width: 2px; border-radius: 2px 2px 0 0; }
 .comparison-bar.local { background: #278a7e; }
 .comparison-bar.provider { background: #86aebd; }
+.comparison-bar.local { display: flex; flex-direction: column; overflow: hidden; }
+.comparison-bar.local .rank-download { flex-shrink: 0; }
+.comparison-bar.provider { background: #717b87; }
+.legend .provider-color { background: #717b87; }
+.comparison-name { vertical-align: middle; overflow-wrap: anywhere; }
+.paired-traffic { min-width: 310px; }
+.paired-value { display: block; margin-left: auto; border: 0; background: none; color: inherit; font: inherit; white-space: nowrap; padding: 3px 0; }
+.paired-track { height: 5px; background: #edf3f4; margin-top: 6px; border-radius: 3px; }
+.paired-bar { height: 100%; display: flex; overflow: hidden; border-radius: 3px; }
+.comparison-pair.missing .paired-traffic { background: #eef1f3; color: #71808b; }
+.comparison-pair:nth-child(even) td { border-bottom: 2px solid #dce5e9; }
 #compare-control input { min-height: auto; accent-color: #087f79; }
 .source-controls #compare-control { display: flex; flex-direction: row; align-items: center; gap: 6px; width: auto; white-space: nowrap; }
 @media (max-width: 940px) {

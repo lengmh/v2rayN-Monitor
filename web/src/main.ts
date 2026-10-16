@@ -394,25 +394,48 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   put('quality-summary', '同名汇总对照 · 两边数值分别计量');
   put('quality-notice', '名称相同仅用于展示对照，不证明节点身份相同；服务商记录范围可能不同。缺口不是零，不把差额归因于设备或漏计。');
   show('gap-details', false);
-  const table = (id: string, rows: ComparisonRow[]): void => {
+  const table = (id: string, rows: ComparisonRow[], scaleRows = rows): void => {
     const body = el(id); body.replaceChildren();
+    const maximum = scaleRows.reduce((max, row) => {
+      for (const value of [row.local, providerMetric === 'raw' ? row.raw : row.billed])
+        if (value !== null && providerUnits(value) > max) max = providerUnits(value);
+      return max;
+    }, 0n);
     for (const row of rows) {
-      const tr = element('tr'); tr.append(element('td', row.name));
-      for (const value of [row.local, row.raw, row.billed]) {
-        const cell = element('td', value === null ? '无记录' : formatProviderTotal(value, unit), 'numeric');
-        if (value !== null) cell.append(element('small', exactProviderTotal(value), 'exact-cell'));
-        tr.append(cell);
-      }
-      body.append(tr);
+      [row.local, providerMetric === 'raw' ? row.raw : row.billed].forEach((value, index) => {
+        const tr = element('tr', '', `comparison-pair ${value === null ? 'missing' : ''}`);
+        if (index === 0) {
+          const name = element('td', row.name, 'comparison-name'); name.rowSpan = 2; tr.append(name);
+        }
+        tr.append(element('td', index === 0 ? '本机' : '服务商'));
+        const cell = element('td', '', 'paired-traffic');
+        const amount = element('button', value === null ? formatProviderTotal('0', unit) :
+          index === 0 ? `↑ ${formatBytes(row.upload!, unit)} | ↓ ${formatBytes(row.download!, unit)} | ${formatProviderTotal(value, unit)}`
+            : formatProviderTotal(value, unit), 'paired-value');
+        amount.type = 'button';
+        amount.title = value === null ? '此来源没有记录，显示零仅为占位，不代表实际零流量' :
+          index === 0 ? `上传 ${exactBytes(row.upload!)}\n下载 ${exactBytes(row.download!)}\n合计 ${exactProviderTotal(value)}` :
+            `${providerMetric === 'raw' ? '原始量' : '计费量'} ${exactProviderTotal(value)}\n方向未提供`;
+        amount.setAttribute('aria-label', amount.title);
+        amount.addEventListener('click', () => showExactValue(amount.title));
+        const track = element('div', '', 'paired-track'), bar = element('div', '', 'paired-bar');
+        bar.style.width = `${percentage(value === null ? 0n : providerUnits(value), maximum)}%`;
+        if (index === 0 && value !== null) {
+          const down = element('span', '', 'rank-download'), up = element('span', '', 'rank-upload');
+          down.style.width = `${percentage(bytes(row.download!), bytes(value))}%`; up.style.flex = '1';
+          bar.append(down, up);
+        } else bar.classList.add('rank-neutral');
+        track.append(bar); cell.append(amount, track); tr.append(cell); body.append(tr);
+      });
     }
-    if (!rows.length) { const row = element('tr'), cell = element('td', '所选范围没有可对照记录', 'empty-state'); cell.colSpan = 4; row.append(cell); body.append(row); }
+    if (!rows.length) { const row = element('tr'), cell = element('td', '所选范围没有可对照记录', 'empty-state'); cell.colSpan = 3; row.append(cell); body.append(row); }
   };
   table('comparison-nodes', compareNames(local, provider));
   const buckets = compareBuckets(local, provider);
   comparisonBucketCount = buckets.length;
   const pages = Math.max(1, Math.ceil(buckets.length / pageSize));
   comparisonBucketPage = Math.min(comparisonBucketPage, pages - 1);
-  table('comparison-buckets', buckets.slice(comparisonBucketPage * pageSize, (comparisonBucketPage + 1) * pageSize));
+  table('comparison-buckets', buckets.slice(comparisonBucketPage * pageSize, (comparisonBucketPage + 1) * pageSize), buckets);
   put('comparison-bucket-page', `共 ${buckets.length.toLocaleString('zh-CN')} 个已记录桶 · 第 ${comparisonBucketPage + 1} / ${pages} 页 · 每页 ${pageSize} 个`);
   el<HTMLButtonElement>('comparison-bucket-previous').disabled = comparisonBucketPage === 0;
   el<HTMLButtonElement>('comparison-bucket-next').disabled = comparisonBucketPage + 1 >= pages;
@@ -439,6 +462,12 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
       values.forEach((value, i) => {
         const bar = element('span', '', value === null ? 'chart-missing' : providerUnits(value) === 0n ? 'chart-zero' : i === 0 ? 'comparison-bar local' : 'comparison-bar provider');
         if (value !== null && providerUnits(value) > 0n) bar.style.height = `${percentage(providerUnits(value), scale)}%`;
+        if (i === 0 && value !== null && bytes(value) > 0n && row) {
+          const down = element('span', '', 'rank-download'), up = element('span', '', 'rank-upload');
+          down.style.height = `${percentage(bytes(row.download!), bytes(value))}%`;
+          up.style.flex = '1'; bar.append(down, up);
+          column.title += `\n本机上传 ${exactBytes(row.upload!)} · 下载 ${exactBytes(row.download!)}`;
+        }
         bars.append(bar);
       });
       column.append(bars);

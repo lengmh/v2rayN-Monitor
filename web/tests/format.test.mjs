@@ -25,7 +25,7 @@ test('name comparison aggregates exact names only and preserves absent versus re
     series: [{ label: '2026-01-01T01:00+00:00', rawBytes: '0', billedBytes: '0' }] };
   const rows = compareNames(local, provider);
   assert.equal(rows.length, 4);
-  assert.deepEqual(rows.find(row => row.name === 'A'), { name: 'A', local: '9007199254740996', raw: '9', billed: '7.200000000123' });
+  assert.deepEqual(rows.find(row => row.name === 'A'), { name: 'A', local: '9007199254740996', upload: '9007199254740995', download: '1', raw: '9', billed: '7.200000000123' });
   assert.equal(rows.find(row => row.name === 'CSV only').local, null);
   assert.equal(rows.find(row => row.name === 'a').raw, null);
   const buckets = compareBuckets(local, provider);

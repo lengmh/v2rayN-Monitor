@@ -403,9 +403,11 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   assert.equal(get('comparison-local-exact').textContent, '35 bytes');
   const rows = get('comparison-nodes').querySelectorAll('tr');
   const same = [...rows].find(r => r.textContent.includes('Same'));
-  assert.ok(same.textContent.includes('35 bytes')); assert.ok(same.textContent.includes('32.000000000123 bytes'));
+  assert.ok(same.querySelector('button').title.includes('35 bytes'));
+  change('provider-metric', 'billed');
+  assert.ok(get('comparison-nodes').querySelectorAll('button')[3].title.includes('32.000000000123 bytes'));
   const only = [...rows].find(r => r.textContent.includes('Only CSV'));
-  assert.ok(only.textContent.includes('无记录')); assert.ok(only.textContent.includes('0 bytes'));
+  assert.ok(only.classList.contains('missing')); assert.ok(only.textContent.includes('0.000 GB'));
   change('node-filter', 'Same');
   await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeName') === 'Same');
   assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('nodeKey'), false);
@@ -459,7 +461,7 @@ test('comparison bucket table pages long hourly ranges without dropping exact to
   change('statistics-source', 'paged'); await until(() => get('summary').getAttribute('aria-busy') === 'false');
   get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
   await until(() => get('comparison-local-exact').textContent === '101 bytes');
-  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 50);
+  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 100);
   assert.ok(get('comparison-bucket-page').textContent.includes('101'));
   assert.equal(get('comparison-bucket-previous').disabled, true);
   const queries = calls.filter(c => c.path === '/api/history').length;
@@ -468,7 +470,7 @@ test('comparison bucket table pages long hourly ranges without dropping exact to
   change('unit', 'GiB');
   assert.ok(get('comparison-buckets').querySelector('tr').textContent.includes(series[50].label));
   get('comparison-bucket-next').click();
-  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 1);
+  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 2);
   assert.ok(get('comparison-buckets').textContent.includes(series[100].label));
   assert.equal(get('comparison-bucket-next').disabled, true);
   assert.equal(get('comparison-local-exact').textContent, '101 bytes');
@@ -477,7 +479,7 @@ test('comparison bucket table pages long hourly ranges without dropping exact to
   assert.ok(get('comparison-buckets').querySelector('tr').textContent.includes(series[50].label));
   change('bucket', 'month');
   await until(() => get('comparison-buckets').textContent.includes('2026-10') && get('comparison-bucket-next').disabled);
-  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 1);
+  assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 2);
   assert.equal(get('comparison-bucket-previous').disabled, true);
 });
 
