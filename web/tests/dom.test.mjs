@@ -320,8 +320,34 @@ test('empty local range is unknown while recorded idle traffic stays zero', asyn
 test('node ranking discloses each node recovery contribution', async t => {
   const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history,
     nodes: [{ ...history.nodes[0], recoveredUpload: '1000000000', recoveredDownload: '0' }] }) });
-  assert.ok(get('ranking').textContent.includes('其中恢复量 1.000 GB'));
-  assert.equal(get('ranking').querySelector('.rank-recovery').title, '1,000,000,000 bytes');
+  assert.ok(get('ranking').textContent.includes('[恢复]'));
+  assert.equal(get('ranking').querySelector('.rank-recovery-marker').title, '已计入恢复量 1,000,000,000 bytes');
+});
+
+test('node ranking switches between ordered totals and exact share mode', async t => {
+  const { w, get } = await fixture(t);
+  assert.equal(get('ranking-mode').querySelector('[data-ranking-mode="ranking"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(w.document.querySelector('#ranking .rank-index').textContent, '01');
+  w.document.querySelector('[data-ranking-mode="share"]').click();
+  assert.equal(get('ranking-mode').querySelector('[data-ranking-mode="share"]').getAttribute('aria-pressed'), 'true');
+  assert.match(w.document.querySelector('#ranking .rank-index').textContent, /%$/);
+  assert.ok(w.document.querySelector('#ranking .rank-value').textContent.includes('↑'));
+  assert.equal(get('ranking').querySelectorAll('.share-chart svg circle').length, 1);
+});
+
+test('share denominator includes every identity and preserves small nonzero and recorded zero', async t => {
+  const { w, get } = await fixture(t, { '/api/history': () => Response.json({ ...history, nodes: [
+    { key: 'a', name: 'Same synthetic name', upload: '9007199254740993', download: '0' },
+    { key: 'b', name: 'Same synthetic name', upload: '0', download: '9007199254740993' },
+    { key: 'c', name: 'Tiny', upload: '1', download: '0' },
+    { key: 'd', name: 'Idle', upload: '0', download: '0' }
+  ] }) });
+  w.document.querySelector('[data-ranking-mode="share"]').click();
+  assert.equal(get('ranking').querySelectorAll('.rank-row').length, 4);
+  const shares = [...get('ranking').querySelectorAll('.rank-index')].map(n => n.textContent);
+  assert.deepEqual(shares, ['49.99%', '49.99%', '<0.01%', '0.00%']);
+  assert.ok(get('ranking').textContent.includes('Idle'));
+  assert.equal(get('ranking').querySelectorAll('.rank-download').length, 4);
 });
 
 test('period defaults follow day week month year while manual granularity survives other controls', async t => {

@@ -77,6 +77,24 @@ test('member group labels wrap fully and local details request nonzero rows', as
     await page.screenshot({ path: `test-results/member-label-${suffix}.png`, fullPage: true });
   }
 });
+test('issue23 shares and recovery keep directions, exact values and mobile layout', async ({ page }) => {
+  await mock(page, {
+    '/api/history': route => route.fulfill(json({ ...history,
+      nodes: history.nodes.map((n, i) => ({ ...n, recoveredUpload: i === 0 ? '123456789' : '0', recoveredDownload: '0' })) }))
+  });
+  await page.locator('.rank-recovery-marker:not(.vacant)').click();
+  await expect(page.locator('#exact-value-dialog')).toBeVisible();
+  await expect(page.locator('#exact-value-text')).toContainText('123,456,789 bytes');
+  await page.locator('#exact-value-dialog button').click();
+  await page.click('[data-ranking-mode=share]');
+  await expect(page.locator('.share-chart circle')).toHaveCount(3);
+  await expect(page.locator('.rank-download')).toHaveCount(3);
+  for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/issue23-shares-${suffix}.png`, fullPage: true });
+  }
+});
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray proxy',
