@@ -44,7 +44,7 @@
 
 版本包以 [GitHub Releases](https://github.com/lengmh/v2rayN-Monitor/releases) 页面及其 SHA256 为准；开发预览仍可在对应 Actions 运行的 `windows-x64-preview` artifact 下载。解压到可写目录，运行 `V2rayN-Monitor.exe`，选择包含 `guiConfigs` 和 `binConfigs` 的 v2rayN **数据根目录**。不需要导入 CSV。
 
-默认数据位于 `%LOCALAPPDATA%\V2rayN-Monitor\data`。`--demo` 使用独立演示目录，不连接真实核心；`--data-dir "D:\MonitorData"` 可显式选择 Monitor 历史目录。托盘菜单可手动启用当前用户登录时启动。
+默认数据位于 `%LOCALAPPDATA%\V2rayN-Monitor\data`。`--demo` 使用独立演示目录，不连接真实核心；`--data-dir "D:\MonitorData"` 可显式选择 Monitor 历史目录。托盘菜单可手动启用当前用户登录时启动。开发预览另提供可选的“v2rayN + Monitor 联动启动快捷方式”：只在从该新快捷方式运行时同时启动两者，Monitor 静默进入托盘并自动记录；不拦截原有 v2rayN 启动入口。见 [联动启动说明](docs/QUICKSTART.md#7-v2rayn--monitor-联动启动开发预览未包含在-v011-正式包)（Issue #24，未纳入当前 v0.1.1 正式发布包）。
 
 ## 开发与测试
 
