@@ -692,11 +692,14 @@ public sealed class ActiveConfigurationTests : IDisposable
     {
         const string tag = "12345-proxy-US-1x-1-Synthetic A";
         var config = MemberConfiguration.Replace("\"other\"", JsonSerializer.Serialize(tag), StringComparison.Ordinal)
-            .Replace("\"group\"", "\"12345-proxy-US-1x\"", StringComparison.Ordinal);
+            .Replace("\"group\"", "\"12345-proxy-US-1x\"", StringComparison.Ordinal)
+            .Replace("\"auto\"", "\"12345-proxy-US-1x-auto\"", StringComparison.Ordinal)
+            .Replace("\"type\":\"selector\",\"outbounds\":[\"proxy\",", "\"type\":\"selector\",\"outbounds\":[\"12345-proxy-US-1x-auto\",\"proxy\",", StringComparison.Ordinal);
         var snapshot = MemberSnapshot(config);
         Assert.True(SingboxParser.TryReadMemberCatalog(snapshot, Bytes(config), out var catalog, out _));
         var member = catalog!.Candidates[tag];
-        Assert.Equal("【US-1x】 1-Synthetic A", member.DisplayName);
+        Assert.Equal("【US-1x】 Synthetic A", member.DisplayName);
+        Assert.Equal(new CapturedNodeName("Synthetic A", "US-1x"), member.CapturedName);
         Assert.Equal(tag, member.OutboundTag);
         Assert.Null(member.IndexId);
         Assert.Null(catalog.Candidates["proxy"].DisplayName);
@@ -719,6 +722,17 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal("recorded", commit.Scopes[id]);
         Assert.DoesNotContain(ledger.Query(new("actual_member", Start.AddSeconds(-1), Start.AddMinutes(1), "UTC")).Gaps,
             x => x.Reason == "identity_change");
+    }
+
+    [Fact]
+    public void UnrelatedUrltestReferenceDoesNotSupplyAGroupMultiplierOrOriginalName()
+    {
+        const string tag = "12345-proxy-US-1x-1-Synthetic A";
+        var config = MemberConfiguration.Replace("\"other\"", JsonSerializer.Serialize(tag), StringComparison.Ordinal)
+            .Replace("\"group\"", "\"12345-proxy-US-1x\"", StringComparison.Ordinal);
+        Assert.True(SingboxParser.TryReadMemberCatalog(MemberSnapshot(config), Bytes(config), out var catalog, out _));
+        Assert.Null(catalog!.Candidates[tag].CapturedName);
+        Assert.Null(catalog.Candidates[tag].DisplayName);
     }
 
     [Fact]
