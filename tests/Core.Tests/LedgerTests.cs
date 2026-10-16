@@ -16,6 +16,137 @@ public sealed class LedgerTests : IDisposable
     private static QuerySpec All(string bucket = "day", string? node = null, int page = 0, int size = 50) =>
         new(Epoch.AddYears(-2), Epoch.AddYears(3), "UTC", bucket, node, page, size);
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void UiDisplayInitializationPreservesOldHistoryAndNeverBackfillsRates(int version)
+    {
+        using (var old = new Ledger(Database)) { old.Accept(Sample(0, 100)); old.Accept(Sample(1, 120)); }
+        if (version > 1) ScopeLedgerMigration.Migrate(Database, Path.Combine(directory, "v1.db"));
+        if (version == 3) ScopeLedgerMigration.MigrateProbes(Database, Path.Combine(directory, "v2.db"));
+        var before = HistorySnapshot(Database);
+        var backup = Path.Combine(directory, "before-display.db");
+        var result = ScopeLedgerMigration.InitializeDisplay(Database, backup);
+        Assert.Equal(version, result.HistoryVersion);
+        Assert.Equal(before, HistorySnapshot(backup));
+        if (version == 1)
+        {
+            using var reopened = new Ledger(Database);
+            Assert.True(reopened.SupportsDisplayMetadata);
+            Assert.Equal("20", reopened.Query(All()).Upload);
+            Assert.Null(reopened.Query(All()).Display!.EstimatedBilledBytes);
+        }
+        else
+        {
+            using var reopened = new ScopeLedger(Database);
+            Assert.True(reopened.SupportsDisplayMetadata);
+            Assert.Equal("20", reopened.Query(new("local_proxy", All().Start, All().End, "UTC")).Upload);
+            Assert.Null(reopened.Query(new("local_proxy", All().Start, All().End, "UTC")).Display!.EstimatedBilledBytes);
+        }
+        Assert.Throws<InvalidOperationException>(() =>
+            ScopeLedgerMigration.InitializeDisplay(Database, Path.Combine(directory, "second-display.db")));
+    }
+
+    [Fact]
+    public void DisplaySnapshotsPreserveRatesAcrossRenamesAndMinuteMixing()
+    {
+        using var ledger = new Ledger(Database, includeDisplayMetadata: true);
+        ledger.Accept(Sample(0, 100, name: "Synthetic 0.5x"));
+        ledger.Accept(Sample(1, 110, name: "Synthetic 0.5x"));
+        ledger.Accept(Sample(2, 120, name: "Synthetic 2倍"));
+        ledger.Accept(Sample(3, 130, name: "Synthetic 2倍"));
+        var result = ledger.Query(All());
+        Assert.Equal("30", result.Upload);
+        Assert.Equal("25", result.Display!.EstimatedBilledBytes);
+        Assert.Equal("20", result.Display.EstimateCoveredBytes);
+        Assert.Equal("10", result.Display.EstimateUnknownBytes);
+        Assert.Equal("partial", result.Display.RateStatus);
+        var old = ledger.Query(All() with { NodeName = "Synthetic 0.5x" });
+        Assert.Equal("10", old.Upload);
+        Assert.Equal("5", old.Display!.EstimatedBilledBytes);
+        Assert.Equal("0.5", Assert.Single(old.Records).Display!.Rate);
+        Assert.Equal("Synthetic 0.5x", old.ComparisonNodes!.Single().Name);
+        Assert.Equal("5", Assert.Single(ledger.Export(All() with { NodeName = "Synthetic 0.5x" })).Display!.EstimatedBilledBytes);
+        Assert.Equal(BigInteger.Parse(result.Upload), result.Records.Aggregate(BigInteger.Zero, (sum, row) => sum + BigInteger.Parse(row.Upload)));
+    }
+
+    [Fact]
+    public void DisplayEvidenceAndCoreCountersRollbackTogetherAndRecoveryStaysUnestimated()
+    {
+        using var ledger = new Ledger(Database, includeDisplayMetadata: true);
+        ledger.Accept(Sample(0, 0, name: "Synthetic 1x"));
+        RunSql("CREATE TRIGGER fail_display BEFORE INSERT ON ui_display_records BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;");
+        Assert.Throws<SqliteException>(() => ledger.Accept(Sample(1, 10, name: "Synthetic 1x")));
+        Assert.Equal("0", ledger.Query(All()).Upload);
+        RunSql("DROP TRIGGER fail_display;");
+        ledger.Accept(Sample(2, 20, name: "Synthetic 1x"));
+        ledger.Accept(Sample(20, 100, name: "Synthetic 1x"));
+        var result = ledger.Query(All());
+        Assert.Equal("100", result.Upload);
+        Assert.Equal("20", result.Display!.EstimatedBilledBytes);
+        Assert.Equal("80", result.Display.EstimateUnknownBytes);
+        Assert.Null(result.Records.Single(x => x.Quality == "recovered-contained").Display!.EstimatedBilledBytes);
+    }
+
+    [Fact]
+    public void AWriterWithoutMetadataCannotMakeOldSnapshotsCoverItsNewBytes()
+    {
+        using var ledger = new Ledger(Database, includeDisplayMetadata: true);
+        ledger.Accept(Sample(0, 0, name: "Synthetic 1x"));
+        RunSql($"""
+            UPDATE cursors SET at_ticks={Epoch.AddSeconds(1).UtcTicks},upload=10;
+            INSERT INTO minutes(start_ticks,node_key,upload,download,approximate,synthetic)
+            VALUES({Epoch.UtcTicks},'instance/node',10,0,0,0);
+            """);
+        ledger.Accept(Sample(2, 20, name: "Synthetic 1x"));
+        ledger.Accept(Sample(3, 30, name: "Synthetic 1x"));
+        var result = ledger.Query(All());
+        Assert.Equal("30", result.Upload);
+        Assert.Equal("10", result.Display!.EstimatedBilledBytes);
+        Assert.Equal("20", result.Display.EstimateUnknownBytes);
+    }
+
+    [Theory]
+    [InlineData("Synthetic VIP88a 09", null)]
+    [InlineData("Synthetic VIP88x", null)]
+    [InlineData("Synthetic 0.5x 2倍", null)]
+    [InlineData("Synthetic 0x", "0")]
+    [InlineData("Synthetic 0.5x", "0.5")]
+    [InlineData("Synthetic 2倍", "2")]
+    public void MultiplierRequiresAnExplicitUnambiguousMarker(string name, string? expected)
+    {
+        using var ledger = new Ledger(Database, includeDisplayMetadata: true);
+        ledger.Accept(Sample(0, 0, name: name));
+        ledger.Accept(Sample(1, 1, name: name));
+        Assert.Equal(expected, ledger.Query(All()).Display!.Rate);
+    }
+
+    [Fact]
+    public void ScopeDisplayUsesCapturedGroupNameWithoutGuessingIndexIdOrCountingProbeTwice()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        var member = new MeasurementScope("actual_member", "outbound",
+            System.Text.Json.JsonSerializer.Serialize(new[] { new string('A', 64), "synthetic-out" }), "Legacy friendly label",
+            OutboundTag: "synthetic-out") { CapturedName = new("Synthetic raw VIP88a", "US-0.5x") };
+        var probe = member with { Basis = "probe_urltest_member" };
+        var aggregate = new MeasurementScope("business", "aggregate", "business", "Synthetic total 2x");
+        var at = Epoch;
+        const long large = 9007199254740993;
+        ledger.Accept(new("synthetic", "core", "config", at, [new(member, 0, 0), new(probe, 0, 0), new(aggregate, 0, 0)], []));
+        ledger.Accept(new("synthetic", "core", "config", at.AddSeconds(1), [new(member, large, 0), new(probe, 2, 0), new(aggregate, large, 0)], []));
+        var result = ledger.Query(new("local_proxy", at, at.AddMinutes(1), "UTC"));
+        Assert.Equal("4503599627370496.5", result.Display!.EstimatedBilledBytes);
+        Assert.Equal(large.ToString(CultureInfo.InvariantCulture), result.Upload);
+        Assert.Null(Assert.Single(result.Scopes).Display!.MergeKey);
+        Assert.Equal("Synthetic raw VIP88a", Assert.Single(result.ComparisonNodes).Name);
+        Assert.Equal("US-0.5x", Assert.Single(Assert.Single(result.Records).Display!.Groups));
+        Assert.Equal("1", ledger.Query(new("probe_urltest_member", at, at.AddMinutes(1), "UTC")).Display!.EstimatedBilledBytes);
+        Assert.Null(ledger.Query(new("business", at, at.AddMinutes(1), "UTC")).Display!.EstimatedBilledBytes);
+        var filtered = ledger.Query(new("local_proxy", at, at.AddMinutes(1), "UTC") { ScopeName = "Synthetic raw VIP88a" });
+        Assert.Equal(result.Upload, filtered.Upload);
+    }
+
     [Fact]
     public void FirstReadIsBaselineAndReplayOrOlderSamplesDoNotAddBytes()
     {

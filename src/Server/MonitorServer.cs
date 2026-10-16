@@ -53,14 +53,15 @@ public sealed class MonitorServer : IAsyncDisposable
         var historyPath = Path.Combine(directory, "history.db");
         if (useScopeLedger)
         {
-            Scopes = File.Exists(historyPath) ? new ScopeLedger(historyPath) : ScopeLedger.CreateNew(historyPath, includeProbes: useProbeLedger);
+            Scopes = File.Exists(historyPath) ? new ScopeLedger(historyPath) : ScopeLedger.CreateNew(historyPath,
+                includeProbes: useProbeLedger, includeDisplayMetadata: true);
             if (Scopes.SupportsProbes != useProbeLedger)
             {
                 Scopes.Dispose();
                 throw new InvalidOperationException("v2 requires --scope-ledger; v3 requires --probe-ledger. Startup never migrates history.");
             }
         }
-        else legacyLedger = new(historyPath);
+        else legacyLedger = new(historyPath, includeDisplayMetadata: !File.Exists(historyPath));
         imports = new(Path.Combine(directory, "provider.db"));
         status = new("setup", "选择 v2rayN 数据目录，开始只读采集。", Demo: demo,
             CollectionBasis: useScopeLedger ? "actual_member" : "legacy_proxy", Probes: DefaultProbeStatus);
@@ -152,7 +153,7 @@ public sealed class MonitorServer : IAsyncDisposable
         {
             var basis = RequestedBasis(request);
             return Scopes is null ? Ledger.GetNodes() :
-                Scopes.GetScopes(basis).Select(x => new NodeInfo("scope:" + x.Id.ToString(CultureInfo.InvariantCulture), x.Scope.Name)).ToArray();
+                Scopes.GetDisplayNodes(basis);
         });
         app.MapGet("/api/history", (HttpRequest request) => QueryHistory(ParseQuery(request), RequestedBasis(request)));
         app.MapGet("/api/scope-history", (HttpRequest request) =>
@@ -166,13 +167,18 @@ public sealed class MonitorServer : IAsyncDisposable
             var basis = RequestedBasis(request);
             var scopeRows = Scopes?.Export(ToScopeQuery(query, basis));
             var rows = scopeRows is null ? Ledger.Export(query) : scopeRows.Select(ToTraffic).ToArray();
-            var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality" + (Scopes is null ? "" : ",basis,scope_key") + "\r\n");
+            var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality" + (Scopes is null ? "" : ",basis,scope_key") +
+                ",original_name,group_labels,rate,estimated_billed_bytes,estimate_covered_bytes,estimate_unknown_bytes\r\n");
             for (var i = 0; i < rows.Count; i++)
             {
                 var row = rows[i];
                 csv.AppendLine(string.Join(',', Cell(row.Start), Cell(row.End), Cell(row.NodeName), row.Upload, row.Download,
                     Cell(row.PartialCoverage ? row.Quality + ";uncollected_outbounds" : row.Quality)) +
-                    (scopeRows is null ? "" : "," + Cell(scopeRows[i].Basis) + "," + Cell(row.NodeKey)));
+                    (scopeRows is null ? "" : "," + Cell(scopeRows[i].Basis) + "," + Cell(row.NodeKey)) +
+                    "," + string.Join(',', Cell(row.Display?.OriginalName ?? ""), Cell(string.Join(" | ", row.Display?.Groups ?? [])),
+                        Cell(row.Display?.Rate ?? ""), Cell(row.Display?.EstimatedBilledBytes ?? ""),
+                        Cell(row.Display?.EstimateCoveredBytes ?? "0"), Cell(row.Display?.EstimateUnknownBytes ??
+                            (BigInteger.Parse(row.Upload, CultureInfo.InvariantCulture) + BigInteger.Parse(row.Download, CultureInfo.InvariantCulture)).ToString(CultureInfo.InvariantCulture))));
             }
             return Results.File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", "v2rayn-local-history.csv");
         });
@@ -209,19 +215,27 @@ public sealed class MonitorServer : IAsyncDisposable
     private ScopeQuery ToScopeQuery(QuerySpec query, string basis)
     {
         long? id = null;
+        long[]? ids = null;
         if (query.NodeKey is { } key)
         {
-            if (!key.StartsWith("scope:", StringComparison.Ordinal) ||
+            if (key.StartsWith("merge:", StringComparison.Ordinal))
+            {
+                ids = Scopes!.GetScopes(basis).Where(x => x.Scope.NodeId is not null &&
+                    key == "merge:" + x.Scope.Basis + ":" + XrayParser.Hash(Uri.EscapeDataString(x.InstanceId) + "/" + Uri.EscapeDataString(x.Scope.NodeId)))
+                    .Select(x => x.Id).ToArray();
+                if (ids.Length == 0) throw new ArgumentException("没有可核实的节点归并范围。");
+            }
+            else if (!key.StartsWith("scope:", StringComparison.Ordinal) ||
                 !long.TryParse(key.AsSpan(6), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed <= 0)
                 throw new ArgumentException("请选择有效的多范围历史 ID。");
-            id = parsed;
+            else id = parsed;
         }
         return new(basis, query.Start, query.End, query.TimeZoneId, query.Bucket, id, query.Page, query.PageSize)
-        { ScopeName = query.NodeName, NonZeroRecords = query.NonZeroRecords };
+        { ScopeName = query.NodeName, ScopeIds = ids, NonZeroRecords = query.NonZeroRecords };
     }
     private static TrafficRow ToTraffic(ScopeTrafficRow row) =>
         new(row.Start, row.End, "scope:" + row.ScopeId.ToString(CultureInfo.InvariantCulture),
-            row.Name, row.Upload, row.Download, row.Quality, row.PartialCoverage);
+            row.Name, row.Upload, row.Download, row.Quality, row.PartialCoverage) { Display = row.Display };
     private HistoryResult QueryHistory(QuerySpec query, string basis)
     {
         if (Scopes is null) return Ledger.Query(query);
@@ -231,7 +245,7 @@ public sealed class MonitorServer : IAsyncDisposable
             result.Upload, result.Download, Add(result.RecoveredUpload, result.PartialUpload), Add(result.RecoveredDownload, result.PartialDownload),
             result.Gaps.Count, result.Series,
             result.Scopes.Select(x => new NodeTotal("scope:" + x.ScopeId.ToString(CultureInfo.InvariantCulture), x.Name,
-                x.Upload, x.Download, x.RecoveredUpload, x.RecoveredDownload)).ToArray(),
+                x.Upload, x.Download, x.RecoveredUpload, x.RecoveredDownload) { Display = x.Display }).ToArray(),
             result.Records.Select(ToTraffic).ToArray(), checked((int)result.RecordCount))
         {
             Basis = result.Basis, RecoveredUpload = result.RecoveredUpload, RecoveredDownload = result.RecoveredDownload,
@@ -239,7 +253,8 @@ public sealed class MonitorServer : IAsyncDisposable
             UnbucketedUpload = result.UnbucketedUpload, UnbucketedDownload = result.UnbucketedDownload,
             Gaps = result.Gaps.Select(x => new GapInfo(x.Start, x.End, x.Reason, x.IsOpen, x.Origin)).ToArray(),
             PartialCoverage = result.Gaps.Any(x => x.Reason == "uncollected_outbounds"),
-            EarliestRecord = result.EarliestRecord
+            EarliestRecord = result.EarliestRecord, Display = result.Display, ComparisonNodes = result.ComparisonNodes,
+            DisplayMetadataEnabled = result.DisplayMetadataEnabled
         };
     }
     private QuerySpec ParseQuery(HttpRequest request)

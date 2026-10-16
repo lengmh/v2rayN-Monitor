@@ -11,8 +11,9 @@
     "issue": 23,
     "status": "in_progress",
     "branch": "feat/issue23-statistics-ui",
-    "scope": "共用排行、方向分段、环形占比与恢复标记；第二批统一四卡和九列明细；其他问题及 PR 暂停推进",
-    "remaining": "可信名称元数据、历史倍率与估算契约、完整页面验收",
+    "scope": "完成 #23 共用四视图、可信原名／归并、倍率快照与部分估算、原名对照及导出；其他问题及 PR 暂停推进",
+    "implementation_status": "complete",
+    "remaining": "最终精确 CI、真实库元数据初始化、预览启用和用户页面验收",
     "resume_requirement": "UI 后恢复采集主线时，Xray 多出站及策略组实际成员覆盖属于收尾必需项，当前不实施"
   },
   "remote_created_in_this_delivery": true,

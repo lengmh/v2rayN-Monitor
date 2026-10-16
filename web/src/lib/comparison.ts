@@ -5,7 +5,7 @@ export interface ComparisonRow { name: string; local: string | null; upload: str
 /** Name equality is a display grouping only. No key/identity association is persisted. */
 export function compareNames(local: HistoryResult, provider: ProviderHistory): ComparisonRow[] {
   const rows = new Map<string, ComparisonRow>();
-  for (const node of local.nodes) {
+  for (const node of local.comparisonNodes ?? local.nodes) {
     const row = rows.get(node.name) ?? { name: node.name, local: null, upload: null, download: null, raw: null, billed: null };
     row.upload = (bytes(row.upload ?? '0') + bytes(node.upload)).toString();
     row.download = (bytes(row.download ?? '0') + bytes(node.download)).toString();

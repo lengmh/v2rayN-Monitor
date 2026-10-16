@@ -85,7 +85,7 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
   await page.locator('.rank-recovery-marker:not(.vacant)').click();
   await expect(page.locator('#exact-value-dialog')).toBeVisible();
   await expect(page.locator('#exact-value-text')).toContainText('123,456,789 bytes');
-  await page.locator('#exact-value-dialog button').click();
+  await page.locator('#exact-value-dialog form button').click();
   await page.click('[data-ranking-mode=share]');
   await expect(page.locator('.share-chart circle')).toHaveCount(3);
   await expect(page.locator('.rank-download')).toHaveCount(3);
@@ -94,6 +94,32 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: `test-results/issue23-shares-${suffix}.png`, fullPage: true });
   }
+});
+test('issue23 captured rates, group names and exact copy work across business and probe views', async ({ page }) => {
+  const display = { originalName: 'Synthetic original 0.5x', groups: ['US-0.5x'], mergeKey: null, rate: '0.5', rateStatus: 'known',
+    estimatedBilledBytes: '8053063680', estimateCoveredBytes: '16106127360', estimateUnknownBytes: '0' };
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic', currentNode: 'Synthetic', lastSample: null,
+      uploadPerSecond: null, downloadPerSecond: null, demo: false, probes: { historyEnabled: true, state: 'available', message: 'Synthetic' } })),
+    '/api/history': (route, request, url) => route.fulfill(json({ ...history, basis: url.searchParams.get('basis') ?? 'local_proxy',
+      displayMetadataEnabled: true, display, nodes: [{ ...history.nodes[0], display }], records: [{ ...history.records[0], display }] }))
+  });
+  await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
+  await expect(page.locator('#records .node-cell .node-groups')).toHaveText('【US-0.5x】');
+  await expect(page.locator('#records tr').first().locator('td').nth(6)).toHaveText('0.5');
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
+    value: { writeText: async text => { window.syntheticCopied = text; } } }));
+  await page.locator('#records tr').first().locator('td').nth(7).locator('button').click();
+  await page.click('#copy-exact-value');
+  await expect(page.locator('#copy-value-result')).toHaveText('已复制');
+  expect(await page.evaluate(() => window.syntheticCopied)).toBe('8,053,063,680 bytes');
+  await page.locator('#exact-value-dialog form button').click();
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
+  await page.screenshot({ path: 'test-results/issue23-captured-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/issue23-captured-mobile.png', fullPage: true });
 });
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
@@ -158,7 +184,7 @@ test('CSV source uses node statistics and exact billing without local direction 
   await expect(page.locator('#total-exact')).toHaveText('1,300 bytes');
   await page.locator('#records tr').first().locator('td').nth(7).locator('button').click();
   await expect(page.locator('#exact-value-text')).toHaveText('1,000.800000000123 bytes');
-  await page.locator('#exact-value-dialog button').click();
+  await page.locator('#exact-value-dialog form button').click();
   await page.screenshot({ path: 'test-results/provider-statistics-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -414,7 +440,7 @@ test('local minute details keep compact columns, exact bytes and scoped horizont
   await expect(page.locator('#records tr').first().locator('.zero')).toHaveText('0.000 GB');
   await page.locator('#records tr').first().locator('td').nth(4).locator('button').click();
   await expect(page.locator('#exact-value-text')).toHaveText('12,345 bytes');
-  await page.locator('#exact-value-dialog button').click();
+  await page.locator('#exact-value-dialog form button').click();
   await expect(page.locator('#records tr').nth(5).locator('.node-cell')).toHaveAttribute('title', records[5].nodeName);
   await expect(page.locator('#records .warning')).toHaveCount(1);
   await panel.screenshot({ path: 'test-results/local-details-after-desktop.png' });

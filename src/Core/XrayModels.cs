@@ -32,6 +32,7 @@ public sealed record V2RayScopeStatistics(V2RayMemberStatistics Members, V2RayPr
 public sealed record SingboxMemberIdentity(string OutboundTag, string Protocol, string? IndexId)
 {
     public string? DisplayName { get; init; }
+    public CapturedNodeName? CapturedName { get; init; }
 }
 // Candidates come from an independently verified configuration, not names returned by the RPC.
 public sealed record SingboxMemberCatalog(string InstanceId, string Generation, string ProcessIdentity,

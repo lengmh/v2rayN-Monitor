@@ -568,7 +568,23 @@ test('local details use selected units, preserve exact totals and unknown metada
   change('unit', 'GiB');
   assert.equal(get('records').rows[0].cells[4].textContent, '< 0.001 GiB');
   assert.equal(get('records').rows[0].cells[4].title, '12,345 bytes');
-  assert.ok(get('records-caption').textContent.includes('历史倍率未核实'));
+  assert.ok(get('records-caption').textContent.includes('旧记录保持未知'));
+});
+
+test('captured billing displays partial coverage and keeps group labels separate from original names', async t => {
+  const display = { originalName: 'Original synthetic', groups: ['US-0.5x'], mergeKey: null, rate: '0.5', rateStatus: 'known',
+    estimatedBilledBytes: '8053063680', estimateCoveredBytes: '16106127360', estimateUnknownBytes: '0' };
+  const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history, displayMetadataEnabled: true,
+    display: { ...display, rate: null, rateStatus: 'partial', estimateUnknownBytes: '500' },
+    nodes: [{ ...history.nodes[0], display }], records: [{ ...history.records[0], display }] }) });
+  assert.equal(get('billing-value').textContent, '8.053 GB');
+  assert.equal(get('billing-exact').textContent, '8,053,063,680 bytes');
+  assert.ok(get('billing-note').textContent.includes('未估算'));
+  const cells = get('records').rows[0].cells;
+  assert.equal(cells[6].textContent, '0.5');
+  assert.equal(cells[7].title, '8,053,063,680 bytes');
+  assert.ok(cells[1].textContent.startsWith('Original synthetic'));
+  assert.equal(cells[1].querySelector('.node-groups').textContent, '【US-0.5x】');
 });
 
 test('partial-only local recovery keeps summary unknown while measured idle remains zero', async t => {

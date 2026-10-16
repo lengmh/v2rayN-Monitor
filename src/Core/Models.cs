@@ -4,9 +4,15 @@ public sealed record CounterSample(string InstanceId, string NodeId, string Node
     bool PartialCoverage = false);
 public sealed record NodeInfo(string Key, string Name);
 public sealed record TrafficRow(string Start, string End, string NodeKey, string NodeName, string Upload, string Download, string Quality,
-    bool PartialCoverage = false);
+    bool PartialCoverage = false)
+{
+    public TrafficDisplay? Display { get; init; }
+}
 public sealed record SeriesPoint(string Label, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0");
-public sealed record NodeTotal(string Key, string Name, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0");
+public sealed record NodeTotal(string Key, string Name, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0")
+{
+    public TrafficDisplay? Display { get; init; }
+}
 public sealed record GapInfo(string Start, string End, string Reason, bool IsOpen, string? Origin = null);
 public sealed record HistoryResult(string Start, string End, string Upload, string Download, string UnallocatedUpload, string UnallocatedDownload, int GapCount, IReadOnlyList<SeriesPoint> Series, IReadOnlyList<NodeTotal> Nodes, IReadOnlyList<TrafficRow> Records, int RecordCount)
 {
@@ -20,6 +26,9 @@ public sealed record HistoryResult(string Start, string End, string Upload, stri
     public IReadOnlyList<GapInfo> Gaps { get; init; } = [];
     public bool PartialCoverage { get; init; }
     public string? EarliestRecord { get; init; }
+    public TrafficDisplay? Display { get; init; }
+    public IReadOnlyList<NodeTotal>? ComparisonNodes { get; init; }
+    public bool DisplayMetadataEnabled { get; init; }
 }
 public sealed record QuerySpec(DateTimeOffset Start, DateTimeOffset End, string TimeZoneId, string Bucket = "day", string? NodeKey = null, int Page = 0, int PageSize = 50)
 {
