@@ -82,6 +82,52 @@ public sealed class ActiveConfigurationTests : IDisposable
         return result;
     }
 
+    [Fact]
+    public void IdenticalPeriodicGuiReplacementRetainsCounterContinuity()
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "gui.json");
+        var bytes = Bytes(Gui);
+        File.WriteAllBytes(path, bytes);
+        var writtenAt = new DateTimeOffset(File.GetLastWriteTimeUtc(path));
+        using var ledger = new Ledger(History);
+        var guard = new XrayGenerationGuard();
+        Accept(ledger, guard, Snapshot(), 0, 100);
+        Accept(ledger, guard, Snapshot(), 1, 110);
+
+        var replacement = path + "_temp";
+        File.WriteAllBytes(replacement, bytes);
+        File.SetLastWriteTimeUtc(replacement, writtenAt.UtcDateTime.AddSeconds(1));
+        File.Move(replacement, path, true); // The pinned client saves through an atomic replacement.
+
+        Assert.True(WindowsDiscovery.GuiFileUnchanged(path, bytes, writtenAt));
+        Assert.Equal("recorded", Accept(ledger, guard, Snapshot(), 2, 130));
+        Assert.Equal("30", ledger.Query(All).Upload);
+        Assert.Equal(0, ledger.Query(All).GapCount);
+    }
+
+    [Theory]
+    [InlineData("selection")]
+    [InlineData("defaults")]
+    [InlineData("statistics")]
+    public void ChangedGuiReplacementStillRejectsTheCapturedSnapshot(string change)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "gui.json");
+        var bytes = Bytes(Gui);
+        File.WriteAllBytes(path, bytes);
+        var writtenAt = new DateTimeOffset(File.GetLastWriteTimeUtc(path));
+        var changed = change switch
+        {
+            "selection" => Gui.Replace("\"IndexId\":\"A\"", "\"IndexId\":\"B\""),
+            "defaults" => Gui.Replace("chrome", "firefox"),
+            _ => Gui.Replace("\"EnableStatistics\":true", "\"EnableStatistics\":false")
+        };
+        File.WriteAllText(path, changed);
+        File.SetLastWriteTimeUtc(path, writtenAt.UtcDateTime.AddSeconds(1));
+        Assert.False(WindowsDiscovery.GuiFileUnchanged(path, bytes, writtenAt));
+    }
+
     private const string AnyTlsConfiguration = """
         {"inbounds":[{"type":"mixed","tag":"mixed","listen":"127.0.0.1","listen_port":12344}],
          "outbounds":[{"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","server_port":443,

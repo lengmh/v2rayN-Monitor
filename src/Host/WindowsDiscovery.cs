@@ -272,7 +272,7 @@ public sealed class WindowsDiscovery : IDisposable
         var parentStartedAt = parent.StartedAt!.Value;
         var listenerIdentity = ReadListenerIdentity(configuration!.MetricsEndpoint, core.Pid);
         if (singbox) VerifyExtension(core, memberMode);
-        if (Stamp(guiPath) != guiStamp || Stamp(configPath) != configStamp
+        if (!GuiFileUnchanged(guiPath, guiBytes, guiStamp.WrittenAt) || Stamp(configPath) != configStamp
             || (singbox && Stamp(statisticsPath) != statisticsStamp))
             throw Fail("snapshot_changed", "配置在读取过程中发生变化；本次采样保留为缺口。");
         var instanceId = XrayParser.Hash(root.ToUpperInvariant());
@@ -393,6 +393,12 @@ public sealed class WindowsDiscovery : IDisposable
         transaction.Commit(); // Ends a read-only transaction; no profile or setting is changed.
         return string.IsNullOrWhiteSpace(name) ? "未命名节点" : name;
     }
+
+    internal static bool GuiFileUnchanged(string path, ReadOnlySpan<byte> capturedBytes, DateTimeOffset writtenAt)
+        // The pinned client periodically replaces this file even when its bytes are unchanged.
+        // Core configuration and sidecar stamps remain strict generation boundaries.
+        => Stamp(path) == new FileStamp(capturedBytes.Length, writtenAt)
+            || ReadStableFile(path, 1024 * 1024, out _).AsSpan().SequenceEqual(capturedBytes);
 
     private static byte[] ReadStableFile(string path, int maximumBytes, out FileStamp stamp)
     {
