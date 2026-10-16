@@ -86,11 +86,33 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
   await expect(page.locator('#exact-value-dialog')).toBeVisible();
   await expect(page.locator('#exact-value-text')).toContainText('123,456,789 bytes');
   await page.locator('#exact-value-dialog form button').click();
-  await page.click('[data-ranking-mode=share]');
-  await expect(page.locator('.share-chart circle')).toHaveCount(3);
-  await expect(page.locator('.rank-download')).toHaveCount(3);
   for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
     await page.setViewportSize({ width, height });
+    await page.click('[data-ranking-mode=ranking]');
+    const panel = page.locator('.ranking-panel');
+    const rankingHeight = (await panel.boundingBox()).height;
+    const marker = await page.locator('.rank-recovery-marker:not(.vacant)').boundingBox();
+    const name = await page.locator('.rank-node').first().boundingBox();
+    expect(Math.abs(marker.y - name.y)).toBeLessThanOrEqual(3);
+    expect((await page.locator('.rank-row').first().boundingBox()).height).toBeLessThan(64);
+    await page.screenshot({ path: `test-results/issue23-ranking-${suffix}.png`, fullPage: true });
+    await page.click('[data-ranking-mode=share]');
+    await expect(page.locator('.share-chart circle')).toHaveCount(3);
+    await expect(page.locator('#ranking .rank-value, #ranking .rank-track, .share-total')).toHaveCount(0);
+    expect(Math.abs((await panel.boundingBox()).height - rankingHeight)).toBeLessThanOrEqual(1);
+    const tooltip = page.locator('.share-tooltip');
+    await expect(tooltip).toBeHidden();
+    const ring = await page.locator('.share-chart').boundingBox();
+    await page.mouse.move(ring.x + ring.width * .86, ring.y + ring.height / 2);
+    await expect(tooltip).toHaveText('9.127 GB');
+    await expect(tooltip).toBeVisible();
+    await page.screenshot({ path: `test-results/issue23-share-hover-${suffix}.png`, fullPage: true });
+    await page.mouse.move(0, 0);
+    await expect(tooltip).toBeHidden();
+    await page.locator('.share-chart circle').first().focus();
+    await expect(tooltip).toBeVisible();
+    await page.locator('[data-ranking-mode=share]').focus();
+    await expect(tooltip).toBeHidden();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: `test-results/issue23-shares-${suffix}.png`, fullPage: true });
   }
@@ -175,8 +197,11 @@ test('CSV source uses node statistics and exact billing without local direction 
     '/api/provider/nodes': route => route.fulfill(json([{ key: 'Synthetic CSV node', name: 'Synthetic CSV node' }])),
     '/api/provider/history': route => route.fulfill(json(provider))
   });
+  const localQualityBackground = await page.locator('#records .quality-pill').first().evaluate(el => getComputedStyle(el).backgroundColor);
   await page.selectOption('#statistics-source', 'Synthetic provider');
   await expect(page.locator('#records')).toContainText('Synthetic CSV node');
+  await expect(page.locator('#records .quality-pill')).toHaveText('服务商导入');
+  expect(await page.locator('#records .quality-pill').evaluate(el => getComputedStyle(el).backgroundColor)).toBe(localQualityBackground);
   await expect(page.locator('#download-title')).toHaveText('下载');
   await expect(page.locator('#download-value')).toHaveText('—');
   await expect(page.locator('#billing-exact')).toHaveText('1,000.800000000123 bytes');
@@ -185,6 +210,8 @@ test('CSV source uses node statistics and exact billing without local direction 
   await page.locator('#records tr').first().locator('td').nth(7).locator('button').click();
   await expect(page.locator('#exact-value-text')).toHaveText('1,000.800000000123 bytes');
   await page.locator('#exact-value-dialog form button').click();
+  await page.locator('.records-panel .table-scroll').evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  await page.locator('.records-panel').screenshot({ path: 'test-results/provider-quality-desktop.png' });
   await page.screenshot({ path: 'test-results/provider-statistics-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -222,12 +249,22 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await page.selectOption('#statistics-source', provider.source);
   await page.check('#compare-toggle');
   await expect(page.locator('#comparison-view')).toBeVisible();
+  const nodeCard = page.locator('#comparison-nodes').locator('xpath=ancestor::section[1]');
+  const bucketCard = page.locator('#comparison-buckets').locator('xpath=ancestor::section[1]');
+  const nodeBox = await nodeCard.boundingBox(), bucketBox = await bucketCard.boundingBox();
+  expect(Math.abs(nodeBox.y - bucketBox.y)).toBeLessThanOrEqual(1);
+  expect(bucketBox.x).toBeGreaterThanOrEqual(nodeBox.x + nodeBox.width);
   await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
   await page.selectOption('#provider-metric', 'billed');
   await expect(page.locator('#comparison-nodes .paired-value').last()).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
   const only = page.locator('#comparison-nodes tr').filter({ hasText: 'CSV only' });
   await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
   await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);
+  const missingValue = only.locator('.paired-value'), missingCell = only.locator('.paired-traffic');
+  expect(await missingValue.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(238, 241, 243)');
+  expect(await missingCell.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  expect((await missingValue.boundingBox()).width).toBeLessThan((await missingCell.boundingBox()).width / 2);
+  await expect(only.locator('.paired-track')).toBeVisible();
   await expect(page.locator('#comparison-recovery')).toContainText('500 bytes');
   await expect(page.locator('#export-button')).toBeHidden();
   await page.click('[data-period=day]');
@@ -251,6 +288,8 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(31);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const mobileNodeBox = await nodeCard.boundingBox(), mobileBucketBox = await bucketCard.boundingBox();
+  expect(mobileBucketBox.y).toBeGreaterThanOrEqual(mobileNodeBox.y + mobileNodeBox.height);
   await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(31);
   await expect(page.locator('#comparison-chart')).not.toContainText('无法清楚展示');
   await page.screenshot({ path: 'test-results/comparison-mobile.png', fullPage: true });
