@@ -52,3 +52,16 @@ CSV 与本机数据分别存储、分别显示，不相加。初版未提供批�
 退出 Monitor 后备份整个 Monitor 数据目录（包含 history.db、provider.db、settings.json 及可能的 SQLite sidecar）。不要在运行中只复制主数据库文件。不要把数据目录放进公开仓库、共享文件夹或自动上传位置。开机启动由托盘菜单显式开关，只修改当前用户的启动项。
 
 便携包未签名，可能触发 Windows 下载文件提示。自行核对 Releases 页面对应提交、下载资产与 SHA256，不要绕过浏览器证书/安全连接警告。签名尚未提供；用户验收范围及开发验证记录见 docs/STATUS.md。
+
+
+## 7. v2rayN + Monitor 联动启动（开发预览，未包含在 v0.1.1 正式包）
+
+此功能属于 [Issue #24](https://github.com/lengmh/v2rayN-Monitor/issues/24) 的可选联动入口。已有的“登录 Windows 时启动”不变。
+
+1. 运行开发预览版 Monitor，先选好 v2rayN **数据目录**（与 Monitor 的存储目录不同）。
+2. 右键 Monitor 托盘 → **创建 v2rayN + Monitor 联动启动快捷方式…**，选择实际使用的 `v2rayN.exe`。
+3. 桌面将新增 `v2rayN + Monitor.lnk`；如同名文件已存在，会使用新名称而不覆盖。
+4. 此后**从这个新快捷方式**启动时，v2rayN 未运行则启动，Monitor 未运行则在托盘后台启动并自动采集。不会为联动启动自动打开浏览器；查看统计仍通过 Monitor 托盘。
+5. 移动或替换任一可执行文件后，请重新创建快捷方式。启动 v2rayN 需要 UAC 授权时，仍由 Windows 正常弹出；Monitor 不自行提权。
+
+**边界：** 本功能不监听任意 `v2rayN.exe` 进程的创建事件。直接使用 v2rayN 原有入口或其开机任务，不会借此唤起未运行的 Monitor。如希望登录 Windows 后始终可采集，继续使用 Monitor 托盘已有的“登录 Windows 时启动”选项。关闭 v2rayN 不会自动退出 Monitor；未能读取核心时保留原有的缺口/未知语义。联动启动不读写 v2rayN 配置，不增加另一套历史账本。
