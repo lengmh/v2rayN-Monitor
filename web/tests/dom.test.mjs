@@ -45,17 +45,30 @@ test('partial route coverage stays explicit in live status and historical record
   assert.ok(get('collector-message').textContent.includes(description));
   assert.ok(get('settings-collector-status').textContent.includes(description));
   assert.equal(get('status-dot').classList.contains('connected'), false);
-  assert.ok(get('quality-notice').textContent.includes('组和其他代理的流量未知'));
+  assert.ok(get('quality-notice').textContent.includes('未覆盖范围的流量未知'));
   assert.ok(get('gap-list').textContent.includes('其他出站未采集，流量未知'));
   assert.ok(get('records').textContent.includes('部分出站'));
   assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('Xray partial scope keeps outbound semantics and probe limitation visible', async t => {
+  const description = '仅采集 Xray proxy 出站自身的累计字节，包含策略组选中该出站的连接；其他出站未采集，内部探测未单独区分。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Xray proxy', currentNode: 'Synthetic Xray', lastSample: null,
+      uploadPerSecond: null, downloadPerSecond: null, demo: false, collectionBasis: 'legacy_proxy',
+      scope: { basis: 'xray_outbound_proxy', isPartial: true, uncollectedOutbounds: 2, uncollectedGroups: 1, description },
+      probes: { historyEnabled: true, state: 'unsupported', message: '当前 Xray 路径未接入内部探测计量。' } })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.ok(get('collector-message').textContent.includes(description));
+  assert.ok(get('settings-collector-status').textContent.includes(description));
+  assert.equal(get('probe-state').textContent, '当前核心未支持探测计量');
 });
 test('historical scope warning survives pagination and the capped gap details', async t => {
   const { get } = await fixture(t, {
     '/api/history': () => Response.json({ ...history, partialCoverage: true, gapCount: 201,
       gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'identity_change', isOpen: false }] })
   });
-  assert.ok(get('quality-notice').textContent.includes('组和其他代理的流量未知'));
+  assert.ok(get('quality-notice').textContent.includes('未覆盖范围的流量未知'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
 test('opt-in member basis stays explicit without adding aggregate dimensions', async t => {

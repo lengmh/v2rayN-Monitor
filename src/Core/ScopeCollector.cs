@@ -77,7 +77,8 @@ public static class ScopeCollector
         var key = Uri.EscapeDataString(snapshot.InstanceId) + "/" + Uri.EscapeDataString(snapshot.NodeId);
         return new(snapshot.InstanceId, snapshot.ProcessIdentity, snapshot.Generation, at,
             [new(new("legacy_proxy", "legacy_node", key, snapshot.NodeName, snapshot.NodeId),
-                counter.Upload, counter.Download, InvalidateContinuity: invalidateContinuity)], []);
+                counter.Upload, counter.Download, InvalidateContinuity: invalidateContinuity,
+                PartialCoverage: snapshot.Scope?.IsPartial == true)], []);
     }
 
     public static ScopeCommit Commit(ScopeLedger ledger, ScopeBatch completeDirectory)

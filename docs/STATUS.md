@@ -1,5 +1,21 @@
 # 初版实现与验证状态
 
+## 2026-10-16：#15 Xray 多出站配置恢复独立 proxy 部分采集
+
+起点 `6a3746eae347bd927a6b313dc90faef34b7e452c`，工作树干净。使用反馈：sing-box 连通性异常，切换 Xray 后优先处理故障。只读确认当前为 Xray `26.7.28 ced1f55`；SOCKS/HTTP 入口的有界 HEAD 请求可用，单次超时复测成功。磁盘上的定制 sing-box 仍为固定 test.5 摘要，上一批只更新 Monitor，未替换核心。此前 sing-box 连接异常尚未复现或归因，本批不宣称解决该问题。
+
+当前确定的采集故障是：Xray 原始 metrics 可用，但旧解析器因非空 balancer 或额外出站整体拒绝配置。修复后允许这些配置与已核实的唯一独立 `proxy` 共存，仍仅读取 `stats.outbound.proxy`，不累加其他出站或 direct，不按组当前选择猜归属。链路检查、活动 IndexId/连接参数、核心进程/监听/配置代次及采样前后 guard 保持；任意链、重复 tag 和畸形 balancer 仍拒绝。
+
+Xray 使用独立 `xray_outbound_proxy` 覆盖说明，明确计数属于 proxy 出站自身、包含组选中该出站的连接，其他代理出站未知，内部探测未单独区分；不复用 sing-box 的「仅直接路由匹配」含义。历史仍为 `legacy_proxy`，部分覆盖标记随批次入账、查询及导出保留，状态传给原 HTML 展示。没有新增账本维度或 Schema，没有实现 Xray 全量成员/探测采集。切换后首接只建新基线，不追回此前无法确认的流量。
+
+本地隔离验证：旧解析器的两个最短红例均失败；最终 Core 344、Server 38、前端 57 项通过，Windows Host Release 零警告零错误。新增回归覆盖多出站/组部分范围、重复 tag/链/畸形组拒绝、真实发现调用链的合成输入、从 sing-box 成员到 Xray `legacy_proxy` 的首接及退休隔离、持久部分覆盖、页面状态和探测不可用说明。旧 Hysteria 测试中的重命名 direct 出站改为按协议排除；链仍拒绝。
+
+失败记录保留：首次全量运行的一项旧断言仍要求多出站拒绝；新增测试随后纠正了对 `ScopeHistory` 不存在字段的断言。红例还原源码保留旧时间戳，增量构建曾复用旧解析器 DLL；核对源码逐字节一致后强制重建，才取得上述最终通过结果。没有把失败或缓存构建当成修复验证。
+
+修复后的生产 Windows 发现对当前实际 Xray 连续 3 轮只读验证均 connected，同会话/代次，读取 1 个 `legacy_proxy` 范围；披露其他 34 个代理出站和 2 个策略组，探测状态 unsupported。该 helper 未写真实账本，也未更换运行 Monitor；当前 `d2dcae4` 仍在运行，需精确 CI 包核对并在提醒用户退出 Monitor 后接入。无需重开 Xray、覆盖 sing-box、改变路由或迁移 v3。
+
+证据仅在 `F:\AI playground\TempFiles\v2rayn-monitor-xray-partial-20261016`：隔离源码、红例/失败/最终日志和 TRX、`live-discovery.json`。提交后精确 CI、包身份与后续实机启用分别记录，不借本地只读发现宣称已恢复生产记账。S5.5 / S5.6 / S5.8 保持 in_progress；Xray 其他出站和内部探测、受控切换、既有页面尾项继续保留，#19 planned，#23 独立安排。
+
 ## 2026-10-16：#15 / #18 修复包实机启用 / 同代次恢复
 
 起点 `d2dcae4e7e5cd3c7ddb5d75ff02c30017e6c37ca`，工作树干净。Monitor已退出，v2rayN保持运行。本批按同范围持续授权完成备份和配套 Monitor 更新，不替换 test.5、不切节点/组、不重开核心。

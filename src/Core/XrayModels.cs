@@ -40,7 +40,8 @@ public sealed record SingboxMemberCatalog(string InstanceId, string Generation, 
 public sealed record ScopeCapture(XraySnapshot Snapshot, SingboxMemberCatalog? Catalog,
     IReadOnlyList<string> EnabledMembers);
 public sealed record ScopeCollectorReading(ScopeBatch? Batch, string State, string Message,
-    string? CurrentNode = null, bool InvalidateContinuity = false, ProbeCollectionStatus? Probes = null);
+    string? CurrentNode = null, bool InvalidateContinuity = false, ProbeCollectionStatus? Probes = null,
+    ProxyCollectionScope? Scope = null);
 public sealed record XrayGuiSelection(string IndexId, bool EnableStatistics, bool DisplayRealTimeSpeed, bool EnableTun)
 {
     public bool StatisticsRequested => EnableStatistics || DisplayRealTimeSpeed;
@@ -49,11 +50,15 @@ public sealed record XrayEffectiveConfiguration(Uri MetricsEndpoint, string Prot
     string CoreName = "Xray", ProxyCollectionScope? Scope = null);
 
 // This is route-tag coverage, not the selected member of a group or a chain hop.
-public sealed record ProxyCollectionScope(int UncollectedOutbounds, int UncollectedGroups)
+public sealed record ProxyCollectionScope(int UncollectedOutbounds, int UncollectedGroups,
+    string Basis = "routed_proxy")
 {
-    public string Basis => "routed_proxy";
-    public bool IsPartial => UncollectedOutbounds > 0;
-    public string Description => IsPartial
+    public bool IsPartial => UncollectedOutbounds > 0 || UncollectedGroups > 0;
+    public string Description => Basis == "xray_outbound_proxy"
+        ? IsPartial
+            ? $"仅采集 Xray proxy 出站自身的累计字节，包含策略组选中该出站的连接；其他 {UncollectedOutbounds} 个代理出站未采集，配置含 {UncollectedGroups} 个策略组。当前合计不是全部代理流量，内部探测未单独区分。"
+            : "采集 Xray proxy 出站自身的累计字节，排除其他出站；内部探测未单独区分。"
+        : IsPartial
         ? $"仅采集路由直接匹配 proxy 的字节。其他 {UncollectedOutbounds} 个出站（含 {UncollectedGroups} 个策略组）未采集，其流量未知；当前合计不是全部代理流量。"
         : "采集路由直接匹配 proxy 的原始字节，排除 direct。";
 }

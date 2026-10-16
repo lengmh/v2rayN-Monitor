@@ -202,7 +202,7 @@ function renderHistory(history: HistoryResult): void {
   if ((history.gaps ?? []).some(gap => gap.origin === 'legacy' && gap.isOpen))
     quality.push('本范围包含历史遗留开放缺口；新成员成功采样不会关闭这类缺口。');
   if (history.partialCoverage || (history.gaps ?? []).some(gap => gap.reason === 'uncollected_outbounds') || history.records.some(record => record.partialCoverage))
-    quality.push('本范围包含其他出站未采集的区间；组和其他代理的流量未知，合计仅包含已核实的计量范围。');
+    quality.push('本范围包含其他出站未采集的区间；未覆盖范围的流量未知，合计仅包含已核实的计量范围。');
   if (recovered > 0n) quality.push(`合计及节点排行已包含恢复量 ${formatBytes(recovered, unit)}（${exactBytes(recovered)}）。`);
   if (unbucketed > 0n) quality.push(`其中 ${formatBytes(unbucketed, unit)} 跨越多个时间桶，已计入合计，尚未分配到当前趋势图。`);
   if (partial > 0n) quality.push(`另有部分重叠的恢复区间，共 ${formatBytes(partial, unit)}（${exactBytes(partial)}）；本范围内用量未知，未计入合计，不能跨日期相加。`);

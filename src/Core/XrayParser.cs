@@ -73,9 +73,16 @@ public static class XrayParser
                 reason = "statistics_disabled";
                 return false;
             }
-            if (HasChaining(root) || HasNonemptyBalancers(root)
+            if (HasChaining(root)
                 || !Property(root, "outbounds", out var outbounds) || outbounds.ValueKind != JsonValueKind.Array)
                 return false;
+            var groups = 0;
+            if (Property(root, "routing", out var routing) && Property(routing, "balancers", out var balancers))
+            {
+                if (balancers.ValueKind != JsonValueKind.Array) return false;
+                groups = balancers.GetArrayLength();
+            }
+            var uncollected = 0;
             JsonElement? proxy = null;
             var tags = new HashSet<string>(StringComparer.Ordinal);
             foreach (var outbound in outbounds.EnumerateArray())
@@ -87,12 +94,12 @@ public static class XrayParser
                     if (proxy.HasValue || !SupportedProtocol(protocol)) return false;
                     proxy = outbound;
                 }
-                else if (!((tag == "direct" && protocol == "freedom")
-                    || (tag == "block" && protocol == "blackhole"))) return false;
+                else if (protocol is not ("freedom" or "blackhole")) uncollected++;
             }
             if (!proxy.HasValue || !Text(proxy.Value, "protocol", out var proxyProtocol)
                 || !TryServerIdentity(proxy.Value, proxyProtocol, out var serverIdentity)) return false;
-            configuration = new(endpoint!, proxyProtocol, serverIdentity);
+            configuration = new(endpoint!, proxyProtocol, serverIdentity, Scope:
+                new ProxyCollectionScope(uncollected, groups, "xray_outbound_proxy"));
             reason = "ready";
             return true;
         }
@@ -405,10 +412,6 @@ public static class XrayParser
             foreach (var child in item.EnumerateArray()) if (HasChaining(child)) return true;
         return false;
     }
-
-    private static bool HasNonemptyBalancers(JsonElement root)
-        => Property(root, "routing", out var routing) && Property(routing, "balancers", out var balancers)
-            && (balancers.ValueKind != JsonValueKind.Array || balancers.GetArrayLength() != 0);
 
     // Duplicate critical JSON keys are ambiguous. Do not silently choose the last one.
     private static bool Property(JsonElement root, string name, out JsonElement value)
