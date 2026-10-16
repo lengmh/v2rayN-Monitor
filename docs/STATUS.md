@@ -1,5 +1,19 @@
 # 初版实现与验证状态
 
+## 2026-10-16：Xray 修复包启用 / 首接与持续记账验收
+
+起点 `9e51a8dc21c743ab66a7a47f189b71538e3b0dd2`，工作树干净。Monitor已退出，v2rayN/Xray保持运行。本批在原目录 mutex 下创建最新 SQLite backup，独立比较 history 11 表、provider 2 表及全部 DDL，设置逐字节一致；原 v3 直接使用，没有迁移。
+
+精确 `9e51a8d` 的 Monitor push / PR CI `38880714875` / `38880721929` 和扩展 PR CI `38880721964` 均成功；两个 Monitor CI 的 Linux/Windows Core 344、Server 38、前端 57 及 Linux 浏览器 17 通过。选用 push CI artifact `12037366911`，EXE SHA256 `079eca4b8333b7ce253b1e83743da4e037a39a041ec84ec1d247c451809c556c`，ProductVersion 与完整提交一致。没有部署扩展 CI 的核心产物。
+
+启动该包，保留 `--probe-ledger` 和原 `live-scope-data`。唯一 Monitor 进程、路径/参数、回环监听核对通过，首页和实际引用 JS 返回 200，未认证状态/历史 API 返回 401。Xray 原进程、父进程及创建时间保持；没有替换 sing-box、切换节点、修改路由或实际启动项。
+
+启动前就绪的观察器保存 采样批次：一个新增 `legacy_proxy` 范围首接只建基线，后续 相邻区间原始累计差与入账增量逐项一致，会话/代次保持且有非零流量。旧范围、分钟记录及未分时记录逐值保留，新增范围单独记账；provider的采样记录及设置不变，SQLite完整性和外键检查通过。当前范围无采集运行缺口，保留预期的 `uncollected_outbounds` 部分覆盖提示。
+
+临时验收脚本最初误把查询派生的 `partial_coverage` 当作物理列，完成批次保存后报错。按实际账本的覆盖缺口区间修正查询，再使用原 采样批次复核通过；没有重启 Monitor、重建基线或修改真实账本来规避失败。部分覆盖以持久缺口和查询投影表达。
+
+证据位于 `F:\AI playground\TempFiles\v2rayn-monitor-xray-partial-20261016\activation-20261016-173843`：最新备份、独立比较、启动回执、原始批次、`activation-observation.json` 和 `runtime-http.json`。本批修复并验证的是 Xray 独立 proxy 的生产采集；其他出站和内部探测仍未覆盖，此前 sing-box 连通性异常仍未复现/归因。新包页面目视与受控切换尚未验收，S5.5/S5.6/S5.8 保持 in_progress；#19 planned，#23 独立安排。本次文档提交的精确 CI 单独归档。
+
 ## 2026-10-16：#15 Xray 多出站配置恢复独立 proxy 部分采集
 
 起点 `6a3746eae347bd927a6b313dc90faef34b7e452c`，工作树干净。使用反馈：sing-box 连通性异常，切换 Xray 后优先处理故障。只读确认当前为 Xray `26.7.28 ced1f55`；SOCKS/HTTP 入口的有界 HEAD 请求可用，单次超时复测成功。磁盘上的定制 sing-box 仍为固定 test.5 摘要，上一批只更新 Monitor，未替换核心。此前 sing-box 连接异常尚未复现或归因，本批不宣称解决该问题。
