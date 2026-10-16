@@ -20,6 +20,8 @@ v2rayN 本机采集是主来源，CSV 只是偶尔补充。HTML 为主要管理�
 
 ## 当前阶段
 
+2026-10-16 跨核心历史隐藏问题已修复源码：默认本机改为只读local_proxy视图，读取当前账本actual_member和legacy_proxy，节点/趋势/分页/同名对照/导出一致，逐行保留原basis和scope身份；不加业务汇总/直连/独立探测，不迁移其他目录。HTML旧test.2/策略组不支持说明及重复文案已清理。Core344/Server39/前端57、Host Release通过；浏览器17通过后新增用例修正fixture再定向通过，桌面/手机已目视。尚未部署，精确CI另核；启用前提醒，仅退出Monitor，代理继续运行。见STATUS。
+
 2026-10-16 ，Monitor 退出后已启用精确9e51a8d push CI包，原--probe-ledger/原v3目录。三项精确CI成功；锁下备份和独立逐值比较通过。实际采样批次首接不回填、后续相邻区间Xray proxy累计与入账一致，旧范围/分钟及未分时历史、provider/设置保留，新增一个legacy_proxy范围。唯一进程/回环HTTP/未认证401通过，Xray未重启、sing-box未替换、启动项未改。仅恢复Xray proxy部分采集，其他出站/探测未覆盖；此前sing-box连通性异常尚未归因。临时验收查询派生字段误用已修正并用原保存批次复核；详情见STATUS。本次文档CI另核。
 
 2026-10-16用户因连通性异常自行切换Xray后，确认metrics可用但Monitor被多出站/balancer旧限制阻断。本批源码允许独立已核实proxy与额外出站/组共存，仍仅计proxy并持久披露部分覆盖，legacy_proxy不变；链/身份/代次保护保持，Xray内部探测未拆分。Core344/Server38/前端57/Host Release通过，当前Xray真实只读发现3轮connected，未写真实账本/启用新包；精确CI及Monitor接入待核。无需重启Xray/替换sing-box/迁移v3，启用前提醒用户退出Monitor。sing-box此前连接异常尚未复现归因，不把本修复说成解决其连通性。详见STATUS。

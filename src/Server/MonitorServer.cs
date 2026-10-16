@@ -164,12 +164,16 @@ public sealed class MonitorServer : IAsyncDisposable
         {
             var query = ParseQuery(request);
             var basis = RequestedBasis(request);
-            var rows = Scopes is null ? Ledger.Export(query) : Scopes.Export(ToScopeQuery(query, basis)).Select(ToTraffic).ToArray();
+            var scopeRows = Scopes?.Export(ToScopeQuery(query, basis));
+            var rows = scopeRows is null ? Ledger.Export(query) : scopeRows.Select(ToTraffic).ToArray();
             var csv = new StringBuilder("\uFEFFstart_utc,end_utc,node,upload_bytes,download_bytes,quality" + (Scopes is null ? "" : ",basis,scope_key") + "\r\n");
-            foreach (var row in rows)
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var row = rows[i];
                 csv.AppendLine(string.Join(',', Cell(row.Start), Cell(row.End), Cell(row.NodeName), row.Upload, row.Download,
                     Cell(row.PartialCoverage ? row.Quality + ";uncollected_outbounds" : row.Quality)) +
-                    (Scopes is null ? "" : "," + Cell(basis) + "," + Cell(row.NodeKey)));
+                    (scopeRows is null ? "" : "," + Cell(scopeRows[i].Basis) + "," + Cell(row.NodeKey)));
+            }
             return Results.File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", "v2rayn-local-history.csv");
         });
         app.MapPost("/api/imports/preview", (ImportRequest request) => imports.Preview(request));
@@ -192,7 +196,7 @@ public sealed class MonitorServer : IAsyncDisposable
         await app.StartAsync(ct).ConfigureAwait(false);
         Address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single().TrimEnd('/');
     }
-    private string PrimaryBasis => Volatile.Read(ref status).CollectionBasis is "legacy_proxy" ? "legacy_proxy" : "actual_member";
+    private string PrimaryBasis => Scopes is null ? "legacy_proxy" : "local_proxy";
     private string RequestedBasis(HttpRequest request)
     {
         if (!request.Query.TryGetValue("basis", out var values)) return PrimaryBasis;
