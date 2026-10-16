@@ -19,10 +19,31 @@ internal static class Program
         var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "V2rayN-Monitor", demo ? "demo" : "data");
         var index = Array.IndexOf(args, "--data-dir");
         if (index >= 0 && index + 1 < args.Length) root = Path.GetFullPath(args[index + 1]);
+        // A linked shortcut starts the selected v2rayN even if Monitor is already running.
+        // Existing recording stays in the sole owner of this data directory.
+        string? linkedExecutable = null;
+        if (!demo)
+        {
+            try
+            {
+                linkedExecutable = LinkedLaunch.RequestedExecutable(args);
+                if (linkedExecutable is not null) LinkedLaunch.StartV2rayNIfNeeded(linkedExecutable);
+            }
+            catch (Exception)
+            {
+                MessageBox.Show("联动启动 v2rayN 失败，请检查原程序位置或权限。Monitor 仍将尝试启动。",
+                    "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
         // One writer per data directory, including launches with alternate command-line spellings.
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
         using var mutex = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created);
-        if (!created) { MessageBox.Show("v2rayN Monitor 已在此数据目录运行，请从系统托盘打开。", "v2rayN Monitor"); return; }
+        if (!created)
+        {
+            if (linkedExecutable is null)
+                MessageBox.Show("v2rayN Monitor 已在此数据目录运行，请从系统托盘打开。", "v2rayN Monitor");
+            return;
+        }
         try { Application.Run(new TrayContext(root, demo)); }
         catch (Exception) { MessageBox.Show("启动失败。请确认数据目录可写、磁盘空间足够且应用文件完整。历史数据库不会被自动删除。", "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { mutex.ReleaseMutex(); }
@@ -47,6 +68,7 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add("打开 Monitor 数据目录", null, (_, _) => Process.Start(new ProcessStartInfo(directory) { UseShellExecute = true }));
         if (!demo)
         {
+            menu.Items.Add("创建 v2rayN + Monitor 联动启动快捷方式…", null, (_, _) => CreateLinkedShortcut());
             var startup = new ToolStripMenuItem("登录 Windows 时启动") { Checked = IsStartupEnabled() };
             startup.Click += (_, _) =>
             {
@@ -81,6 +103,28 @@ internal sealed class TrayContext : ApplicationContext
     {
         using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
         return key?.GetValue("V2rayNMonitor") is string value && value.Contains(Environment.ProcessPath ?? "__invalid__", StringComparison.OrdinalIgnoreCase);
+    }
+    private void CreateLinkedShortcut()
+    {
+        using var picker = new OpenFileDialog
+        {
+            Title = "选择要与 Monitor 联动启动的 v2rayN.exe",
+            Filter = "v2rayN 程序 (v2rayN.exe)|v2rayN.exe",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+        if (picker.ShowDialog() != DialogResult.OK) return;
+        try
+        {
+            var shortcut = LinkedLaunch.CreateDesktopShortcut(picker.FileName, directory);
+            MessageBox.Show($"已创建桌面快捷方式：{Path.GetFileName(shortcut)}。\n请从新快捷方式启动 v2rayN；原启动入口不会自动带起 Monitor。",
+                "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception)
+        {
+            MessageBox.Show("无法创建联动快捷方式，请确认 v2rayN.exe 的位置、桌面目录及当前用户权限。",
+                "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
     private void Open()
     {
