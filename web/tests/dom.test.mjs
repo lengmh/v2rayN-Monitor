@@ -334,8 +334,14 @@ test('node ranking switches between ordered totals and exact share mode', async 
   w.document.querySelector('[data-ranking-mode="share"]').click();
   assert.equal(get('ranking-mode').querySelector('[data-ranking-mode="share"]').getAttribute('aria-pressed'), 'true');
   assert.match(w.document.querySelector('#ranking .rank-index').textContent, /%$/);
-  assert.ok(w.document.querySelector('#ranking .rank-value').textContent.includes('↑'));
+  assert.equal(get('ranking').querySelectorAll('.rank-value, .rank-track, .share-total').length, 0);
   assert.equal(get('ranking').querySelectorAll('.share-chart svg circle').length, 1);
+  const segment = get('ranking').querySelector('.share-chart circle');
+  segment.dispatchEvent(new w.Event('pointerenter'));
+  assert.equal(get('ranking').querySelector('.share-tooltip').hidden, false);
+  assert.equal(get('ranking').querySelector('.share-tooltip').textContent, '16.106 GB');
+  segment.dispatchEvent(new w.Event('pointerleave'));
+  assert.equal(get('ranking').querySelector('.share-tooltip').hidden, true);
 });
 
 test('share denominator includes every identity and preserves small nonzero and recorded zero', async t => {
@@ -350,7 +356,8 @@ test('share denominator includes every identity and preserves small nonzero and 
   const shares = [...get('ranking').querySelectorAll('.rank-index')].map(n => n.textContent);
   assert.deepEqual(shares, ['49.99%', '49.99%', '<0.01%', '0.00%']);
   assert.ok(get('ranking').textContent.includes('Idle'));
-  assert.equal(get('ranking').querySelectorAll('.rank-download').length, 4);
+  assert.equal(get('ranking').querySelectorAll('.share-swatch').length, 4);
+  assert.equal(get('ranking').querySelectorAll('.rank-bar, .rank-value').length, 0);
 });
 
 test('period defaults follow day week month year while manual granularity survives other controls', async t => {

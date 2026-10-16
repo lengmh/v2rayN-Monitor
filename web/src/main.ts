@@ -200,6 +200,8 @@ function renderRanking(items: RankingItem[], provider = false): void {
   }
   if (share) {
     const chart = element('div', '', 'share-chart');
+    const tooltip = element('span', '', 'share-tooltip');
+    tooltip.hidden = true; tooltip.setAttribute('role', 'tooltip');
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 120 120');
     svg.setAttribute('role', 'img');
@@ -213,11 +215,17 @@ function renderRanking(items: RankingItem[], provider = false): void {
         for (const [name, value] of Object.entries({ cx: '60', cy: '60', r: '44', fill: 'none', stroke: colors[index % colors.length],
           'stroke-width': '16', pathLength: '100', 'stroke-dasharray': `${length} ${100 - length}`,
           'stroke-dashoffset': String(-previous), transform: 'rotate(-90 60 60)' })) circle.setAttribute(name, value);
+        circle.setAttribute('tabindex', '0');
+        circle.setAttribute('aria-label', `${node.name || '未归属'} · ${precise(node.total)}`);
+        const reveal = (): void => { tooltip.textContent = display(node.total); tooltip.hidden = false; };
+        const hide = (): void => { tooltip.hidden = true; };
+        circle.addEventListener('pointerenter', reveal); circle.addEventListener('pointerleave', hide);
+        circle.addEventListener('focus', reveal); circle.addEventListener('blur', hide);
         svg.append(circle);
       }
       previous = end;
     });
-    chart.append(svg, element('span', display(total), 'share-total'));
+    chart.append(svg, tooltip);
     ranking.append(chart);
   }
   const max = metric(sorted[0]);
@@ -232,6 +240,14 @@ function renderRanking(items: RankingItem[], provider = false): void {
       el<HTMLSelectElement>('node-filter').value = nodeKey; page = 0; void refresh(true);
     });
     const value = metric(node);
+    const shareText = value > 0n && percentage(value, total) < .01 ? '<0.01%' : `${percentage(value, total).toFixed(2)}%`;
+    heading.append(element('span', share ? shareText : String(index + 1).padStart(2, '0'), 'rank-index'), name);
+    if (share) {
+      const swatch = element('span', '', 'share-swatch');
+      swatch.style.backgroundColor = colors[index % colors.length]; name.prepend(swatch);
+      row.append(heading); ranking.append(row);
+      return;
+    }
     const recovery = node.recovered ?? 0n;
     const valueBox = element('span', '', 'rank-value-box');
     const marker = element('button', recovery > 0n ? '[恢复]' : '', 'rank-recovery-marker');
@@ -248,20 +264,15 @@ function renderRanking(items: RankingItem[], provider = false): void {
     amount.title = known ? `上传 ${precise(node.upload!)}\n下载 ${precise(node.download!)}\n合计 ${precise(value)}` : `合计 ${precise(value)}\n方向未提供`;
     amount.addEventListener('click', () => showExactValue(amount.title));
     valueBox.append(marker, amount);
-    const shareText = value > 0n && percentage(value, total) < .01 ? '<0.01%' : `${percentage(value, total).toFixed(2)}%`;
-    heading.append(element('span', share ? shareText : String(index + 1).padStart(2, '0'), 'rank-index'), name, valueBox);
+    heading.append(valueBox);
     const track = element('div', '', 'rank-track');
     const bar = element('div', '', 'rank-bar');
-    bar.style.width = `${percentage(value, share ? total : max)}%`;
+    bar.style.width = `${percentage(value, max)}%`;
     if (known) {
       const down = element('span', '', 'rank-download'), up = element('span', '', 'rank-upload');
       down.style.width = `${percentage(node.download!, value)}%`; up.style.flex = '1';
       bar.append(down, up);
     } else bar.classList.add('rank-neutral');
-    if (share) {
-      const swatch = element('span', '', 'share-swatch');
-      swatch.style.backgroundColor = colors[index % colors.length]; name.prepend(swatch);
-    }
     track.append(bar);
     row.append(heading, track);
     ranking.append(row);
@@ -516,9 +527,10 @@ function renderProviderHistory(history: ProviderHistory): void {
   if (!history.records.length) { const row = element('tr'), cell = element('td', '这个范围没有已导入记录，请调整日期或来源。', 'empty-state'); cell.colSpan = 9; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr'), name = element('td', record.nodeName, 'node-cell'); name.title = record.nodeName;
+    const quality = element('td'); quality.append(element('span', '服务商导入', 'quality-pill'));
     row.append(element('td', timestamp(record.at, settings.timeZoneId)), name, element('td', '无'),
       element('td', '—', 'numeric'), element('td', '—', 'numeric'), recordTrafficCell(record.rawBytes),
-      element('td', record.rate, 'numeric'), recordTrafficCell(record.billedBytes, true), element('td', '服务商导入'));
+      element('td', record.rate, 'numeric'), recordTrafficCell(record.billedBytes, true), quality);
     records.append(row);
   }
   pagination(history.recordCount); el('summary').setAttribute('aria-busy', 'false');
