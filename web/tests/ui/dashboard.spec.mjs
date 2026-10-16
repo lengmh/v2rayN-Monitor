@@ -77,6 +77,27 @@ test('member group labels wrap fully and local details request nonzero rows', as
     await page.screenshot({ path: `test-results/member-label-${suffix}.png`, fullPage: true });
   }
 });
+test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray proxy',
+      currentNode: 'Synthetic Xray', collectionBasis: 'legacy_proxy', demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null })),
+    '/api/history': route => route.fulfill(json({ ...history, basis: 'local_proxy',
+      nodes: [{ ...history.nodes[0], name: 'Synthetic sing-box history' },
+        { ...history.nodes[1], name: 'Synthetic Xray history' }] }))
+  });
+  await expect(page.locator('#ranking')).toContainText('Synthetic sing-box history');
+  await expect(page.locator('#ranking')).toContainText('Synthetic Xray history');
+  await expect(page.locator('#attribution-note')).toContainText('切换核心不隐藏记录');
+  for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/cross-core-${suffix}.png`, fullPage: true });
+  }
+  await page.click('.nav-item[data-view=settings]');
+  await expect(page.locator('#settings-view')).not.toContainText('test.2');
+  await expect(page.locator('#settings-view')).toContainText('策略组实际成员');
+});
 test('partial sing-box coverage is visible on desktop and mobile after collection resumes', async ({ page }) => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
   await mock(page, {

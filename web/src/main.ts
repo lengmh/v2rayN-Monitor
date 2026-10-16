@@ -173,12 +173,11 @@ function renderHistory(history: HistoryResult): void {
   latestProvider = null;
   statisticLabels();
   const attribution = el('attribution-note');
-  attribution.dataset.legacyText ??= attribution.textContent ?? '';
   attribution.textContent = probeView()
-    ? 'URLTest 探测与业务分别记账，从首次有效基线后开始记录，接入前累计不回填。成员、代理总量、直连及未知归属分别查询，不跨维度相加。组名只辅助展示；历史缺口不是零流量。'
-    : history.basis === 'actual_member'
-    ? '当前按实际成员分账，从首次采样基线后开始计量，接入前累计不回填。直连量单独保存在 excluded，不计入成员合计；business、unknown 和旧 proxy 历史也不与成员量相加。组名仅辅助展示，成员身份不合并；只有独立 AnyTLS proxy 关联已核实的 IndexId，其他成员按配置和 tag 区分。历史缺口不是零流量。'
-    : attribution.dataset.legacyText;
+    ? '探测与业务分别记账。成员和总量分别查看，不重复相加。'
+    : history.basis === 'local_proxy'
+    ? '包含当前账本中的 sing-box 成员和 Xray／旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。'
+    : '按已核实的节点或出站身份分账，名称和策略组前缀仅用于展示。';
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
@@ -190,17 +189,17 @@ function renderHistory(history: HistoryResult): void {
   const recovered = bytes(history.recoveredUpload ?? '0') + bytes(history.recoveredDownload ?? '0');
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
-  const quality = ['已知总量不等于完整使用量；缺失记录不等于零流量。'];
+  const quality = ['首次采样建立基线，接入前累计不回填；缺失记录不等于零流量。'];
   if (probeView()) {
     quality.push('当前仅为所选 URLTest 探测维度，不与业务流量或服务商计费相加。');
     put('probe-coverage', history.earliestRecord
-      ? `所选维度及节点最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}。分钟记录按分钟边界显示，此时间不是精确的首次基线；更早探测量未知。`
+      ? `最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}（按分钟显示，不是精确的首次基线）。`
       : '所选维度及节点尚无已保存的探测区间；首次有效采样只建立基线，不回填此前累计。');
   }
   if (history.basis === 'actual_member')
-    quality.push('当前为实际成员维度。business、excluded、unknown 和历史 proxy 独立保存，不与成员量相加。');
+    quality.push('当前为实际成员维度，直连和汇总分别保存。');
   if ((history.gaps ?? []).some(gap => gap.origin === 'legacy' && gap.isOpen))
-    quality.push('本范围包含历史遗留开放缺口；新成员成功采样不会关闭这类缺口。');
+    quality.push('本范围仍有历史遗留开放缺口。');
   if (history.partialCoverage || (history.gaps ?? []).some(gap => gap.reason === 'uncollected_outbounds') || history.records.some(record => record.partialCoverage))
     quality.push('本范围包含其他出站未采集的区间；未覆盖范围的流量未知，合计仅包含已核实的计量范围。');
   if (recovered > 0n) quality.push(`合计及节点排行已包含恢复量 ${formatBytes(recovered, unit)}（${exactBytes(recovered)}）。`);
@@ -213,7 +212,7 @@ function renderHistory(history: HistoryResult): void {
   const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
   for (const gap of history.gaps ?? []) details.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
   show('gap-details', history.gapCount > 0);
-  put('gap-summary', `查看历史间断（${history.gapCount} 段，最多展示最近 200 段）`);
+  put('gap-summary', `查看历史间断与覆盖缺口（${history.gapCount} 段）`);
   put('trend-subtitle', `${({ hour: '小时', day: '日', week: '周', month: '月', year: '年' } as const)[bucket]}分桶 · ${settings.timeZoneId}`);
   renderChart(history);
   const ranking = el('ranking'); ranking.replaceChildren();

@@ -247,13 +247,13 @@ public sealed class ScopeLedger : IDisposable
 
     public IReadOnlyList<ScopeInfo> GetScopes(string basis)
     {
-        ValidateBasis(basis);
+        ValidateQueryBasis(basis);
         lock (gate)
         {
             ThrowIfDisposed();
             using var command = Command(null, """
                 SELECT s.scope_id,s.instance_id,s.basis,s.identity_kind,s.identity_value,s.name,n.node_id,s.outbound_tag
-                FROM measurement_scopes s LEFT JOIN nodes n ON n.node_key=s.node_key WHERE s.basis=$basis ORDER BY s.scope_id;
+                FROM measurement_scopes s LEFT JOIN nodes n ON n.node_key=s.node_key WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) ORDER BY s.scope_id;
                 """, ("$basis", basis));
             using var reader = command.ExecuteReader();
             var result = new List<ScopeInfo>();
@@ -268,7 +268,7 @@ public sealed class ScopeLedger : IDisposable
     public ScopeHistory Query(ScopeQuery query)
     {
         ArgumentNullException.ThrowIfNull(query);
-        ValidateBasis(query.Basis);
+        ValidateQueryBasis(query.Basis);
         if (query.End <= query.Start || query.Bucket is not ("hour" or "day" or "week" or "month" or "year"))
             throw new ArgumentException("Invalid query interval or bucket.", nameof(query));
         if (query.Page < 0 || query.PageSize is < 1 or > 1000 || query.ScopeId is <= 0)
@@ -317,7 +317,7 @@ public sealed class ScopeLedger : IDisposable
                 [.. parameters, ("$limit", query.PageSize), ("$offset", checked((long)query.Page * query.PageSize))]))
             using (var reader = command.ExecuteReader())
                 while (reader.Read())
-                    rows.Add(new(query.Basis, reader.GetInt64(2), reader.GetString(3), Iso(reader.GetInt64(0)),
+                    rows.Add(new(reader.GetString(10), reader.GetInt64(2), reader.GetString(3), Iso(reader.GetInt64(0)),
                         Iso(reader.GetInt64(1)), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6),
                         reader.GetInt64(9) != 0));
             // Gaps are not paged with traffic. NULL legacy gaps remain disclosed as unassigned history.
@@ -325,7 +325,7 @@ public sealed class ScopeLedger : IDisposable
             using (var command = Command(transaction, """
                 SELECT g.scope_id,g.origin,g.start_ticks,g.end_ticks,g.reason,g.is_open
                 FROM scope_gaps g LEFT JOIN measurement_scopes s ON s.scope_id=g.scope_id
-                WHERE (g.scope_id IS NULL OR (s.basis=$basis AND ($id IS NULL OR s.scope_id=$id)
+                WHERE (g.scope_id IS NULL OR ((s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id)
                     AND ($name IS NULL OR s.name=$name COLLATE BINARY)))
                     AND ((g.start_ticks < $end AND (g.end_ticks > $start OR g.is_open=1))
                         OR (g.start_ticks=g.end_ticks AND g.start_ticks >= $start AND g.start_ticks < $end))
@@ -343,7 +343,7 @@ public sealed class ScopeLedger : IDisposable
                         SELECT scope_id,start_ticks FROM scope_minutes
                         UNION ALL SELECT scope_id,start_ticks FROM scope_unallocated
                     ) r JOIN measurement_scopes s ON s.scope_id=r.scope_id
-                    WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id)
+                    WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id)
                         AND ($name IS NULL OR s.name=$name COLLATE BINARY);
                     """, ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", query.ScopeName));
                 if (command.ExecuteScalar() is long ticks) earliest = Iso(ticks);
@@ -365,25 +365,26 @@ public sealed class ScopeLedger : IDisposable
             CASE WHEN m.synthetic=1 THEN 'synthetic' WHEN m.approximate=1 THEN 'approximate' ELSE 'measured' END AS quality,
             0 AS kind,0 AS row_id,
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=m.scope_id AND g.reason='uncollected_outbounds'
-                AND g.start_ticks < m.start_ticks+600000000 AND g.end_ticks > m.start_ticks) AS partial_coverage
+                AND g.start_ticks < m.start_ticks+600000000 AND g.end_ticks > m.start_ticks) AS partial_coverage,
+            s.basis AS basis
         FROM scope_minutes m JOIN measurement_scopes s ON s.scope_id=m.scope_id
-        WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
+        WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
             AND m.start_ticks >= $start AND m.start_ticks < $end
         UNION ALL
         SELECT u.start_ticks,u.end_ticks,u.scope_id,s.name,u.upload,u.download,
             CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
             1,u.id,
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=u.scope_id AND g.reason='uncollected_outbounds'
-                AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks)
+                AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks), s.basis
         FROM scope_unallocated u JOIN measurement_scopes s ON s.scope_id=u.scope_id
-        WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
+        WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
             AND u.start_ticks < $end AND u.end_ticks > $start
         """;
 
     public IReadOnlyList<ScopeTrafficRow> Export(ScopeQuery query)
     {
         ArgumentNullException.ThrowIfNull(query);
-        ValidateBasis(query.Basis);
+        ValidateQueryBasis(query.Basis);
         if (query.End <= query.Start || query.ScopeId is <= 0) throw new ArgumentException("Invalid export interval or scope.");
         lock (gate)
         {
@@ -396,7 +397,7 @@ public sealed class ScopeLedger : IDisposable
             while (reader.Read())
             {
                 if (rows.Count == 100000) throw new ArgumentException("导出最多 100000 条记录，请缩小范围。");
-                rows.Add(new(query.Basis, reader.GetInt64(2), reader.GetString(3), Iso(reader.GetInt64(0)),
+                rows.Add(new(reader.GetString(10), reader.GetInt64(2), reader.GetString(3), Iso(reader.GetInt64(0)),
                     Iso(reader.GetInt64(1)), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6), reader.GetInt64(9) != 0));
             }
             return rows;
@@ -524,6 +525,12 @@ public sealed class ScopeLedger : IDisposable
         reason.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
     private static (string, string, string) Identity(MeasurementScope scope) =>
         (scope.Basis, scope.IdentityKind, scope.IdentityValue);
+    // A read-only view across successive core sessions; never a persisted measurement basis.
+    private void ValidateQueryBasis(string basis)
+    {
+        if (basis != "local_proxy") ValidateBasis(basis);
+    }
+
     private void ValidateBasis(string basis)
     {
         if (!BusinessBases.Contains(basis, StringComparer.Ordinal) &&
