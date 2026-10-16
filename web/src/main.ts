@@ -3,7 +3,7 @@ import './ui.css';
 import { chartSlots, shortLabel } from './lib/chart.ts';
 import { compareNames, compareBuckets } from './lib/comparison.ts';
 import type { ComparisonRow } from './lib/comparison.ts';
-import { bytes, exactBytes, formatBytes, recordByteParts, percentage, rate } from './lib/format.ts';
+import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
 import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProviderTotal, providerUnits, providerUnitsText } from './lib/provider-format.ts';
 import type { Unit } from './lib/format.ts';
 import { dateInZone, dateRange, periodRange, shiftAnchor, timestamp } from './lib/ranges.ts';
@@ -160,12 +160,12 @@ function renderChart(history: HistoryPointInput, provider = false): void {
   put('chart-scale', `最高 ${display(max)}`);
 }
 type HistoryPointInput = Pick<HistoryResult, 'series'>;
-function recordTrafficCell(value: string): HTMLTableCellElement {
-  const parts = recordByteParts(value, unit);
-  const cell = element('td', '', `numeric traffic-cell${parts.isZero ? ' zero' : ''}`);
-  cell.title = exactBytes(value);
-  const amount = element('span', '', 'traffic-amount');
-  amount.append(element('span', parts.value, 'traffic-value'), document.createTextNode(' '), element('span', parts.unit, 'traffic-unit'));
+function recordTrafficCell(value: string, provider = false): HTMLTableCellElement {
+  const cell = element('td', '', `numeric traffic-cell${(provider ? providerUnits(value) : bytes(value)) === 0n ? ' zero' : ''}`);
+  cell.title = provider ? exactProviderTotal(value) : exactBytes(value);
+  const amount = element('button', provider ? formatProviderTotal(value, unit) : formatBytes(value, unit), 'traffic-amount');
+  amount.type = 'button'; amount.title = cell.title;
+  amount.addEventListener('click', () => showExactValue(cell.title));
   cell.append(amount);
   return cell;
 }
@@ -321,7 +321,7 @@ function renderHistory(history: HistoryResult): void {
     upload: bytes(node.upload), download: bytes(node.download), recovered: bytes(node.recoveredUpload ?? '0') + bytes(node.recoveredDownload ?? '0') })));
   const records = el('records'); records.replaceChildren();
   const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
-  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有非零采集明细。零字节记录已隐藏，采集缺口仍单独显示。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
+  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有非零采集明细。零字节记录已隐藏，采集缺口仍单独显示。', 'empty-state'); cell.colSpan = 9; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr');
     const time = element('td', timestamp(record.start, settings.timeZoneId)); time.title = `${record.start} → ${record.end}`;
@@ -333,7 +333,11 @@ function renderHistory(history: HistoryResult): void {
     if (approximate) label.title = '区间流量按分钟分配，分时用量为近似值；原始总量保持不变。';
     if (record.quality === 'recovered-partial') label.title = '恢复区间仅与当前查询范围部分重叠，范围内用量未知，未计入本范围合计。';
     qualityCell.append(label);
-    row.append(time, name, download, upload, qualityCell); records.append(row);
+    const multiplier = element('td', '—', 'numeric');
+    multiplier.title = '此历史记录没有保存可核实的倍率，不按当前名称推算';
+    row.append(time, name, element('td', '无'), upload, download,
+      recordTrafficCell((bytes(record.upload) + bytes(record.download)).toString()), multiplier,
+      element('td', '—', 'numeric'), qualityCell); records.append(row);
   }
   pagination(history.recordCount, true);
   el('summary').setAttribute('aria-busy', 'false');
@@ -359,19 +363,21 @@ function statisticLabels(): void {
   show('export-button', !comparison);
   show('attribution-note', !provider);
   el('summary').classList.toggle('provider-summary', provider);
-  show('raw-card', !provider || providerMetric !== 'raw'); show('billed-card', !provider || providerMetric !== 'billed');
+  show('raw-card', true); show('billed-card', true);
   put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : '本机内核统计 · 含可确定范围的恢复量');
-  put('total-title', provider ? metric : probe ? '所选维度探测量' : '区间已知合计');
+  put('total-title', provider ? '原始量' : probe ? '所选维度探测量' : '区间已知合计');
   put('total-note', provider ? '仅当前来源 · 不与本机流量相加' : probe ? '上传 + 下载 · 与业务分别保存' : '上传 + 下载 · 包含区间内恢复量');
-  put('download-title', provider ? '服务商原始量' : '下载'); put('upload-title', provider ? '服务商计费量' : '上传');
-  put('download-note', provider ? 'CSV 原始字节 · 未乘倍率' : probe ? '从探测目标接收的流字节' : '从代理节点接收');
-  put('upload-note', provider ? '保留 CSV 精确数值 · 不重新计算' : probe ? '发往探测目标的流字节' : '通过代理节点发送');
+  put('download-title', '下载'); put('upload-title', '上传');
+  put('download-note', provider ? '不从原始总量推算' : probe ? '从探测目标接收的流字节' : '从代理节点接收');
+  put('upload-note', provider ? '不从原始总量推算' : probe ? '发往探测目标的流字节' : '通过代理节点发送');
+  put('billing-title', provider ? '计费量' : '估算计费量');
+  put('billing-value', '—'); put('billing-exact', provider ? '等待记录' : '历史倍率未核实');
+  put('billing-note', provider ? 'CSV 精确值 · 不重新乘倍率' : '未估算，不表示计费为零');
   put('download-legend', provider ? metric : '下载');
   put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
   put('records-heading', provider ? '服务商记录' : probe ? '探测明细' : '采集明细');
-  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : `仅显示非零明细 · 自动单位（${unit === 'GB' ? '1000' : '1024'} 进制）· 导出保留零记录`);
-  put('download-column', provider ? '原始量' : '下载'); put('upload-column', provider ? '计费量' : '上传');
-  put('quality-column', provider ? '倍率' : '质量');
+  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未提供 · 点击数值查看精确值' : '仅显示非零明细 · 点击数值查看精确值 · 历史倍率未核实，暂不估算计费');
+  put('billing-column', provider ? '计费量' : '估算计费量');
 }
 function renderComparison(local: HistoryResult, provider: ProviderHistory): void {
   if (latestComparison?.local !== local || latestComparison?.provider !== provider) comparisonBucketPage = 0;
@@ -446,12 +452,13 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
 function renderProviderHistory(history: ProviderHistory): void {
   latestProvider = history; latestHistory = null; statisticLabels();
   const metric = (value: { rawBytes: string; billedBytes: string }): string => providerMetric === 'raw' ? value.rawBytes : value.billedBytes;
-  put('total-value', formatProviderTotal(metric(history), unit)); put('total-exact', exactProviderTotal(metric(history)));
-  put('download-value', formatBytes(history.rawBytes, unit)); put('download-exact', exactBytes(history.rawBytes));
-  put('upload-value', formatProviderTotal(history.billedBytes, unit)); put('upload-exact', exactProviderTotal(history.billedBytes));
+  put('total-value', formatBytes(history.rawBytes, unit)); put('total-exact', exactBytes(history.rawBytes));
+  put('download-value', '—'); put('download-exact', 'CSV 未提供方向');
+  put('upload-value', '—'); put('upload-exact', 'CSV 未提供方向');
+  put('billing-value', formatProviderTotal(history.billedBytes, unit)); put('billing-exact', exactProviderTotal(history.billedBytes));
   if (history.recordCount === 0) {
-    for (const id of ['total-value', 'upload-value', 'download-value']) put(id, '—');
-    for (const id of ['total-exact', 'upload-exact', 'download-exact']) put(id, '所选范围无记录');
+    for (const id of ['total-value', 'billing-value']) put(id, '—');
+    for (const id of ['total-exact', 'billing-exact']) put(id, '所选范围无记录');
   }
   put('quality-notice', '仅统计所选服务商的已导入记录，不代表完整使用量。上下行方向、设备和 IP 未知；不与本机流量相加。');
   put('quality-summary', '服务商独立记录 · 与本机分别统计');
@@ -461,14 +468,12 @@ function renderProviderHistory(history: ProviderHistory): void {
   put('node-count', String(history.nodes.length));
   renderRanking(history.nodes.map(node => ({ key: node.name, name: node.name, total: providerUnits(metric(node)) })), true);
   const records = el('records'); records.replaceChildren();
-  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个范围没有已导入记录，请调整日期或来源。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
+  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个范围没有已导入记录，请调整日期或来源。', 'empty-state'); cell.colSpan = 9; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr'), name = element('td', record.nodeName, 'node-cell'); name.title = record.nodeName;
-    const raw = element('td', formatBytes(record.rawBytes, unit), 'numeric'); raw.title = exactBytes(record.rawBytes);
-    const billed = element('td', formatProviderTotal(record.billedBytes, unit), 'numeric'); billed.title = exactProviderTotal(record.billedBytes);
-    raw.append(element('small', exactBytes(record.rawBytes), 'exact-cell'));
-    billed.append(element('small', exactProviderTotal(record.billedBytes), 'exact-cell'));
-    row.append(element('td', timestamp(record.at, settings.timeZoneId)), name, raw, billed, element('td', record.rate));
+    row.append(element('td', timestamp(record.at, settings.timeZoneId)), name, element('td', '无'),
+      element('td', '—', 'numeric'), element('td', '—', 'numeric'), recordTrafficCell(record.rawBytes),
+      element('td', record.rate, 'numeric'), recordTrafficCell(record.billedBytes, true), element('td', '服务商导入'));
     records.append(row);
   }
   pagination(history.recordCount); el('summary').setAttribute('aria-busy', 'false');
