@@ -10,10 +10,10 @@
   "active_checkpoint": {
     "issue": 23,
     "status": "in_progress",
-    "branch": "feat/issue23-product-design",
-    "scope": "按 Product Design 选定方向优化 #23 共用前端：横向桌面布局、深浅配色、紧凑排行与同名对照总量、恢复量灰点及策略组悬浮说明；其他问题和 PR 暂停推进",
+    "branch": "fix/issue23-preview-feedback",
+    "scope": "根据 #23 云预览反馈优化占比环图及图例、统一策略组描边后的文字起点；隔离示例修正日期与分桶查询，生产联动规则保持",
     "implementation_status": "complete",
-    "remaining": "收口提交 CI 在 PR #27 独立核对；用户页面确认与后续真实 Windows 环境启用尚未完成，未修改 main、替换运行包或发布版本",
+    "remaining": "本批精确 CI 与自动审查在独立 PR 核对；等待用户确认新布局，未修改 main、替换运行包或发布版本",
     "resume_requirement": "UI 后恢复采集主线时，Xray 多出站及策略组实际成员覆盖属于收尾必需项，当前不实施"
   },
   "remote_created_in_this_delivery": true,
