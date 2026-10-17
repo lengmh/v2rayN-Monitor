@@ -82,7 +82,11 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
     '/api/history': route => route.fulfill(json({ ...history,
       nodes: history.nodes.map((n, i) => ({ ...n, recoveredUpload: i === 0 ? '123456789' : '0', recoveredDownload: '0' })) }))
   });
-  await page.locator('.rank-recovery-marker:not(.vacant)').click();
+  await page.locator('.rank-value').first().hover();
+  await expect(page.locator('#detail-popover')).toBeVisible();
+  await expect(page.locator('#detail-popover')).toContainText('其中恢复量');
+  await expect(page.locator('.rank-value').first()).toHaveText('9.127 GB');
+  await page.getByRole('button', { name: '查看精确值', exact: true }).click();
   await expect(page.locator('#exact-value-dialog')).toBeVisible();
   await expect(page.locator('#exact-value-text')).toContainText('123,456,789 bytes');
   await page.locator('#exact-value-dialog form button').click();
@@ -92,8 +96,9 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
     const panel = page.locator('.ranking-panel');
     const rankingHeight = (await panel.boundingBox()).height;
     const marker = await page.locator('.rank-recovery-marker:not(.vacant)').boundingBox();
-    const name = await page.locator('.rank-node').first().boundingBox();
-    expect(Math.abs(marker.y - name.y)).toBeLessThanOrEqual(3);
+    const value = await page.locator('.rank-value').first().boundingBox();
+    expect(Math.abs(marker.y + marker.height / 2 - value.y - value.height / 2)).toBeLessThanOrEqual(1);
+    expect(marker.width).toBeLessThanOrEqual(4);
     expect((await page.locator('.rank-row').first().boundingBox()).height).toBeLessThan(64);
     await page.screenshot({ path: `test-results/issue23-ranking-${suffix}.png`, fullPage: true });
     await page.click('[data-ranking-mode=share]');
@@ -117,17 +122,111 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
     await page.screenshot({ path: `test-results/issue23-shares-${suffix}.png`, fullPage: true });
   }
 });
+test('traffic details remain open across polling and support keyboard dismissal', async ({ page }) => {
+  const calls = await mock(page, {
+    '/api/history': route => route.fulfill(json({ ...history,
+      nodes: history.nodes.map((n, i) => ({ ...n, recoveredUpload: i === 0 ? '123456789' : '0', recoveredDownload: '0' })) }))
+  });
+  const value = page.locator('.rank-value').first(), popup = page.locator('#detail-popover');
+  await value.focus();
+  await expect(popup).toBeVisible();
+  await value.press('Escape');
+  await expect(popup).toBeHidden();
+  await page.locator('[data-ranking-mode=ranking]').focus();
+  await value.focus();
+  await expect(popup).toBeVisible();
+  const previousValue = await value.elementHandle();
+  const before = calls.filter(c => c.path === '/api/history').length;
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
+  await expect.poll(() => previousValue.evaluate(node => node.isConnected)).toBe(false);
+  await expect(popup).toBeVisible();
+  await expect(value).toHaveAttribute('aria-expanded', 'true');
+  await expect(value).toBeFocused();
+  await expect(popup).toContainText('已包含在上传、下载及合计中');
+  await value.click();
+  await popup.getByRole('button', { name: '关闭', exact: true }).click();
+  await expect(popup).toBeHidden();
+  await expect(value).toBeFocused();
+  await page.locator('.rank-value').nth(1).focus();
+  await expect(popup).toContainText('当前合计不含恢复量');
+  await page.selectOption('#unit', 'GiB');
+  await expect(popup).toBeHidden();
+});
+test('both themes preserve dense layouts and appearance persists independently of settings', async ({ page }) => {
+  const calls = await mock(page);
+  for (const theme of ['dark', 'light']) {
+    await page.selectOption('#theme', theme);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    for (const [width, height] of [[1440, 1100], [960, 1000], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      for (const view of ['overview', 'probes', 'provider', 'settings']) {
+        await page.click(`.nav-item[data-view=${view}]`);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await expect(page.locator('#theme')).toBeVisible();
+      }
+    }
+  }
+  expect(calls.filter(c => c.path === '/api/settings' && c.body !== null)).toHaveLength(0);
+  await page.selectOption('#theme', 'dark');
+  await page.reload();
+  await expect(page.locator('#theme')).toHaveValue('dark');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.selectOption('#theme', 'system');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+test.describe('touch traffic details', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+  test('total and recovery indicator share a tappable detail target', async ({ page }) => {
+    await mock(page, { '/api/history': route => route.fulfill(json({ ...history,
+      nodes: [{ ...history.nodes[0], recoveredUpload: '123456789', recoveredDownload: '0' }] })) });
+    await page.locator('.rank-value').tap();
+    const popup = page.locator('#detail-popover');
+    await expect(popup).toBeVisible();
+    await page.keyboard.press('Control+Home');
+    const box = await popup.boundingBox();
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(390);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(844);
+    await popup.getByRole('button', { name: '查看精确值', exact: true }).tap();
+    await expect(page.locator('#exact-value-dialog')).toBeVisible();
+    await expect(page.locator('#exact-value-text')).toContainText('123,456,789 bytes');
+    await page.locator('#exact-value-dialog form button').tap();
+    await expect(page.locator('#exact-value-dialog')).toBeHidden();
+  });
+});
 test('issue23 captured rates, group names and exact copy work across business and probe views', async ({ page }) => {
   const display = { originalName: 'Synthetic original 0.5x', groups: ['US-0.5x'], mergeKey: null, rate: '0.5', rateStatus: 'known',
     estimatedBilledBytes: '8053063680', estimateCoveredBytes: '16106127360', estimateUnknownBytes: '0' };
-  await mock(page, {
+  const calls = await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic', currentNode: 'Synthetic', lastSample: null,
       uploadPerSecond: null, downloadPerSecond: null, demo: false, probes: { historyEnabled: true, state: 'available', message: 'Synthetic' } })),
     '/api/history': (route, request, url) => route.fulfill(json({ ...history, basis: url.searchParams.get('basis') ?? 'local_proxy',
-      displayMetadataEnabled: true, display, nodes: [{ ...history.nodes[0], display }], records: [{ ...history.records[0], display }] }))
+      displayMetadataEnabled: true, display, nodes: [{ ...history.nodes[0], display }], records: [
+        { ...history.records[0], display },
+        { ...history.records[0], display: { ...display, groups: ['Synthetic second snapshot'] } }] }))
   });
   await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
-  await expect(page.locator('#records .node-cell .node-groups')).toHaveText('【US-0.5x】');
+  const groupedName = page.locator('#records .node-cell .has-groups').first();
+  await expect(groupedName).toHaveText('Synthetic original 0.5x');
+  await groupedName.hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('US-0.5x');
+  await groupedName.focus();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('US-0.5x');
+  await groupedName.press('Escape');
+  await groupedName.click();
+  const previousGroup = await groupedName.elementHandle();
+  const before = calls.filter(c => c.path === '/api/history').length;
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
+  await expect.poll(() => previousGroup.evaluate(node => node.isConnected)).toBe(false);
+  await expect(page.locator('#detail-popover .node-group-list')).toHaveText('US-0.5x');
+  await groupedName.press('Escape');
+  await page.locator('#ranking .has-groups').click();
+  await expect(page.locator('#node-filter')).toHaveValue('a');
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('nodeKey')).toBe('a');
   await expect(page.locator('#records tr').first().locator('td').nth(6)).toHaveText('0.5');
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
     value: { writeText: async text => { window.syntheticCopied = text; } } }));
@@ -231,7 +330,7 @@ test('CSV source uses node statistics and exact billing without local direction 
 test('same-name comparison aligns sources by hour and keeps week month and missing data explicit', async ({ page }) => {
   let localReads = 0, partialOnly = false;
   const local = { ...history, upload: '3500000000', download: '0', unbucketedUpload: '500', unbucketedDownload: '0',
-    nodes: [{ key: 'a', name: 'Synthetic shared node', upload: '3000000000', download: '0' },
+    nodes: [{ key: 'a', name: 'Synthetic shared node', upload: '3000000000', download: '0', display: { originalName: 'Synthetic shared node', groups: ['Synthetic Route'] } },
       { key: 'b', name: 'Synthetic shared node', upload: '500000000', download: '0' }], recordCount: 2 };
   const provider = { source: 'Synthetic comparison', rawBytes: '4000000000', billedBytes: '3200000000.000123', recordCount: 2,
     nodes: [{ name: 'Synthetic shared node', rawBytes: '4000000000', billedBytes: '3200000000.000123' },
@@ -249,19 +348,32 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await page.selectOption('#statistics-source', provider.source);
   await page.check('#compare-toggle');
   await expect(page.locator('#comparison-view')).toBeVisible();
+  await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('#comparison-nodes .has-groups').hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
+  await page.locator('#comparison-nodes .has-groups').press('Escape');
   const nodeCard = page.locator('#comparison-nodes').locator('xpath=ancestor::section[1]');
   const bucketCard = page.locator('#comparison-buckets').locator('xpath=ancestor::section[1]');
   const nodeBox = await nodeCard.boundingBox(), bucketBox = await bucketCard.boundingBox();
   expect(Math.abs(nodeBox.y - bucketBox.y)).toBeLessThanOrEqual(1);
   expect(bucketBox.x).toBeGreaterThanOrEqual(nodeBox.x + nodeBox.width);
   await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
+  const localValue = page.locator('#comparison-nodes .paired-value').nth(2);
+  await expect(localValue).toHaveText('3.500 GB');
+  await localValue.click();
+  await expect(page.locator('#detail-popover')).toContainText('上传3.500 GB');
+  await expect(page.locator('#detail-popover .recovery-detail')).toHaveCount(0);
+  await page.getByRole('button', { name: '查看精确值', exact: true }).click();
+  await expect(page.locator('#exact-value-text')).toContainText('3,500,000,000 bytes');
+  await page.locator('#exact-value-dialog form button').click();
   await page.selectOption('#provider-metric', 'billed');
   await expect(page.locator('#comparison-nodes .paired-value').last()).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
   const only = page.locator('#comparison-nodes tr').filter({ hasText: 'CSV only' });
   await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
   await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);
   const missingValue = only.locator('.paired-value'), missingCell = only.locator('.paired-traffic');
-  expect(await missingValue.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(238, 241, 243)');
+  expect(await missingValue.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(242, 245, 247)');
   expect(await missingCell.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
   expect((await missingValue.boundingBox()).width).toBeLessThan((await missingCell.boundingBox()).width / 2);
   await expect(only.locator('.paired-track')).toBeVisible();
