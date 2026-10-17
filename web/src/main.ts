@@ -366,7 +366,7 @@ function renderHistory(history: HistoryResult): void {
     const name = element('td', record.display?.originalName ?? record.nodeName ?? '未归属', 'node-cell'); name.title = record.nodeName || '未归属';
     if (record.display?.groups.length) {
       const label = element('button', name.textContent!, 'node-name'); label.type = 'button';
-      discloseGroups(label, record.display.groups, `record-groups:${record.nodeKey}:${record.start}:${record.end}`);
+      discloseGroups(label, record.display.groups, `record-groups:${JSON.stringify([record.nodeKey, record.start, record.end, record.upload, record.download, record.display])}`);
       name.removeAttribute('title'); name.replaceChildren(label);
     }
     const download = recordTrafficCell(record.download);
