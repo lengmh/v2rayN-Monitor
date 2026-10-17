@@ -434,7 +434,7 @@ test('period defaults follow day week month year while manual granularity surviv
 test('same-name comparison keeps sources separate and requests hourly week and month buckets', async t => {
   let localReads = 0;
   const comparisonLocal = { ...history, upload: '35', download: '0', nodes: [
-    { key: 'a', name: 'Same', upload: '10', download: '0' }, { key: 'b', name: 'Same', upload: '25', download: '0' }],
+    { key: 'a', name: 'Same', upload: '10', download: '0', display: { originalName: 'Same', groups: ['Synthetic Group'] } }, { key: 'b', name: 'Same', upload: '25', download: '0' }],
     series: [{ label: '2026-10-09T10:00+00:00', upload: '35', download: '0' }] };
   const provider = { source: 'cmp', rawBytes: '40', billedBytes: '32.000000000123', recordCount: 1,
     nodes: [{ name: 'Same', rawBytes: '40', billedBytes: '32.000000000123' }, { name: 'Only CSV', rawBytes: '0', billedBytes: '0' }],
@@ -454,7 +454,10 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   assert.equal(get('comparison-local-exact').textContent, '35 bytes');
   const rows = get('comparison-nodes').querySelectorAll('tr');
   const same = [...rows].find(r => r.textContent.includes('Same'));
-  assert.ok(same.querySelector('button').title.includes('35 bytes'));
+  assert.ok(same.querySelector('.paired-value').title.includes('35 bytes'));
+  same.querySelector('.has-groups').focus();
+  assert.equal(get('detail-popover').querySelector('li').textContent, 'Synthetic Group');
+  assert.ok(get('detail-popover').textContent.includes('来自本机记录'));
   assert.equal(same.querySelector('.paired-value').textContent, '< 0.001 GB');
   same.querySelector('.paired-value').focus();
   assert.ok(get('detail-popover').textContent.includes('上传< 0.001 GB'));
@@ -462,7 +465,7 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   assert.ok(!get('comparison-nodes').textContent.includes('↑'));
   assert.ok(!get('comparison-buckets').textContent.includes('↑'));
   change('provider-metric', 'billed');
-  assert.ok(get('comparison-nodes').querySelectorAll('button')[3].title.includes('32.000000000123 bytes'));
+  assert.ok(get('comparison-nodes').querySelectorAll('.paired-value')[3].title.includes('32.000000000123 bytes'));
   const only = [...rows].find(r => r.textContent.includes('Only CSV'));
   assert.ok(only.classList.contains('missing')); assert.ok(only.textContent.includes('0.000 GB'));
   change('node-filter', 'Same');

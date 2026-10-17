@@ -165,11 +165,11 @@ tbody tr:hover { background: var(--hover); }
 .comparison-tables { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
 .comparison-tables .comparison-panel { margin: 0; }
 .comparison-tables table { min-width: 535px; }
-.comparison-tables th, .comparison-tables td { padding: 8px 10px; font-size: 11px; }
+.comparison-tables th, .comparison-tables td { padding: 5px 10px; font-size: 11px; }
 .comparison-name { width: 25%; white-space: normal; overflow-wrap: anywhere; }
 .paired-traffic { min-width: 180px; }
 .paired-value { display: block; width: fit-content; margin-left: auto; border: 0; padding: 1px 0; background: none; color: inherit; font: inherit; white-space: nowrap; }
-.paired-value { font-size: 12px; min-height: 24px; font-variant-numeric: tabular-nums; }
+.paired-value { font-size: 12px; min-height: 20px; font-variant-numeric: tabular-nums; }
 .paired-value:hover, .paired-value:focus-visible { text-decoration: underline dotted; text-underline-offset: 4px; }
 .paired-track { height: 4px; background: var(--surface); margin-top: 4px; border-radius: 3px; }
 .comparison-pair.missing .paired-value { background: var(--surface); color: var(--muted); border-radius: 3px; padding: 1px 5px; }
