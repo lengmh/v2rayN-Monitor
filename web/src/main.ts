@@ -26,11 +26,11 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '', class
 const fail = (message: string): void => { put('global-error', message); show('global-error', true); };
 initializeTheme(el<HTMLSelectElement>('theme'));
 const detailPopover = createDetailPopover(showExactValue);
-function discloseGroups(button: HTMLButtonElement, groups: string[], key: string): void {
+function discloseGroups(button: HTMLButtonElement, groups: string[], key: string, note?: string): void {
   button.classList.add('has-groups');
   button.removeAttribute('title');
   button.setAttribute('aria-label', `${button.textContent}，策略组：${groups.join('、')}`);
-  detailPopover.connect(button, { key, groups });
+  detailPopover.connect(button, { key, groups, note });
 }
 class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
 let expired = false;
@@ -451,7 +451,16 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
       [row.local, providerMetric === 'raw' ? row.raw : row.billed].forEach((value, index) => {
         const tr = element('tr', '', `comparison-pair ${value === null ? 'missing' : ''}`);
         if (index === 0) {
-          const name = element('td', row.name, 'comparison-name'); name.rowSpan = 2; tr.append(name);
+          const name = element('td', row.name, 'comparison-name'); name.rowSpan = 2;
+          if (id === 'comparison-nodes') {
+            const groups = [...new Set(local.nodes.filter(node => node.display?.originalName === row.name).flatMap(node => node.display?.groups ?? []))];
+            if (groups.length) {
+              const label = element('button', row.name, 'node-name'); label.type = 'button';
+              discloseGroups(label, groups, `comparison-groups:${row.name}`, '来自本机记录的策略组；同名不表示身份已验证。');
+              name.replaceChildren(label);
+            }
+          }
+          tr.append(name);
         }
         tr.append(element('td', index === 0 ? '本机' : '服务商'));
         const cell = element('td', '', 'paired-traffic');
