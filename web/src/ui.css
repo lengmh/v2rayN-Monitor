@@ -132,7 +132,7 @@ main { min-width: 0; flex: 1; }
 .recovery-detail { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 3px !important; }
 .detail-popover p { color: var(--muted); font-size: 11px; line-height: 1.7; margin-top: 10px; }
 .popover-actions { display: flex; justify-content: space-between; margin-top: 10px; }
-.table-scroll { overflow: auto; max-height: 450px; }
+.table-scroll { position: relative; overflow: auto; max-height: 450px; }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; white-space: nowrap; }
 th { position: sticky; top: 0; z-index: 1; background: var(--surface); color: var(--muted); font-weight: 500; }
 th, td { padding: 8px 12px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
