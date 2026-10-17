@@ -592,6 +592,7 @@ async function refresh(force = false): Promise<void> {
         for (const id of ['total-value', 'upload-value', 'download-value', 'node-count']) put(id, '—');
         for (const id of ['total-exact', 'upload-exact', 'download-exact']) put(id, '探测量未知');
         for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
+        detailPopover.finishRender();
         put('probe-coverage', '尚未启用探测历史；现有业务历史继续保留。');
         put('quality-notice', '探测量未知，不能记为零。首次接入建立基线，不能追记此前探测流量。');
         put('quality-summary', '探测历史未启用');
