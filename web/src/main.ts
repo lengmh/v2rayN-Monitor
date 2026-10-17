@@ -256,13 +256,14 @@ function renderRanking(items: RankingItem[], provider = false): void {
     if (node.groups?.length) discloseGroups(name, node.groups, `rank-groups:${node.key}`);
     const value = metric(node);
     const shareText = value > 0n && percentage(value, total) < .01 ? '<0.01%' : `${percentage(value, total).toFixed(2)}%`;
-    heading.append(element('span', share ? shareText : String(index + 1).padStart(2, '0'), 'rank-index'), name);
     if (share) {
       const swatch = element('span', '', 'share-swatch');
-      swatch.style.backgroundColor = colors[index % colors.length]; name.prepend(swatch);
+      swatch.style.backgroundColor = colors[index % colors.length];
+      heading.append(swatch, name, element('span', shareText, 'rank-index'));
       row.append(heading); list.append(row);
       return;
     }
+    heading.append(element('span', String(index + 1).padStart(2, '0'), 'rank-index'), name);
     const recovery = node.recovered ?? 0n;
     const valueBox = element('span', '', 'rank-value-box');
     const marker = element('span', '', `rank-recovery-marker${recovery > 0n ? '' : ' vacant'}`);
