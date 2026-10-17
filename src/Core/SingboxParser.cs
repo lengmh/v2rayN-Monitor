@@ -154,8 +154,10 @@ public static class SingboxParser
                 {
                     var nodeId = tag == "proxy" && type == "anytls" && !string.IsNullOrEmpty(snapshot.NodeId)
                         ? snapshot.NodeId : null;
+                    var display = nodeId is null ? MemberName(entries, tag) : null;
                     candidates.Add(tag, new(tag, type, nodeId)
-                    { DisplayName = nodeId is null ? MemberDisplayName(entries, tag) : null });
+                    { DisplayName = display is null ? null : $"【{display.GroupLabel}】 {display.OriginalName}",
+                        CapturedName = nodeId is null ? display : null });
                 }
             }
             catalog = new(snapshot.InstanceId, snapshot.Generation, snapshot.ProcessIdentity,
@@ -167,7 +169,7 @@ public static class SingboxParser
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { return false; }
     }
 
-    private static string? MemberDisplayName(JsonElement[] entries, string tag)
+    private static CapturedNodeName? MemberName(JsonElement[] entries, string tag)
     {
         JsonElement[] Parents(string type) => entries.Where(x => Text(x, "type") == type
             && Read(x, "outbounds") is { ValueKind: JsonValueKind.Array } members
@@ -176,10 +178,19 @@ public static class SingboxParser
         if (parents.Length == 0) parents = Parents("urltest");
         if (parents.Length != 1) return null; // A shared member does not prove which group routed its traffic.
         var group = Text(parents[0], "tag");
+        if (Text(parents[0], "type") == "selector" && Parents("urltest").Any(x =>
+            Text(x, "tag") != group + "-auto" || !Read(parents[0], "outbounds").EnumerateArray()
+                .Any(y => y.ValueKind == JsonValueKind.String && y.GetString() == group + "-auto"))) return null;
         var separator = group.IndexOf("-proxy-", StringComparison.Ordinal);
         var label = separator > 0 && group[..separator].All(char.IsAsciiDigit) ? group[(separator + 7)..] : group;
         var member = tag.StartsWith(group + "-", StringComparison.Ordinal) ? tag[(group.Length + 1)..] : tag;
-        return $"【{label}】 {member}";
+        // Fixed client BuildOutboundsList emits group + "-" + positive ordinal + "-" + Remarks.
+        // This is display evidence only, never an IndexId association.
+        var ordinal = member.IndexOf('-');
+        if (!tag.StartsWith(group + "-", StringComparison.Ordinal) || ordinal <= 0
+            || !int.TryParse(member[..ordinal], out var number) || number <= 0 || member[..ordinal] != number.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            || ordinal + 1 >= member.Length) return null;
+        return new(member[(ordinal + 1)..], label);
     }
 
     public static bool MatchesSelectedConnection(IReadOnlyDictionary<string, string?> profile,
