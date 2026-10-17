@@ -135,8 +135,10 @@ test('traffic details remain open across polling and support keyboard dismissal'
   await page.locator('[data-ranking-mode=ranking]').focus();
   await value.focus();
   await expect(popup).toBeVisible();
+  const previousValue = await value.elementHandle();
   const before = calls.filter(c => c.path === '/api/history').length;
   await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
+  await expect.poll(() => previousValue.evaluate(node => node.isConnected)).toBe(false);
   await expect(popup).toBeVisible();
   await expect(value).toHaveAttribute('aria-expanded', 'true');
   await expect(value).toBeFocused();
@@ -203,15 +205,24 @@ test('issue23 captured rates, group names and exact copy work across business an
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic', currentNode: 'Synthetic', lastSample: null,
       uploadPerSecond: null, downloadPerSecond: null, demo: false, probes: { historyEnabled: true, state: 'available', message: 'Synthetic' } })),
     '/api/history': (route, request, url) => route.fulfill(json({ ...history, basis: url.searchParams.get('basis') ?? 'local_proxy',
-      displayMetadataEnabled: true, display, nodes: [{ ...history.nodes[0], display }], records: [{ ...history.records[0], display }] }))
+      displayMetadataEnabled: true, display, nodes: [{ ...history.nodes[0], display }], records: [
+        { ...history.records[0], display },
+        { ...history.records[0], display: { ...display, groups: ['Synthetic second snapshot'] } }] }))
   });
   await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
-  const groupedName = page.locator('#records .node-cell .has-groups');
+  const groupedName = page.locator('#records .node-cell .has-groups').first();
   await expect(groupedName).toHaveText('Synthetic original 0.5x');
   await groupedName.hover();
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('US-0.5x');
   await groupedName.focus();
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('US-0.5x');
+  await groupedName.press('Escape');
+  await groupedName.click();
+  const previousGroup = await groupedName.elementHandle();
+  const before = calls.filter(c => c.path === '/api/history').length;
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
+  await expect.poll(() => previousGroup.evaluate(node => node.isConnected)).toBe(false);
+  await expect(page.locator('#detail-popover .node-group-list')).toHaveText('US-0.5x');
   await groupedName.press('Escape');
   await page.locator('#ranking .has-groups').click();
   await expect(page.locator('#node-filter')).toHaveValue('a');
