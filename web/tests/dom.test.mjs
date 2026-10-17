@@ -6,7 +6,7 @@ const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf
 const asset = (await readdir(new URL('../dist/assets/', import.meta.url))).find(name => name.endsWith('.js'));
 const script = await readFile(new URL(`../dist/assets/${asset}`, import.meta.url), 'utf8');
 const history = { upload: '1073741824', download: '15032385536', unallocatedUpload: '0', unallocatedDownload: '0', gapCount: 0, series: [{ label: '2026-10-09', upload: '1073741824', download: '15032385536' }], nodes: [{ key: 'a', name: 'Synthetic A', upload: '1073741824', download: '15032385536' }], records: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', nodeKey: 'a', nodeName: 'Synthetic A', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51 };
-async function until(condition) { for (let i = 0; i < 200; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
+async function until(condition, timeout = 1000) { for (let i = 0; i < timeout / 5; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
 async function fixture(t, overrides = {}) {
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4173/#synthetic-once', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
@@ -50,6 +50,37 @@ test('partial route coverage stays explicit in live status and historical record
   assert.ok(get('records').textContent.includes('部分出站'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
+for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`disabling probe history on a collector tick closes ${target} details`, async t => {
+  let historyEnabled = true;
+  const display = { originalName: 'Synthetic probe', groups: ['Synthetic probe group'], mergeKey: null };
+  const { w, get, calls, errors } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled, state: historyEnabled ? 'available' : 'disabled' } }),
+    '/api/history': () => Response.json({ ...history,
+      nodes: history.nodes.map(node => ({ ...node, display })),
+      records: history.records.map(record => ({ ...record, display })) })
+  });
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => calls.some(call => call.path === '/api/history' && call.query.has('basis')) &&
+    get('summary').getAttribute('aria-busy') === 'false');
+  const anchor = w.document.querySelector(target);
+  anchor.click();
+  assert.equal(get('detail-popover').hidden, false);
+  assert.equal(anchor.getAttribute('aria-expanded'), 'true');
+  const historyCalls = calls.filter(call => call.path === '/api/history').length;
+
+  historyEnabled = false;
+  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查', 8000);
+  assert.equal(anchor.isConnected, false);
+  assert.equal(get('detail-popover').hidden, true);
+  assert.equal(anchor.getAttribute('aria-expanded'), 'false');
+  assert.equal(w.document.querySelectorAll('[aria-controls="detail-popover"][aria-expanded="true"]').length, 0);
+  assert.equal(get('total-value').textContent, '—');
+  assert.equal(get('export-button').disabled, true);
+  assert.equal(calls.filter(call => call.path === '/api/history').length, historyCalls);
+  assert.deepEqual(errors, []);
+});
+
 test('Xray partial scope keeps outbound semantics and probe limitation visible', async t => {
   const description = '仅采集 Xray proxy 出站自身的累计字节，包含策略组选中该出站的连接；其他出站未采集，内部探测未单独区分。';
   const { get } = await fixture(t, {
@@ -321,10 +352,87 @@ test('empty local range is unknown while recorded idle traffic stays zero', asyn
 });
 
 test('node ranking discloses each node recovery contribution', async t => {
-  const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history,
+  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json({ ...history,
     nodes: [{ ...history.nodes[0], recoveredUpload: '1000000000', recoveredDownload: '0' }] }) });
-  assert.ok(get('ranking').textContent.includes('[恢复]'));
-  assert.equal(get('ranking').querySelector('.rank-recovery-marker').title, '已计入恢复量 1,000,000,000 bytes');
+  const amount = get('ranking').querySelector('.rank-value');
+  assert.equal(amount.textContent, '16.106 GB');
+  assert.ok(!get('ranking').textContent.includes('恢复'));
+  assert.ok(!get('ranking').textContent.includes('↑'));
+  assert.ok(!get('ranking').querySelector('.rank-recovery-marker').classList.contains('vacant'));
+  assert.match(amount.getAttribute('aria-label'), /含恢复量/);
+  amount.click();
+  assert.equal(get('detail-popover').hidden, false);
+  assert.ok(get('detail-popover').textContent.includes('其中恢复量1.000 GB'));
+  assert.ok(get('detail-popover').textContent.includes('已包含在上传、下载及合计中'));
+  // jsdom does not implement the native modal API; the real browser suite covers it.
+  get('exact-value-dialog').showModal = function () { this.open = true; };
+  get('detail-popover').querySelector('button').click();
+  assert.equal(get('exact-value-dialog').open, true);
+  assert.ok(get('exact-value-text').textContent.includes('1,000,000,000 bytes'));
+  assert.equal(get('detail-popover').hidden, true);
+  get('exact-value-dialog').open = false;
+  amount.focus();
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+  assert.equal(get('detail-popover').hidden, true);
+  assert.equal(amount.getAttribute('aria-expanded'), 'false');
+  assert.deepEqual(errors, []);
+});
+
+test('ranking without recovery keeps the same value target and shows directions on focus', async t => {
+  const { get } = await fixture(t);
+  const amount = get('ranking').querySelector('.rank-value');
+  assert.ok(get('ranking').querySelector('.rank-recovery-marker').classList.contains('vacant'));
+  amount.focus();
+  const popup = get('detail-popover');
+  assert.equal(popup.hidden, false);
+  assert.ok(popup.textContent.includes('上传1.074 GB'));
+  assert.ok(popup.textContent.includes('下载15.032 GB'));
+  assert.ok(!popup.querySelector('.recovery-detail'));
+});
+
+for (const empty of [false, true]) test(`share group details close when polling returns ${empty ? 'no nodes' : 'only zero totals'}`, async t => {
+  let result = { ...history, nodes: history.nodes.map(node => ({ ...node,
+    display: { originalName: node.name, groups: ['Synthetic initial group'], mergeKey: null } })) };
+  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) });
+  get('ranking-share').click();
+  const firstAnchor = get('ranking').querySelector('.has-groups');
+  firstAnchor.focus();
+  const popup = get('detail-popover');
+  assert.equal(popup.hidden, false);
+  assert.equal(popup.querySelector('li').textContent, 'Synthetic initial group');
+
+  // A normal collector tick must reconnect the same item and refresh its details.
+  result = { ...result, nodes: result.nodes.map(node => ({ ...node,
+    display: { ...node.display, groups: ['Synthetic updated group'] } })) };
+  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group', 8000);
+  const previousAnchor = get('ranking').querySelector('.has-groups');
+  assert.equal(firstAnchor.isConnected, false);
+  assert.equal(popup.hidden, false);
+  assert.equal(previousAnchor.getAttribute('aria-expanded'), 'true');
+  await until(() => w.document.activeElement === previousAnchor);
+
+  result = { ...result, upload: '0', download: '0', series: [], records: [], recordCount: 0,
+    nodes: empty ? [] : result.nodes.map(node => ({ ...node, upload: '0', download: '0' })) };
+  await until(() => !!get('ranking').querySelector('.empty-state'), 8000);
+  assert.equal(get('ranking').textContent, empty ? '所选范围尚无节点记录' : '所选范围只有零值记录');
+  assert.equal(popup.hidden, true);
+  assert.equal(previousAnchor.isConnected, false);
+  assert.equal(previousAnchor.getAttribute('aria-expanded'), 'false');
+  assert.equal(w.document.querySelectorAll('[aria-controls="detail-popover"][aria-expanded="true"]').length, 0);
+  assert.equal(get('global-error').hidden, true);
+  assert.deepEqual(errors, []);
+});
+
+test('appearance changes stay local and do not alter the data source', async t => {
+  const { w, get, change, calls } = await fixture(t);
+  const before = calls.length;
+  change('theme', 'dark');
+  assert.equal(w.document.documentElement.dataset.theme, 'dark');
+  assert.equal(w.localStorage.getItem('v2rayn-monitor-theme'), 'dark');
+  change('theme', 'light');
+  assert.equal(w.document.documentElement.dataset.theme, 'light');
+  assert.equal(get('total-value').textContent, '16.106 GB');
+  assert.equal(calls.length, before);
 });
 
 test('node ranking switches between ordered totals and exact share mode', async t => {
@@ -390,7 +498,7 @@ test('period defaults follow day week month year while manual granularity surviv
 test('same-name comparison keeps sources separate and requests hourly week and month buckets', async t => {
   let localReads = 0;
   const comparisonLocal = { ...history, upload: '35', download: '0', nodes: [
-    { key: 'a', name: 'Same', upload: '10', download: '0' }, { key: 'b', name: 'Same', upload: '25', download: '0' }],
+    { key: 'a', name: 'Same', upload: '10', download: '0', display: { originalName: 'Same', groups: ['Synthetic Group'] } }, { key: 'b', name: 'Same', upload: '25', download: '0' }],
     series: [{ label: '2026-10-09T10:00+00:00', upload: '35', download: '0' }] };
   const provider = { source: 'cmp', rawBytes: '40', billedBytes: '32.000000000123', recordCount: 1,
     nodes: [{ name: 'Same', rawBytes: '40', billedBytes: '32.000000000123' }, { name: 'Only CSV', rawBytes: '0', billedBytes: '0' }],
@@ -410,9 +518,18 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   assert.equal(get('comparison-local-exact').textContent, '35 bytes');
   const rows = get('comparison-nodes').querySelectorAll('tr');
   const same = [...rows].find(r => r.textContent.includes('Same'));
-  assert.ok(same.querySelector('button').title.includes('35 bytes'));
+  assert.ok(same.querySelector('.paired-value').title.includes('35 bytes'));
+  same.querySelector('.has-groups').focus();
+  assert.equal(get('detail-popover').querySelector('li').textContent, 'Synthetic Group');
+  assert.ok(get('detail-popover').textContent.includes('来自本机记录'));
+  assert.equal(same.querySelector('.paired-value').textContent, '< 0.001 GB');
+  same.querySelector('.paired-value').focus();
+  assert.ok(get('detail-popover').textContent.includes('上传< 0.001 GB'));
+  assert.ok(!get('detail-popover').querySelector('.recovery-detail'));
+  assert.ok(!get('comparison-nodes').textContent.includes('↑'));
+  assert.ok(!get('comparison-buckets').textContent.includes('↑'));
   change('provider-metric', 'billed');
-  assert.ok(get('comparison-nodes').querySelectorAll('button')[3].title.includes('32.000000000123 bytes'));
+  assert.ok(get('comparison-nodes').querySelectorAll('.paired-value')[3].title.includes('32.000000000123 bytes'));
   const only = [...rows].find(r => r.textContent.includes('Only CSV'));
   assert.ok(only.classList.contains('missing')); assert.ok(only.textContent.includes('0.000 GB'));
   change('node-filter', 'Same');
@@ -591,7 +708,13 @@ test('captured billing displays partial coverage and keeps group labels separate
   assert.equal(cells[6].textContent, '0.5');
   assert.equal(cells[7].title, '8,053,063,680 bytes');
   assert.ok(cells[1].textContent.startsWith('Original synthetic'));
-  assert.equal(cells[1].querySelector('.node-groups').textContent, '【US-0.5x】');
+  const name = cells[1].querySelector('.has-groups');
+  assert.equal(name.textContent, 'Original synthetic');
+  assert.ok(!cells[1].textContent.includes('US-0.5x'));
+  name.focus();
+  assert.equal(get('detail-popover').getAttribute('aria-label'), '策略组');
+  assert.equal(get('detail-popover').querySelector('li').textContent, 'US-0.5x');
+  assert.equal(get('ranking').querySelector('.has-groups').textContent, 'Original synthetic');
 });
 
 test('partial-only local recovery keeps summary unknown while measured idle remains zero', async t => {
