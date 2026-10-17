@@ -321,10 +321,54 @@ test('empty local range is unknown while recorded idle traffic stays zero', asyn
 });
 
 test('node ranking discloses each node recovery contribution', async t => {
-  const { get } = await fixture(t, { '/api/history': () => Response.json({ ...history,
+  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json({ ...history,
     nodes: [{ ...history.nodes[0], recoveredUpload: '1000000000', recoveredDownload: '0' }] }) });
-  assert.ok(get('ranking').textContent.includes('[恢复]'));
-  assert.equal(get('ranking').querySelector('.rank-recovery-marker').title, '已计入恢复量 1,000,000,000 bytes');
+  const amount = get('ranking').querySelector('.rank-value');
+  assert.equal(amount.textContent, '16.106 GB');
+  assert.ok(!get('ranking').textContent.includes('恢复'));
+  assert.ok(!get('ranking').textContent.includes('↑'));
+  assert.ok(!get('ranking').querySelector('.rank-recovery-marker').classList.contains('vacant'));
+  assert.match(amount.getAttribute('aria-label'), /含恢复量/);
+  amount.click();
+  assert.equal(get('detail-popover').hidden, false);
+  assert.ok(get('detail-popover').textContent.includes('其中恢复量1.000 GB'));
+  assert.ok(get('detail-popover').textContent.includes('已包含在上传、下载及合计中'));
+  // jsdom does not implement the native modal API; the real browser suite covers it.
+  get('exact-value-dialog').showModal = function () { this.open = true; };
+  get('detail-popover').querySelector('button').click();
+  assert.equal(get('exact-value-dialog').open, true);
+  assert.ok(get('exact-value-text').textContent.includes('1,000,000,000 bytes'));
+  assert.equal(get('detail-popover').hidden, true);
+  get('exact-value-dialog').open = false;
+  amount.focus();
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+  assert.equal(get('detail-popover').hidden, true);
+  assert.equal(amount.getAttribute('aria-expanded'), 'false');
+  assert.deepEqual(errors, []);
+});
+
+test('ranking without recovery keeps the same value target and shows directions on focus', async t => {
+  const { get } = await fixture(t);
+  const amount = get('ranking').querySelector('.rank-value');
+  assert.ok(get('ranking').querySelector('.rank-recovery-marker').classList.contains('vacant'));
+  amount.focus();
+  const popup = get('detail-popover');
+  assert.equal(popup.hidden, false);
+  assert.ok(popup.textContent.includes('上传1.074 GB'));
+  assert.ok(popup.textContent.includes('下载15.032 GB'));
+  assert.ok(!popup.querySelector('.recovery-detail'));
+});
+
+test('appearance changes stay local and do not alter the data source', async t => {
+  const { w, get, change, calls } = await fixture(t);
+  const before = calls.length;
+  change('theme', 'dark');
+  assert.equal(w.document.documentElement.dataset.theme, 'dark');
+  assert.equal(w.localStorage.getItem('v2rayn-monitor-theme'), 'dark');
+  change('theme', 'light');
+  assert.equal(w.document.documentElement.dataset.theme, 'light');
+  assert.equal(get('total-value').textContent, '16.106 GB');
+  assert.equal(calls.length, before);
 });
 
 test('node ranking switches between ordered totals and exact share mode', async t => {
@@ -411,6 +455,12 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   const rows = get('comparison-nodes').querySelectorAll('tr');
   const same = [...rows].find(r => r.textContent.includes('Same'));
   assert.ok(same.querySelector('button').title.includes('35 bytes'));
+  assert.equal(same.querySelector('.paired-value').textContent, '< 0.001 GB');
+  same.querySelector('.paired-value').focus();
+  assert.ok(get('detail-popover').textContent.includes('上传< 0.001 GB'));
+  assert.ok(!get('detail-popover').querySelector('.recovery-detail'));
+  assert.ok(!get('comparison-nodes').textContent.includes('↑'));
+  assert.ok(!get('comparison-buckets').textContent.includes('↑'));
   change('provider-metric', 'billed');
   assert.ok(get('comparison-nodes').querySelectorAll('button')[3].title.includes('32.000000000123 bytes'));
   const only = [...rows].find(r => r.textContent.includes('Only CSV'));
@@ -591,7 +641,13 @@ test('captured billing displays partial coverage and keeps group labels separate
   assert.equal(cells[6].textContent, '0.5');
   assert.equal(cells[7].title, '8,053,063,680 bytes');
   assert.ok(cells[1].textContent.startsWith('Original synthetic'));
-  assert.equal(cells[1].querySelector('.node-groups').textContent, '【US-0.5x】');
+  const name = cells[1].querySelector('.has-groups');
+  assert.equal(name.textContent, 'Original synthetic');
+  assert.ok(!cells[1].textContent.includes('US-0.5x'));
+  name.focus();
+  assert.equal(get('detail-popover').getAttribute('aria-label'), '策略组');
+  assert.equal(get('detail-popover').querySelector('li').textContent, 'US-0.5x');
+  assert.equal(get('ranking').querySelector('.has-groups').textContent, 'Original synthetic');
 });
 
 test('partial-only local recovery keeps summary unknown while measured idle remains zero', async t => {
