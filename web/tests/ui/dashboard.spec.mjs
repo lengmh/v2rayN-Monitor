@@ -82,7 +82,7 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
     '/api/history': route => route.fulfill(json({ ...history,
       nodes: history.nodes.map((n, i) => ({ ...n, recoveredUpload: i === 0 ? '123456789' : '0', recoveredDownload: '0' })) }))
   });
-  await page.locator('.rank-value').first().click();
+  await page.locator('.rank-value').first().hover();
   await expect(page.locator('#detail-popover')).toBeVisible();
   await expect(page.locator('#detail-popover')).toContainText('其中恢复量');
   await expect(page.locator('.rank-value').first()).toHaveText('9.127 GB');
@@ -183,9 +183,12 @@ test.describe('touch traffic details', () => {
     await page.locator('.rank-value').tap();
     const popup = page.locator('#detail-popover');
     await expect(popup).toBeVisible();
+    await page.keyboard.press('Control+Home');
     const box = await popup.boundingBox();
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(390);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(844);
     await popup.getByRole('button', { name: '查看精确值', exact: true }).tap();
     await expect(page.locator('#exact-value-dialog')).toBeVisible();
     await expect(page.locator('#exact-value-text')).toContainText('123,456,789 bytes');
@@ -196,7 +199,7 @@ test.describe('touch traffic details', () => {
 test('issue23 captured rates, group names and exact copy work across business and probe views', async ({ page }) => {
   const display = { originalName: 'Synthetic original 0.5x', groups: ['US-0.5x'], mergeKey: null, rate: '0.5', rateStatus: 'known',
     estimatedBilledBytes: '8053063680', estimateCoveredBytes: '16106127360', estimateUnknownBytes: '0' };
-  await mock(page, {
+  const calls = await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic', currentNode: 'Synthetic', lastSample: null,
       uploadPerSecond: null, downloadPerSecond: null, demo: false, probes: { historyEnabled: true, state: 'available', message: 'Synthetic' } })),
     '/api/history': (route, request, url) => route.fulfill(json({ ...history, basis: url.searchParams.get('basis') ?? 'local_proxy',
@@ -205,9 +208,14 @@ test('issue23 captured rates, group names and exact copy work across business an
   await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
   const groupedName = page.locator('#records .node-cell .has-groups');
   await expect(groupedName).toHaveText('Synthetic original 0.5x');
+  await groupedName.hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('US-0.5x');
   await groupedName.focus();
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('US-0.5x');
   await groupedName.press('Escape');
+  await page.locator('#ranking .has-groups').click();
+  await expect(page.locator('#node-filter')).toHaveValue('a');
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('nodeKey')).toBe('a');
   await expect(page.locator('#records tr').first().locator('td').nth(6)).toHaveText('0.5');
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
     value: { writeText: async text => { window.syntheticCopied = text; } } }));
@@ -311,7 +319,7 @@ test('CSV source uses node statistics and exact billing without local direction 
 test('same-name comparison aligns sources by hour and keeps week month and missing data explicit', async ({ page }) => {
   let localReads = 0, partialOnly = false;
   const local = { ...history, upload: '3500000000', download: '0', unbucketedUpload: '500', unbucketedDownload: '0',
-    nodes: [{ key: 'a', name: 'Synthetic shared node', upload: '3000000000', download: '0' },
+    nodes: [{ key: 'a', name: 'Synthetic shared node', upload: '3000000000', download: '0', display: { originalName: 'Synthetic shared node', groups: ['Synthetic Route'] } },
       { key: 'b', name: 'Synthetic shared node', upload: '500000000', download: '0' }], recordCount: 2 };
   const provider = { source: 'Synthetic comparison', rawBytes: '4000000000', billedBytes: '3200000000.000123', recordCount: 2,
     nodes: [{ name: 'Synthetic shared node', rawBytes: '4000000000', billedBytes: '3200000000.000123' },
@@ -331,6 +339,9 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#comparison-view')).toBeVisible();
   await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
   await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('#comparison-nodes .has-groups').hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
+  await page.locator('#comparison-nodes .has-groups').press('Escape');
   const nodeCard = page.locator('#comparison-nodes').locator('xpath=ancestor::section[1]');
   const bucketCard = page.locator('#comparison-buckets').locator('xpath=ancestor::section[1]');
   const nodeBox = await nodeCard.boundingBox(), bucketBox = await bucketCard.boundingBox();

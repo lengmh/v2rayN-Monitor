@@ -7,7 +7,7 @@ export interface TrafficDetails {
   note?: string;
   exact: string;
 }
-export interface GroupDetails { key: string; groups: string[] }
+export interface GroupDetails { key: string; groups: string[]; note?: string }
 
 /** One shared, non-modal detail surface for pointer, keyboard and touch input. */
 export function createDetailPopover(showExact: (value: string) => void) {
@@ -41,7 +41,8 @@ export function createDetailPopover(showExact: (value: string) => void) {
     const width = popup.offsetWidth, height = popup.offsetHeight;
     popup.style.left = `${Math.max(12, Math.min(box.right - width, window.innerWidth - width - 12))}px`;
     const below = box.bottom + 9;
-    popup.style.top = `${Math.max(12, below + height < window.innerHeight - 12 ? below : box.top - height - 9)}px`;
+    const preferredTop = below + height < window.innerHeight - 12 ? below : box.top - height - 9;
+    popup.style.top = `${Math.max(12, Math.min(preferredTop, window.innerHeight - height - 12))}px`;
   };
   const fill = (): void => {
     if (!details) return;
@@ -56,6 +57,7 @@ export function createDetailPopover(showExact: (value: string) => void) {
         const item = document.createElement('li'); item.textContent = group; groups.append(item);
       }
       popup.append(groups);
+      if (details.note) { const note = document.createElement('p'); note.textContent = details.note; popup.append(note); }
     } else {
       const list = document.createElement('dl');
       for (const [label, value] of [['合计', details.total], ['上传', details.upload ?? '—'], ['下载', details.download ?? '—'],
