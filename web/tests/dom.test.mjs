@@ -50,6 +50,37 @@ test('partial route coverage stays explicit in live status and historical record
   assert.ok(get('records').textContent.includes('部分出站'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
+for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`disabling probe history on a collector tick closes ${target} details`, async t => {
+  let historyEnabled = true;
+  const display = { originalName: 'Synthetic probe', groups: ['Synthetic probe group'], mergeKey: null };
+  const { w, get, calls, errors } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled, state: historyEnabled ? 'available' : 'disabled' } }),
+    '/api/history': () => Response.json({ ...history,
+      nodes: history.nodes.map(node => ({ ...node, display })),
+      records: history.records.map(record => ({ ...record, display })) })
+  });
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => calls.some(call => call.path === '/api/history' && call.query.has('basis')) &&
+    get('summary').getAttribute('aria-busy') === 'false');
+  const anchor = w.document.querySelector(target);
+  anchor.click();
+  assert.equal(get('detail-popover').hidden, false);
+  assert.equal(anchor.getAttribute('aria-expanded'), 'true');
+  const historyCalls = calls.filter(call => call.path === '/api/history').length;
+
+  historyEnabled = false;
+  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查', 8000);
+  assert.equal(anchor.isConnected, false);
+  assert.equal(get('detail-popover').hidden, true);
+  assert.equal(anchor.getAttribute('aria-expanded'), 'false');
+  assert.equal(w.document.querySelectorAll('[aria-controls="detail-popover"][aria-expanded="true"]').length, 0);
+  assert.equal(get('total-value').textContent, '—');
+  assert.equal(get('export-button').disabled, true);
+  assert.equal(calls.filter(call => call.path === '/api/history').length, historyCalls);
+  assert.deepEqual(errors, []);
+});
+
 test('Xray partial scope keeps outbound semantics and probe limitation visible', async t => {
   const description = '仅采集 Xray proxy 出站自身的累计字节，包含策略组选中该出站的连接；其他出站未采集，内部探测未单独区分。';
   const { get } = await fixture(t, {
