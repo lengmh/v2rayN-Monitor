@@ -103,8 +103,8 @@ main { min-width: 0; flex: 1; }
 .rank-node { border: 0; background: none; padding: 0; color: var(--ink); text-align: left; font-size: 12px; line-height: 19px; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .rank-node:hover { color: var(--teal); }
 .node-name { padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-.has-groups { border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; max-width: 100%; width: fit-content; }
-.has-groups:hover { border-color: var(--muted); }
+.has-groups { border: 0; border-radius: 3px; padding: 0; outline: 1px solid var(--line); outline-offset: 3px; max-width: 100%; width: fit-content; }
+.has-groups:hover { outline-color: var(--muted); }
 .node-group-list { list-style: none; padding: 0; margin: 0; max-height: 180px; overflow: auto; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .rank-value-box { display: block; }
 .rank-value { display: grid; grid-template-columns: 12px auto; align-items: center; border: 0; background: none; padding: 0; min-height: 24px; font-size: 12px; line-height: 19px; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -115,15 +115,16 @@ main { min-width: 0; flex: 1; }
 .rank-bar, .paired-bar { display: flex; overflow: hidden; height: 100%; border-radius: 3px; }
 .rank-download, .rank-upload { height: 100%; }
 .rank-neutral { background: var(--provider) !important; }
-.ranking.show-shares { display: flex; align-items: center; gap: 17px; }
-.share-chart { position: relative; width: 150px; height: 150px; flex: 0 0 150px; margin: 0; }
-.share-chart svg { height: 100%; width: 100%; }
+.ranking.show-shares { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 5fr); align-items: center; gap: 20px; }
+.share-chart { position: relative; width: min(100%, 200px); aspect-ratio: 1; justify-self: center; margin: 0; }
+.share-chart svg { display: block; height: 100%; width: 100%; }
 .share-tooltip { position: absolute; inset: 0; place-items: center; font-size: 12px; pointer-events: none; }
 .share-tooltip:not([hidden]) { display: grid; }
-.share-legend { min-width: 0; flex: 1; }
-.share-legend .rank-heading { grid-template-columns: 47px minmax(0,1fr); }
-.share-legend .rank-row { margin: 8px 0; }
-.share-swatch { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; }
+.share-legend { min-width: 0; max-height: 224px; overflow: auto; padding: 4px; }
+.share-legend .rank-heading { grid-template-columns: 6px minmax(0,1fr) auto; align-items: center; gap: 8px; }
+.share-legend .rank-index { text-align: right; white-space: nowrap; }
+.share-legend .rank-row { margin: 9px 0; }
+.share-swatch { display: block; width: 6px; height: 6px; border-radius: 50%; }
 .detail-popover { position: fixed; z-index: 60; width: 300px; max-width: calc(100vw - 24px); padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; box-shadow: 0 8px 28px #10182020; color: var(--ink); }
 .detail-popover h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; }
 .detail-popover dl { display: grid; grid-template-columns: 1fr auto; gap: 7px 18px; font-size: 12px; margin: 0; }
@@ -242,8 +243,6 @@ tbody tr:hover { background: var(--hover); }
   .comparison-summary { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .comparison-summary .metric-card:nth-child(2) { border-right: 1px solid var(--line); }
   #source-caption { margin-left: 0; }
-  .ranking.show-shares { justify-content: center; }
-  .share-legend { max-width: 340px; }
 }
 @media (max-width: 640px) {
   .sidebar { padding: 10px 14px 0; gap: 8px; }
@@ -300,9 +299,8 @@ tbody tr:hover { background: var(--hover); }
   .rank-node { font-size: 12px; }
   .rank-value { font-size: 11px; }
   .rank-heading { grid-template-columns: 18px minmax(0,1fr) auto; gap: 6px; }
-  .share-chart { width: 125px; height: 125px; flex-basis: 125px; }
-  .ranking.show-shares { gap: 10px; }
-  .share-legend .rank-heading { grid-template-columns: 42px minmax(0,1fr); gap: 4px; }
+  .ranking.show-shares { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; }
+  .share-legend .rank-heading { gap: 6px; }
   .settings-panel, .import-preview-panel { padding: 17px; }
   .preview-count { padding-inline: 8px; }
   .preview-count strong { font-size: 22px; }
