@@ -207,6 +207,7 @@ function renderRanking(items: RankingItem[], provider = false): void {
     return;
   }
   if (share && total === 0n) {
+    detailPopover.finishRender();
     ranking.append(element('p', sorted.length ? '所选范围只有零值记录' : '所选范围尚无节点记录', 'empty-state'));
     return;
   }

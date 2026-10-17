@@ -6,7 +6,7 @@ const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf
 const asset = (await readdir(new URL('../dist/assets/', import.meta.url))).find(name => name.endsWith('.js'));
 const script = await readFile(new URL(`../dist/assets/${asset}`, import.meta.url), 'utf8');
 const history = { upload: '1073741824', download: '15032385536', unallocatedUpload: '0', unallocatedDownload: '0', gapCount: 0, series: [{ label: '2026-10-09', upload: '1073741824', download: '15032385536' }], nodes: [{ key: 'a', name: 'Synthetic A', upload: '1073741824', download: '15032385536' }], records: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', nodeKey: 'a', nodeName: 'Synthetic A', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51 };
-async function until(condition) { for (let i = 0; i < 200; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
+async function until(condition, timeout = 1000) { for (let i = 0; i < timeout / 5; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
 async function fixture(t, overrides = {}) {
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4173/#synthetic-once', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
@@ -357,6 +357,39 @@ test('ranking without recovery keeps the same value target and shows directions 
   assert.ok(popup.textContent.includes('上传1.074 GB'));
   assert.ok(popup.textContent.includes('下载15.032 GB'));
   assert.ok(!popup.querySelector('.recovery-detail'));
+});
+
+for (const empty of [false, true]) test(`share group details close when polling returns ${empty ? 'no nodes' : 'only zero totals'}`, async t => {
+  let result = { ...history, nodes: history.nodes.map(node => ({ ...node,
+    display: { originalName: node.name, groups: ['Synthetic initial group'], mergeKey: null } })) };
+  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) });
+  get('ranking-share').click();
+  const firstAnchor = get('ranking').querySelector('.has-groups');
+  firstAnchor.focus();
+  const popup = get('detail-popover');
+  assert.equal(popup.hidden, false);
+  assert.equal(popup.querySelector('li').textContent, 'Synthetic initial group');
+
+  // A normal collector tick must reconnect the same item and refresh its details.
+  result = { ...result, nodes: result.nodes.map(node => ({ ...node,
+    display: { ...node.display, groups: ['Synthetic updated group'] } })) };
+  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group', 8000);
+  const previousAnchor = get('ranking').querySelector('.has-groups');
+  assert.equal(firstAnchor.isConnected, false);
+  assert.equal(popup.hidden, false);
+  assert.equal(previousAnchor.getAttribute('aria-expanded'), 'true');
+  await until(() => w.document.activeElement === previousAnchor);
+
+  result = { ...result, upload: '0', download: '0', series: [], records: [], recordCount: 0,
+    nodes: empty ? [] : result.nodes.map(node => ({ ...node, upload: '0', download: '0' })) };
+  await until(() => !!get('ranking').querySelector('.empty-state'), 8000);
+  assert.equal(get('ranking').textContent, empty ? '所选范围尚无节点记录' : '所选范围只有零值记录');
+  assert.equal(popup.hidden, true);
+  assert.equal(previousAnchor.isConnected, false);
+  assert.equal(previousAnchor.getAttribute('aria-expanded'), 'false');
+  assert.equal(w.document.querySelectorAll('[aria-controls="detail-popover"][aria-expanded="true"]').length, 0);
+  assert.equal(get('global-error').hidden, true);
+  assert.deepEqual(errors, []);
 });
 
 test('appearance changes stay local and do not alter the data source', async t => {
