@@ -132,7 +132,9 @@ test('traffic details remain open across polling and support keyboard dismissal'
   await expect(popup).toBeVisible();
   await value.press('Escape');
   await expect(popup).toBeHidden();
+  await page.locator('[data-ranking-mode=ranking]').focus();
   await value.focus();
+  await expect(popup).toBeVisible();
   const before = calls.filter(c => c.path === '/api/history').length;
   await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
   await expect(popup).toBeVisible();
@@ -327,6 +329,8 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await page.selectOption('#statistics-source', provider.source);
   await page.check('#compare-toggle');
   await expect(page.locator('#comparison-view')).toBeVisible();
+  await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
   const nodeCard = page.locator('#comparison-nodes').locator('xpath=ancestor::section[1]');
   const bucketCard = page.locator('#comparison-buckets').locator('xpath=ancestor::section[1]');
   const nodeBox = await nodeCard.boundingBox(), bucketBox = await bucketCard.boundingBox();
