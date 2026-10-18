@@ -529,7 +529,7 @@ test('same-name comparison keeps sources separate and requests hourly week and m
   assert.ok(!get('comparison-nodes').textContent.includes('↑'));
   assert.ok(!get('comparison-buckets').textContent.includes('↑'));
   change('provider-metric', 'billed');
-  assert.ok(get('comparison-nodes').querySelectorAll('.paired-value')[3].title.includes('32.000000000123 bytes'));
+  assert.ok([...get('comparison-nodes').querySelectorAll('.paired-value')].some(value => value.title.includes('32.000000000123 bytes')));
   const only = [...rows].find(r => r.textContent.includes('Only CSV'));
   assert.ok(only.classList.contains('missing')); assert.ok(only.textContent.includes('0.000 GB'));
   change('node-filter', 'Same');
@@ -561,9 +561,14 @@ test('partial-only recovery is unknown in comparison while provider recorded zer
   assert.equal(get('comparison-local').textContent, '—');
   assert.equal(get('comparison-local-exact').textContent, '所选范围无已知量');
   assert.equal(get('comparison-raw-exact').textContent, '0 bytes');
+  w.document.querySelector('[data-comparison-section="nodes"][data-comparison-mode="share"]').click();
+  assert.match(get('comparison-nodes-shares').querySelector('[data-source="local"]').textContent, /无记录，不能视为零流量/);
+  assert.match(get('comparison-nodes-shares').querySelector('[data-source="provider"]').textContent, /只有零值记录/);
+  assert.equal(get('comparison-nodes-shares').querySelectorAll('circle').length, 0);
   knownZero = true; change('bucket', 'month');
   await until(() => get('comparison-local-exact').textContent === '0 bytes');
   assert.equal(get('comparison-local').textContent, '0.000 GB');
+  assert.match(get('comparison-nodes-shares').querySelector('[data-source="local"]').textContent, /只有零值记录/);
 });
 
 test('comparison bucket table pages long hourly ranges without dropping exact totals', async t => {
@@ -589,6 +594,12 @@ test('comparison bucket table pages long hourly ranges without dropping exact to
   assert.ok(get('comparison-bucket-page').textContent.includes('101'));
   assert.equal(get('comparison-bucket-previous').disabled, true);
   const queries = calls.filter(c => c.path === '/api/history').length;
+  w.document.querySelector('[data-comparison-section="buckets"][data-comparison-mode="share"]').click();
+  const shareValues = () => [...get('comparison-buckets-shares').querySelectorAll('[data-source="local"] .rank-index')].map(n => n.textContent);
+  assert.equal(shareValues().length, 101);
+  assert.ok(shareValues().every(value => value === '0.99%'));
+  assert.match(get('comparison-buckets-shares').querySelector('svg').getAttribute('aria-label'), /不受翻页影响/);
+  w.document.querySelector('[data-comparison-section="buckets"][data-comparison-mode="list"]').click();
   get('comparison-bucket-next').click();
   assert.ok(get('comparison-buckets').querySelector('tr').textContent.includes(series[50].label));
   change('unit', 'GiB');
@@ -597,6 +608,10 @@ test('comparison bucket table pages long hourly ranges without dropping exact to
   assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 2);
   assert.ok(get('comparison-buckets').textContent.includes(series[100].label));
   assert.equal(get('comparison-bucket-next').disabled, true);
+  w.document.querySelector('[data-comparison-section="buckets"][data-comparison-mode="share"]').click();
+  assert.equal(shareValues().length, 101);
+  assert.ok(shareValues().every(value => value === '0.99%'));
+  w.document.querySelector('[data-comparison-section="buckets"][data-comparison-mode="list"]').click();
   assert.equal(get('comparison-local-exact').textContent, '101 bytes');
   assert.equal(calls.filter(c => c.path === '/api/history').length, queries);
   get('comparison-bucket-previous').click();
@@ -605,6 +620,9 @@ test('comparison bucket table pages long hourly ranges without dropping exact to
   await until(() => get('comparison-buckets').textContent.includes('2026-10') && get('comparison-bucket-next').disabled);
   assert.equal(get('comparison-buckets').querySelectorAll('tr').length, 2);
   assert.equal(get('comparison-bucket-previous').disabled, true);
+  w.document.querySelector('[data-comparison-section="buckets"][data-comparison-mode="share"]').click();
+  assert.deepEqual(shareValues(), ['100.00%']);
+  assert.equal(get('comparison-buckets-shares').querySelector('.rank-node').textContent, '2026-10');
 });
 
 test('provider upload help agrees with the shared backend parser limits', async t => {
@@ -733,4 +751,57 @@ test('partial-only local recovery keeps summary unknown while measured idle rema
   change('bucket', 'day');
   await until(() => get('total-value').textContent === '0.000 GB');
   assert.equal(get('total-exact').textContent, '0 bytes');
+});
+
+
+test('comparison shares and node ranking keep independent exact denominators and follow metric and filters', async t => {
+  let reads = 0;
+  const local = { ...history, upload: '400', download: '0', unbucketedUpload: '300',
+    nodes: [{ key: 'a', name: 'A', upload: '100', download: '0' }, { key: 'b', name: 'B', upload: '300', download: '0' }],
+    series: [{ label: '2026-10-09', upload: '25', download: '0' }, { label: '2026-10-10', upload: '75', download: '0' }] };
+  const provider = { source: 'shares', rawBytes: '100', billedBytes: '100.0000000000000000000000000001', recordCount: 3,
+    nodes: [{ name: 'A', rawBytes: '80', billedBytes: '10' }, { name: 'B', rawBytes: '20', billedBytes: '90' },
+      { name: 'Tiny', rawBytes: '0', billedBytes: '0.0000000000000000000000000001' }],
+    series: [{ label: '2026-10-09', rawBytes: '80', billedBytes: '10' }, { label: '2026-10-10', rawBytes: '20', billedBytes: '90.0000000000000000000000000001' }], records: [] };
+  const { get, change, w, calls, errors } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['shares']),
+    '/api/provider/nodes': () => Response.json(provider.nodes.map(n => ({ key: n.name, name: n.name }))),
+    '/api/provider/history': url => Response.json({ ...provider, nodes: url.searchParams.has('nodeKey') ? provider.nodes.filter(n => n.name === url.searchParams.get('nodeKey')) : provider.nodes }),
+    '/api/history': url => Response.json(reads++ ? { ...local, nodes: url.searchParams.has('nodeName') ? local.nodes.filter(n => n.name === url.searchParams.get('nodeName')) : local.nodes } : history)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('statistics-source', 'shares'); await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-local-exact').textContent === '400 bytes');
+  const names = () => [...get('comparison-nodes').querySelectorAll('.comparison-name')].map(n => n.textContent);
+  assert.deepEqual(names(), ['B', 'A', 'Tiny']);
+  change('comparison-node-sort', 'provider'); assert.deepEqual(names(), ['A', 'B', 'Tiny']);
+  const shares = (section, source) => get(`comparison-${section}-shares`).querySelector(`[data-source="${source}"]`);
+  const percentages = (section, source) => [...shares(section, source).querySelectorAll('.rank-index')].map(n => n.textContent);
+  for (const section of ['nodes', 'buckets']) w.document.querySelector(`[data-comparison-section="${section}"][data-comparison-mode="share"]`).click();
+  assert.deepEqual(percentages('nodes', 'local'), ['75.00%', '25.00%']);
+  assert.deepEqual(percentages('nodes', 'provider'), ['80.00%', '20.00%', '0.00%']);
+  assert.deepEqual(percentages('buckets', 'local'), ['75.00%', '25.00%']); // 100 bucketed, not the 400 total
+  assert.deepEqual(percentages('buckets', 'provider'), ['80.00%', '20.00%']);
+  const circle = shares('buckets', 'local').querySelector('circle'); circle.focus();
+  assert.equal(shares('buckets', 'local').querySelector('.share-tooltip').hidden, false);
+  assert.match(circle.getAttribute('aria-label'), /2026-10-10.*75 bytes/);
+  change('provider-metric', 'billed');
+  assert.deepEqual(names(), ['B', 'A', 'Tiny']);
+  assert.deepEqual(percentages('nodes', 'provider'), ['89.99%', '9.99%', '<0.01%']);
+  const tiny = [...shares('nodes', 'provider').querySelectorAll('.rank-node')].find(n => n.textContent === 'Tiny');
+  assert.match(tiny.title, /0\.0000000000000000000000000001 bytes/);
+  change('node-filter', 'A');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeName') === 'A' && get('summary').getAttribute('aria-busy') === 'false');
+  assert.deepEqual(percentages('nodes', 'local'), ['100.00%']);
+  assert.deepEqual(percentages('nodes', 'provider'), ['100.00%']);
+  assert.equal(get('comparison-nodes-list').hidden, true);
+  w.document.querySelector('[data-comparison-section="nodes"][data-comparison-mode="list"]').click();
+  assert.equal(get('comparison-nodes-shares').hidden, true);
+  assert.equal(get('comparison-nodes-list').hidden, false);
+  change('statistics-source', '');
+  assert.equal(get('comparison-nodes-shares').children.length, 0);
+  assert.equal(get('comparison-buckets-shares').children.length, 0);
+  assert.equal(get('comparison-view').hidden, true);
+  assert.deepEqual(errors, []);
 });
