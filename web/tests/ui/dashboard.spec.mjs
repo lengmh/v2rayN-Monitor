@@ -407,7 +407,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   expect(Math.abs(nodeBox.y - bucketBox.y)).toBeLessThanOrEqual(1);
   expect(bucketBox.x).toBeGreaterThanOrEqual(nodeBox.x + nodeBox.width);
   await expect(page.locator('#comparison-local-exact')).toHaveText('3,500,000,000 bytes');
-  const localValue = page.locator('#comparison-nodes .paired-value').nth(2);
+  const localValue = page.locator('#comparison-nodes tr').filter({ hasText: 'Synthetic shared node' }).locator('.paired-value');
   await expect(localValue).toHaveText('3.500 GB');
   await localValue.click();
   await expect(page.locator('#detail-popover')).toContainText('上传3.500 GB');
@@ -416,7 +416,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#exact-value-text')).toContainText('3,500,000,000 bytes');
   await page.locator('#exact-value-dialog form button').click();
   await page.selectOption('#provider-metric', 'billed');
-  await expect(page.locator('#comparison-nodes .paired-value').last()).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
+  await expect(page.locator('#comparison-nodes .paired-value').nth(1)).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
   const only = page.locator('#comparison-nodes tr').filter({ hasText: 'CSV only' });
   await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
   await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);
@@ -453,6 +453,31 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#comparison-chart .comparison-column')).toHaveCount(31);
   await expect(page.locator('#comparison-chart')).not.toContainText('无法清楚展示');
   await page.screenshot({ path: 'test-results/comparison-mobile.png', fullPage: true });
+  for (const theme of ['light', 'dark']) {
+    await page.selectOption('#theme', theme);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const section of ['nodes', 'buckets']) {
+        await page.click(`[data-comparison-section="${section}"][data-comparison-mode="share"]`);
+        await expect(page.locator(`#comparison-${section}-shares svg`)).toHaveCount(2);
+        await expect(page.locator(`#comparison-${section}-shares .rank-track`)).toHaveCount(0);
+        await expect(page.locator(`#comparison-${section}-list`)).toBeHidden();
+        const circle = page.locator(`#comparison-${section}-shares circle`).first();
+        await circle.focus();
+        await expect(page.locator(`#comparison-${section}-shares .share-tooltip`).first()).toBeVisible();
+        const chart = await page.locator(`#comparison-${section}-shares .share-chart`).first().boundingBox();
+        const legend = await page.locator(`#comparison-${section}-shares .share-legend`).first().boundingBox();
+        expect(chart.x + chart.width).toBeLessThanOrEqual(legend.x + 1);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ path: `test-results/comparison-shares-${theme}-${width}.png`, fullPage: true });
+    }
+  }
+  for (const section of ['nodes', 'buckets']) {
+    await page.click(`[data-comparison-section="${section}"][data-comparison-mode="list"]`);
+    await expect(page.locator(`#comparison-${section}-list`)).toBeVisible();
+    await expect(page.locator(`#comparison-${section}-shares`)).toBeHidden();
+  }
   partialOnly = true; await page.selectOption('#bucket', 'hour');
   await expect(page.locator('#comparison-local')).toHaveText('—');
   await expect(page.locator('#comparison-local-exact')).toHaveText('所选范围无已知量');
@@ -674,3 +699,4 @@ test('local partial recovery is unknown and a known idle record remains zero', a
   await expect(page.locator('#total-value')).toHaveText('0.000 GB');
   await expect(page.locator('#total-exact')).toHaveText('0 bytes');
 });
+

@@ -54,8 +54,16 @@
             <p id="comparison-recovery" class="comparison-warning"></p>
             <section class="panel comparison-panel"><div class="panel-heading"><div><h2>对照趋势</h2><p id="comparison-trend-caption"></p></div><div class="legend"><span><i class="upload-color"></i>本机上传</span><span><i class="download-color"></i>本机下载</span><span><i class="provider-color"></i><span id="comparison-metric-label">服务商原始量</span></span></div></div><div id="comparison-chart" class="chart" role="img" aria-label="同名节点分桶对照"></div></section>
             <div class="comparison-tables">
-              <section class="panel comparison-panel"><div class="panel-heading"><div><h2>同名节点对照</h2><p>同名本机配置仅在此视图汇总；原历史独立保留</p></div></div><div class="table-scroll"><table><thead><tr><th>节点名称</th><th>来源</th><th class="numeric">合计</th></tr></thead><tbody id="comparison-nodes"></tbody></table></div></section>
-              <section class="panel comparison-panel"><div class="panel-heading"><div><h2>时间桶对照</h2><p>无记录的桶不补零；跨桶恢复量不猜测分摊</p></div></div><div class="table-scroll"><table><thead><tr><th>桶开始</th><th>来源</th><th class="numeric">合计</th></tr></thead><tbody id="comparison-buckets"></tbody></table></div><div class="pagination"><span id="comparison-bucket-page">等待记录</span><div><button id="comparison-bucket-previous" class="button small secondary" disabled="">上一页</button><button id="comparison-bucket-next" class="button small secondary" disabled="">下一页</button></div></div></section>
+              <section class="panel comparison-panel">
+                <div class="panel-heading"><div><h2>同名节点对照</h2><p>同名本机配置仅在此视图汇总；原历史独立保留</p></div><div class="segmented compact" aria-label="同名节点对照显示方式"><button type="button" data-comparison-section="nodes" data-comparison-mode="list" aria-pressed="true">列表</button><button type="button" data-comparison-section="nodes" data-comparison-mode="share" aria-pressed="false">占比</button></div></div>
+                <div id="comparison-nodes-list"><label class="comparison-sort">排序依据 <select id="comparison-node-sort" aria-label="同名节点排序依据"><option value="local">本机流量</option><option value="provider">服务商流量</option></select></label><div class="table-scroll"><table><thead><tr><th>节点名称</th><th>来源</th><th class="numeric">合计</th></tr></thead><tbody id="comparison-nodes"></tbody></table></div></div>
+                <div id="comparison-nodes-shares" class="comparison-shares" hidden=""></div>
+              </section>
+              <section class="panel comparison-panel">
+                <div class="panel-heading"><div><h2>时间桶对照</h2><p>无记录的桶不补零；跨桶恢复量不猜测分摊</p></div><div class="segmented compact" aria-label="时间桶对照显示方式"><button type="button" data-comparison-section="buckets" data-comparison-mode="list" aria-pressed="true">列表</button><button type="button" data-comparison-section="buckets" data-comparison-mode="share" aria-pressed="false">占比</button></div></div>
+                <div id="comparison-buckets-list"><div class="table-scroll"><table><thead><tr><th>桶开始</th><th>来源</th><th class="numeric">合计</th></tr></thead><tbody id="comparison-buckets"></tbody></table></div><div class="pagination"><span id="comparison-bucket-page">等待记录</span><div><button id="comparison-bucket-previous" class="button small secondary" disabled="">上一页</button><button id="comparison-bucket-next" class="button small secondary" disabled="">下一页</button></div></div></div>
+                <div id="comparison-buckets-shares" class="comparison-shares" hidden=""></div>
+              </section>
             </div>
           </section>
           <div class="analysis-grid"><section class="panel trend-panel"><div class="panel-heading"><div><h2>流量趋势</h2><p id="trend-subtitle">已记录的分时流量</p></div><div class="legend"><span><i class="download-color"></i><span id="download-legend">下载</span></span><span id="upload-legend"><i class="upload-color"></i>上传</span></div></div><div id="chart" class="chart" role="img" aria-label="正在加载流量趋势"></div><div class="chart-footer"><span>空白分桶表示无记录，不代表零流量</span><span id="chart-scale"></span></div></section><section class="panel ranking-panel"><div class="panel-heading"><div><h2>节点排行</h2><p id="ranking-caption">按区间已知合计排序</p></div><div class="panel-heading-actions"><div id="ranking-mode" class="segmented compact" aria-label="节点排行显示方式"><button type="button" data-ranking-mode="ranking" aria-pressed="true">排行</button><button id="ranking-share" type="button" data-ranking-mode="share" aria-pressed="false">占比</button></div><span id="node-count" class="count-badge">0</span></div></div><div id="ranking" class="ranking"></div></section></div>
@@ -82,3 +90,4 @@
 
 
 </body></html>
+
