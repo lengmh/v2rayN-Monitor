@@ -708,7 +708,8 @@ test('local partial recovery is unknown and a known idle record remains zero', a
 test('polished mobile disclosure and reduced motion remain accessible', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await mock(page);
+  const longName = '很长的合成节点名称 '.repeat(8) + 'ContinuousSyntheticName'.repeat(8);
+  await mock(page, { '/api/nodes': route => route.fulfill(json([{ key: 'a', name: longName }, { key: 'b', name: 'Synthetic B' }])) });
   const disclosure = page.locator('#filter-disclosure');
   await expect(disclosure).toBeVisible();
   await expect(page.locator('#node-filter')).toBeHidden();
@@ -718,7 +719,6 @@ test('polished mobile disclosure and reduced motion remain accessible', async ({
   await expect(disclosure).toContainText('按小时');
   await page.selectOption('#unit', 'GiB');
   await expect(disclosure).toContainText('GiB');
-  await page.locator('#node-filter').evaluate(n => { n.options[1].textContent = '很长的合成节点名称 '.repeat(8) + 'ContinuousSyntheticName'.repeat(8); });
   await page.selectOption('#node-filter', 'a');
   await expect(disclosure).toContainText('ContinuousSyntheticName');
   await disclosure.click();
@@ -740,7 +740,12 @@ test('collector polling preserves filter focus and never replays user motion', a
   await expect(page.locator('#ranking')).not.toHaveClass(/user-view-change/);
   await page.click('#filter-disclosure');
   await page.locator('#bucket').focus();
-  await page.evaluate(() => { window.previewAnimationStarts = 0; document.addEventListener('animationstart', () => window.previewAnimationStarts++); });
+  await expect.poll(() => page.evaluate(() => document.getAnimations().length)).toBe(0);
+  await page.evaluate(() => {
+    window.previewAnimationStarts = 0;
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (...args) { window.previewAnimationStarts++; return animate.apply(this, args); };
+  });
   await page.waitForResponse(r => new URL(r.url()).pathname === '/api/history', { timeout: 8000 });
   await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('#bucket')).toBeFocused();
