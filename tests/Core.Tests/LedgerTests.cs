@@ -1280,6 +1280,194 @@ public sealed class LedgerTests : IDisposable
         Assert.Contains(migrated.Query(ScopeAll("legacy_proxy")).Gaps, x => x.Origin == "legacy" && x.IsOpen);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScopeMigrationMapsFreshOrInitializedDisplayMetadataWithoutReinterpretingHistory(bool initialize)
+    {
+        const string name = "Synthetic 0.5x";
+        using (var old = new Ledger(Database, includeDisplayMetadata: !initialize))
+        {
+            old.Accept(Sample(0, 100, 200, name: name));
+            old.Accept(Sample(1, 110, 204, name: name));
+        }
+        if (initialize) ScopeLedgerMigration.InitializeDisplay(Database, Path.Combine(directory, "before-display.db"));
+        using (var old = new Ledger(Database))
+        {
+            old.Accept(Sample(2, 120, 208, name: name));
+            old.Accept(Sample(3, 130, 212, name: name));
+            old.Accept(Sample(20, 150, 220, name: name));
+            old.Accept(Sample(0, 0, instance: "other", node: "unknown", name: "Synthetic unknown"));
+            old.Accept(Sample(1, 7, instance: "other", node: "unknown", name: "Synthetic unknown"));
+        }
+        // A saved rate from before the default-1 policy must remain unknown after either upgrade.
+        RunSql("""
+            UPDATE ui_display_cursors SET snapshot=json_set(snapshot,'$.Rate',NULL) WHERE entity_key='other/unknown';
+            UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.Rate',NULL) WHERE entity_key='other/unknown';
+            """);
+        var before = HistorySnapshot(Database);
+        var displayBefore = DisplaySnapshot(Database);
+        HistoryResult expected;
+        using (var old = new Ledger(Database)) expected = old.Query(All());
+        var backup = Path.Combine(directory, "before-v2.db");
+        Assert.Equal(2, ScopeLedgerMigration.Migrate(Database, backup).LegacyScopes);
+        Assert.Equal(before, HistorySnapshot(backup));
+        Assert.Equal(displayBefore, DisplaySnapshot(Database, mapLegacyKeys: true));
+        using (var migrated = new ScopeLedger(Database))
+        {
+            Assert.True(migrated.SupportsDisplayMetadata);
+            var actual = migrated.Query(ScopeAll("legacy_proxy"));
+            Assert.Equal(expected.Upload, actual.Upload);
+            Assert.Equal(expected.Download, actual.Download);
+            Assert.Equal(expected.RecoveredUpload, actual.RecoveredUpload);
+            Assert.Equal(expected.RecoveredDownload, actual.RecoveredDownload);
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected.Display),
+                System.Text.Json.JsonSerializer.Serialize(actual.Display));
+            Assert.Equal(initialize ? "7" : "21", actual.Display!.EstimatedBilledBytes);
+            Assert.Equal(initialize ? "63" : "35", actual.Display.EstimateUnknownBytes);
+            var unknown = migrated.Query(ScopeAll("legacy_proxy") with { ScopeName = "Synthetic unknown" });
+            Assert.Null(unknown.Display!.EstimatedBilledBytes);
+            Assert.Equal("7", unknown.Display.EstimateUnknownBytes);
+            Assert.Null(Assert.Single(migrated.Export(ScopeAll("legacy_proxy")),
+                x => x.Quality == "recovered-contained").Display!.EstimatedBilledBytes);
+        }
+
+        var v2Rows = HistorySnapshot(Database, includeSchema: false);
+        var v2Display = DisplaySnapshot(Database);
+        ScopeLedgerMigration.MigrateProbes(Database, Path.Combine(directory, "before-v3.db"));
+        Assert.Equal(v2Rows, HistorySnapshot(Database, includeSchema: false));
+        Assert.Equal(v2Display, DisplaySnapshot(Database));
+        using var upgraded = new ScopeLedger(Database);
+        Assert.True(upgraded.SupportsProbes);
+        Assert.True(upgraded.SupportsDisplayMetadata);
+        var legacy = new MeasurementScope("legacy_proxy", "legacy_node", "instance/node", name, "node");
+        upgraded.Accept(Batch(21, new ScopeReading(legacy, 200, 300)));
+        Assert.Equal(expected.Upload, upgraded.Query(ScopeAll("legacy_proxy")).Upload);
+        upgraded.Accept(Batch(22, new ScopeReading(legacy, 210, 304)));
+        var continued = upgraded.Query(ScopeAll("legacy_proxy"));
+        Assert.Equal("67", continued.Upload);
+        Assert.Equal(initialize ? "14" : "28", continued.Display!.EstimatedBilledBytes);
+        Assert.Equal(initialize ? "63" : "35", continued.Display.EstimateUnknownBytes);
+    }
+
+    [Theory]
+    [InlineData(1, "CREATE INDEX unexpected_display ON ui_display_records(start_ticks);")]
+    [InlineData(2, "CREATE INDEX unexpected_display ON ui_display_records(start_ticks);")]
+    [InlineData(1, "DROP TABLE ui_display_records;")]
+    [InlineData(2, "DROP TABLE ui_display_records;")]
+    [InlineData(1, "ALTER TABLE ui_display_cursors ADD COLUMN unexpected TEXT;")]
+    [InlineData(2, "ALTER TABLE ui_display_cursors ADD COLUMN unexpected TEXT;")]
+    [InlineData(1, "CREATE TRIGGER unexpected_display AFTER INSERT ON ui_display_records BEGIN SELECT 1; END;")]
+    [InlineData(2, "CREATE TRIGGER unexpected_display AFTER INSERT ON ui_display_records BEGIN SELECT 1; END;")]
+    [InlineData(1, "UPDATE ui_display_cursors SET entity_key='missing';")]
+    [InlineData(1, "UPDATE ui_display_records SET entity_key='missing';")]
+    public void MigrationRejectsMalformedDisplayExtensionsBeforeCreatingBackup(int version, string mutation)
+    {
+        CreateDisplayMigrationFixture(version);
+        RunSql(mutation);
+        var before = File.ReadAllBytes(Database);
+        var backup = Path.Combine(directory, "rejected-display.db");
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            if (version == 1) ScopeLedgerMigration.Migrate(Database, backup);
+            else ScopeLedgerMigration.MigrateProbes(Database, backup);
+        });
+        Assert.False(File.Exists(backup));
+        Assert.Equal(before, File.ReadAllBytes(Database));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MigrationRollsBackDisplayMutationTogetherWithSchemaAndVersion(int version)
+    {
+        CreateDisplayMigrationFixture(version);
+        var before = HistorySnapshot(Database);
+        ApplyDisplayUpgradeForTest(version, "UPDATE ui_display_records SET upload=upload+1;");
+        Assert.Equal(before, HistorySnapshot(Database));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MigrationRejectsDisplayChangesAfterBackupWithoutDiscardingThem(int version)
+    {
+        CreateDisplayMigrationFixture(version);
+        ApplyDisplayUpgradeForTest(version, "", changeAfterBackup: true);
+        var backup = Path.Combine(directory, "display-transaction-backup.db");
+        Assert.NotEqual(DisplaySnapshot(backup), DisplaySnapshot(Database));
+        using var db = new SqliteConnection($"Data Source={Database};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = "PRAGMA user_version;";
+        Assert.Equal((long)version, command.ExecuteScalar());
+        command.CommandText = "SELECT json_extract(snapshot,'$.GroupLabel') FROM ui_display_records;";
+        Assert.Equal("Synthetic changed group", command.ExecuteScalar());
+    }
+
+    private void CreateDisplayMigrationFixture(int version)
+    {
+        if (version == 1)
+        {
+            using var ledger = new Ledger(Database, includeDisplayMetadata: true);
+            ledger.Accept(Sample(0, 0));
+            ledger.Accept(Sample(1, 10));
+        }
+        else
+        {
+            using var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true);
+            ledger.Accept(Batch(0, Reading("a", 0)));
+            ledger.Accept(Batch(1, Reading("a", 10)));
+        }
+    }
+
+    private void ApplyDisplayUpgradeForTest(int version, string injectedSql, bool changeAfterBackup = false)
+    {
+        using var source = new SqliteConnection($"Data Source={Database};Pooling=False");
+        source.Open();
+        using var backup = new SqliteConnection($"Data Source={Path.Combine(directory, "display-transaction-backup.db")};Pooling=False");
+        backup.Open();
+        source.BackupDatabase(backup);
+        using (var command = source.CreateCommand())
+        {
+            command.CommandText = $"PRAGMA foreign_keys={(version == 1 ? "ON" : "OFF")};" +
+                (changeAfterBackup ? "UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.GroupLabel','Synthetic changed group');" : "");
+            command.ExecuteNonQuery();
+        }
+        using var stream = typeof(ScopeLedger).Assembly.GetManifestResourceStream($"V2rayNMonitor.Core.ScopeLedgerV{version + 1}.sql")!;
+        using var reader = new StreamReader(stream);
+        var apply = typeof(ScopeLedgerMigration).GetMethod(version == 1 ? "Apply" : "ApplyProbes",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            apply.Invoke(null, [source, backup, reader.ReadToEnd() + "\n" + injectedSql]));
+    }
+
+    // Compare every stored UI field and DDL. Only the v1 entity key may change, through the exact scope mapping.
+    private static string DisplaySnapshot(string path, bool mapLegacyKeys = false)
+    {
+        using var db = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        db.Open();
+        var key = mapLegacyKeys ? "s.node_key" : "u.entity_key";
+        var join = mapLegacyKeys ? " LEFT JOIN measurement_scopes s ON u.entity_key='scope:'||s.scope_id" : "";
+        var queries = new[]
+        {
+            $"SELECT {key},u.at_ticks,u.snapshot FROM ui_display_cursors u{join} ORDER BY 1;",
+            $"SELECT {key},u.kind,u.start_ticks,u.end_ticks,u.snapshot,u.upload,u.download FROM ui_display_records u{join} ORDER BY 1,2,3,4,5;",
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('ui_display_cursors','ui_display_records') ORDER BY type,name;"
+        };
+        var rows = new List<object?[]>();
+        for (var index = 0; index < queries.Length; index++)
+        {
+            using var command = db.CreateCommand();
+            command.CommandText = queries[index];
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                rows.Add([index, .. Enumerable.Range(0, reader.FieldCount)
+                    .Select(i => reader.IsDBNull(i) ? null : reader.GetValue(i))]);
+        }
+        return System.Text.Json.JsonSerializer.Serialize(rows);
+    }
+
     [Fact]
     public void ScopeMigrationSupportsEmptyV1AndDoesNotReplaceExistingBackupOrAcceptV2()
     {
@@ -1302,6 +1490,7 @@ public sealed class LedgerTests : IDisposable
     [InlineData("INSERT INTO gaps VALUES(999,0,1,'orphan','synthetic',0);")]
     [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
     [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    [InlineData("CREATE INDEX unexpected_history ON minutes(upload);")]
     public void ScopeMigrationPreflightRejectsUnsupportedHistoryBeforeCreatingBackup(string mutation)
     {
         using (var old = new Ledger(Database)) old.Accept(Sample(0, 10));
@@ -1524,6 +1713,44 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Fact]
+    public void ProbeMigrationPreservesMemberDisplayGroupsNullSnapshotsAndSamplingContinuity()
+    {
+        var member = Member() with { CapturedName = new("Synthetic raw 0.5x", "Synthetic group 2x") };
+        var total = new MeasurementScope("business", "aggregate", "business", "Synthetic total");
+        TrafficDisplay expected;
+        using (var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true))
+        {
+            ledger.Accept(Batch(0, new(member, 0, 0), new(total, 0, 0)));
+            ledger.Accept(Batch(1, new(member, 10, 0), new(total, 10, 0)));
+            ledger.Accept(Batch(20, new(member, 50, 0), new(total, 50, 0)));
+            expected = ledger.Query(ScopeAll()).Display!;
+        }
+        var before = HistorySnapshot(Database);
+        var rowsBefore = HistorySnapshot(Database, includeSchema: false);
+        var displayBefore = DisplaySnapshot(Database);
+        var backup = Path.Combine(directory, "before-probes-display.db");
+        Assert.Equal(2, ScopeLedgerMigration.MigrateProbes(Database, backup).PreservedScopes);
+        Assert.Equal(before, HistorySnapshot(backup));
+        Assert.Equal(rowsBefore, HistorySnapshot(Database, includeSchema: false));
+        Assert.Equal(displayBefore, DisplaySnapshot(Database));
+        using var upgraded = new ScopeLedger(Database);
+        Assert.True(upgraded.SupportsProbes);
+        Assert.True(upgraded.SupportsDisplayMetadata);
+        Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected),
+            System.Text.Json.JsonSerializer.Serialize(upgraded.Query(ScopeAll()).Display));
+        var captured = Assert.Single(upgraded.Export(ScopeAll()), x => x.Display!.Rate == "0.5");
+        Assert.Equal("Synthetic raw 0.5x", captured.Display!.OriginalName);
+        Assert.Equal("Synthetic group 2x", Assert.Single(captured.Display.Groups));
+        Assert.NotNull(captured.Display.MergeKey);
+        Assert.Null(upgraded.Query(ScopeAll("business")).Display!.EstimatedBilledBytes);
+        upgraded.Accept(Batch(21, new(member, 60, 0), new(total, 60, 0), new(ProbeMember(), 100, 0)));
+        Assert.Equal("60", upgraded.Query(ScopeAll()).Upload);
+        Assert.Equal("10", upgraded.Query(ScopeAll()).Display!.EstimatedBilledBytes);
+        Assert.Equal("40", upgraded.Query(ScopeAll()).Display!.EstimateUnknownBytes);
+        Assert.Equal("0", upgraded.Query(ScopeAll("probe_urltest_member")).Upload);
+    }
+
+    [Fact]
     public void ProbeMigrationSupportsEmptyV2AndRefusesExistingBackupV1ProviderOrV3()
     {
         using (ScopeLedger.CreateNew(Database)) { }
@@ -1549,6 +1776,7 @@ public sealed class LedgerTests : IDisposable
     [Theory]
     [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
     [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    [InlineData("CREATE INDEX unexpected_history ON minutes(upload);")]
     [InlineData("DROP INDEX scope_gap_open;")]
     public void ProbeMigrationRejectsUnsupportedV2BeforeCreatingBackup(string mutation)
     {
