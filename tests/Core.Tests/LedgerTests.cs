@@ -181,6 +181,76 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal(result.Upload, filtered.Upload);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HistoricalMemberNamesUseSavedGroupTagsWithoutBackfillingRatesOrMergingIdentities(bool metadata)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: metadata);
+        const string tag = "123-proxy-Synthetic Route-1-Synthetic member 2x";
+        const string original = "Synthetic member 2x";
+        var first = new MeasurementScope("actual_member", "outbound",
+            System.Text.Json.JsonSerializer.Serialize(new[] { new string('A', 64), tag }),
+            "【Synthetic Route】 1-" + original, OutboundTag: tag);
+        var second = first with
+        {
+            IdentityValue = System.Text.Json.JsonSerializer.Serialize(new[] { new string('B', 64), tag })
+        };
+        ledger.Accept(new("synthetic", "core", "config-a", Epoch, [new(first, 100, 200)], []));
+        ledger.Accept(new("synthetic", "core", "config-a", Epoch.AddSeconds(1), [new(first, 110, 205)], []));
+        var retired = new[] { Assert.Single(ledger.GetScopes("actual_member")).Id };
+        ledger.Accept(new("synthetic", "core", "config-b", Epoch.AddSeconds(2), [new(second, 1000, 2000)], retired));
+        ledger.Accept(new("synthetic", "core", "config-b", Epoch.AddSeconds(3), [new(second, 1030, 2006)], retired));
+        ledger.Accept(new("synthetic", "core", "config-b", Epoch.AddSeconds(30), [new(second, 1050, 2010)], retired));
+        var before = HistorySnapshot(Database);
+        var query = new ScopeQuery("local_proxy", Epoch, Epoch.AddMinutes(2), "UTC");
+        var result = ledger.Query(query);
+        Assert.Equal("60", result.Upload);
+        Assert.Equal("15", result.Download);
+        Assert.Equal(2, result.Scopes.Count);
+        Assert.All(result.Scopes, scope =>
+        {
+            Assert.Equal(original, scope.Name);
+            Assert.Equal(original, scope.Display!.OriginalName);
+            Assert.Equal("Synthetic Route", Assert.Single(scope.Display.Groups));
+            Assert.Null(scope.Display.MergeKey);
+            Assert.Null(scope.Display.EstimatedBilledBytes);
+            Assert.Equal("unknown", scope.Display.RateStatus);
+        });
+        Assert.Equal("75", result.Display!.EstimateUnknownBytes);
+        Assert.Null(result.Display.EstimatedBilledBytes);
+        Assert.All(result.Records, row =>
+        {
+            Assert.Equal(original, row.Name);
+            Assert.Equal("Synthetic Route", Assert.Single(row.Display!.Groups));
+            Assert.Null(row.Display.EstimatedBilledBytes);
+        });
+        Assert.Equal(original, Assert.Single(result.ComparisonNodes).Name);
+        Assert.Equal("60", ledger.Query(query with { ScopeName = original }).Upload);
+        Assert.All(ledger.GetDisplayNodes("local_proxy"), node => Assert.Equal(original, node.Name));
+        var exported = ledger.Export(query);
+        Assert.Equal(2, exported.Select(row => row.ScopeId).Distinct().Count());
+        Assert.All(exported, row => Assert.Equal(original, row.Name));
+        Assert.Equal(before, HistorySnapshot(Database));
+    }
+
+    [Theory]
+    [InlineData("123-proxy-Synthetic Route-1-Synthetic member", "【Other Route】 1-Synthetic member")]
+    [InlineData("123-proxy-Synthetic Route-1-Other member", "【Synthetic Route】 1-Synthetic member")]
+    [InlineData("proxy", "【Synthetic Route】 1-Synthetic member")]
+    public void HistoricalFriendlyNamesRequireMatchingSavedOutboundEvidence(string tag, string name)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        var member = new MeasurementScope("actual_member", "outbound",
+            System.Text.Json.JsonSerializer.Serialize(new[] { new string('A', 64), tag }), name, OutboundTag: tag);
+        ledger.Accept(new("synthetic", "core", "config", Epoch, [new(member, 0, 0)], []));
+        ledger.Accept(new("synthetic", "core", "config", Epoch.AddSeconds(1), [new(member, 10, 5)], []));
+        var result = ledger.Query(new("local_proxy", Epoch, Epoch.AddMinutes(1), "UTC"));
+        Assert.Equal(name, Assert.Single(result.Scopes).Name);
+        Assert.Empty(Assert.Single(result.Records).Display!.Groups);
+        Assert.Null(result.Display!.EstimatedBilledBytes);
+    }
+
     [Fact]
     public void FirstReadIsBaselineAndReplayOrOlderSamplesDoNotAddBytes()
     {
