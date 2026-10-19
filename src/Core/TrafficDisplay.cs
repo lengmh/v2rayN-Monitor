@@ -58,14 +58,16 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
             ? new(value.OriginalName, value.GroupLabel) : null;
     }
 
-    internal static TrafficDisplayStore? Open(SqliteConnection db)
+    internal static TrafficDisplayStore? Open(SqliteConnection db, SqliteTransaction? transaction = null)
     {
         using var count = db.CreateCommand();
+        count.Transaction = transaction;
         count.CommandText = "SELECT count(*) FROM sqlite_schema WHERE name IN ('ui_display_cursors','ui_display_records');";
         if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return null;
         foreach (Match m in Regex.Matches(Schema, @"CREATE TABLE (\w+)[\s\S]*?;"))
         {
             using var command = db.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name;";
             command.Parameters.AddWithValue("$name", m.Groups[1].Value);
             static string Normalize(string x) => Regex.Replace(x.Trim().TrimEnd(';'), @"\s+", " ");
