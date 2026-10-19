@@ -248,18 +248,18 @@ public static class ScopeLedgerMigration
     {
         Require(Scalar(db, transaction, "PRAGMA user_version;") == 1, "Only a supported v1 history ledger can be migrated.");
         var display = TrafficDisplayStore.Open(db, transaction) is not null;
+        var objects = new List<string>();
         using (var command = Command(db, transaction,
-            "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND type<>'index' ORDER BY name;"))
+            "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name;"))
         using (var reader = command.ExecuteReader())
-        {
-            var names = new List<string>();
-            while (reader.Read())
-            {
-                Require(reader.GetString(1) == "table", "Unsupported history schema objects.");
-                names.Add(reader.GetString(0));
-            }
-            Require(names.SequenceEqual(Columns.Keys.Concat(display ? DisplayOrdering.Keys : Enumerable.Empty<string>()).Order(StringComparer.Ordinal)), "Not an unmodified v1 history database.");
-        }
+            while (reader.Read()) objects.Add(reader.GetString(0) + ":" + reader.GetString(1));
+        // These three indexes have been created by every supported v1 writer since v0.1.0.
+        // Do not admit hand-added indexes that the subsequent v2 -> v3 preflight rejects.
+        var expected = Columns.Keys.Concat(display ? DisplayOrdering.Keys : Enumerable.Empty<string>())
+            .Select(x => "table:" + x).Concat(new[]
+                { "index:minutes_node_time", "index:unallocated_time", "index:gaps_time" })
+            .Order(StringComparer.Ordinal);
+        Require(objects.SequenceEqual(expected), "Unsupported objects in v1 history.");
         CheckLegacyColumns(db, transaction);
         if (display)
             foreach (var table in DisplayOrdering.Keys)
