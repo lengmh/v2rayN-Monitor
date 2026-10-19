@@ -122,6 +122,54 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
     await page.screenshot({ path: `test-results/issue23-shares-${suffix}.png`, fullPage: true });
   }
 });
+test('group outlines preserve text alignment and share legends keep percentages on the right', async ({ page }) => {
+  const display = { originalName: history.nodes[0].name, groups: ['Synthetic group'], mergeKey: null, rate: '1', rateStatus: 'known',
+    estimatedBilledBytes: '9126805504', estimateCoveredBytes: '9126805504', estimateUnknownBytes: '0' };
+  const nodes = [{ ...history.nodes[0], display }, history.nodes[1]];
+  await mock(page, {
+    '/api/history': route => route.fulfill(json({ ...history, nodes, records: [{ ...history.records[0], display },
+      { ...history.records[0], nodeKey: nodes[1].key, nodeName: nodes[1].name }] })),
+    '/api/provider/sources': route => route.fulfill(json(['Synthetic provider'])),
+    '/api/provider/nodes': route => route.fulfill(json(nodes.map(node => ({ key: node.name, name: node.name })))),
+    '/api/provider/history': route => route.fulfill(json({ source: 'Synthetic provider', rawBytes: '200', billedBytes: '200', recordCount: 2,
+      nodes: nodes.map(node => ({ name: node.name, rawBytes: '100', billedBytes: '100' })), series: [], records: [] }))
+  });
+  const textInsets = locator => locator.evaluateAll(elements => elements.map(element => {
+    const label = element.querySelector('button') ?? element;
+    const range = document.createRange(); range.selectNodeContents(label);
+    return range.getBoundingClientRect().left - element.getBoundingClientRect().left;
+  }));
+  for (const [width, height] of [[1440, 1100], [390, 844]]) {
+    await page.setViewportSize({ width, height });
+    const insets = await textInsets(page.locator('#ranking .rank-node'));
+    expect(Math.abs(insets[0] - insets[1])).toBeLessThanOrEqual(1);
+    const recordInsets = await textInsets(page.locator('#records .node-cell'));
+    expect(Math.abs(recordInsets[0] - recordInsets[1])).toBeLessThanOrEqual(1);
+    await page.locator('[data-ranking-mode=share]').click();
+    const geometry = await page.locator('#ranking').evaluate(ranking => {
+      const ring = ranking.querySelector('.share-chart').getBoundingClientRect(), panel = ranking.getBoundingClientRect();
+      return { ringWidth: ring.width, centerOffset: ring.y + ring.height / 2 - panel.y - panel.height / 2,
+        rows: [...ranking.querySelectorAll('.rank-heading')].map(row => {
+          const name = row.querySelector('.rank-node').getBoundingClientRect();
+          return { nameLeft: name.left, nameRight: name.right, swatchRight: row.querySelector('.share-swatch').getBoundingClientRect().right,
+            percentageLeft: row.querySelector('.rank-index').getBoundingClientRect().left };
+        }) };
+    });
+    expect(geometry.ringWidth).toBeGreaterThan(width > 640 ? 170 : 100);
+    expect(Math.abs(geometry.centerOffset)).toBeLessThanOrEqual(6);
+    for (const row of geometry.rows) { expect(row.swatchRight).toBeLessThan(row.nameLeft); expect(row.percentageLeft).toBeGreaterThan(row.nameRight); }
+    expect(Math.abs(geometry.rows[0].nameLeft - geometry.rows[1].nameLeft)).toBeLessThanOrEqual(1);
+    await page.locator('#statistics-source').selectOption('Synthetic provider');
+    await page.locator('#compare-toggle').check();
+    await expect(page.locator('#comparison-nodes .comparison-name')).toHaveCount(2);
+    const comparisonInsets = await textInsets(page.locator('#comparison-nodes .comparison-name'));
+    expect(Math.abs(comparisonInsets[0] - comparisonInsets[1])).toBeLessThanOrEqual(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.locator('#statistics-source').selectOption('');
+    await expect(page.locator('#ranking .rank-node')).toHaveCount(2);
+    await page.locator('[data-ranking-mode=ranking]').click();
+  }
+});
 test('traffic details remain open across polling and support keyboard dismissal', async ({ page }) => {
   const calls = await mock(page, {
     '/api/history': route => route.fulfill(json({ ...history,

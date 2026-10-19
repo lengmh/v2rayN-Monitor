@@ -1,5 +1,23 @@
 # Product Design 验证记录
 
+## 2026-10-18 反馈修正复核
+
+本轮从 `b9f166b` 开始，仅调整占比区和策略组外框的布局。视觉依据为原深浅主题及用户本轮反馈；修改前实测外框使文字右移 6 px、单行高度增加 2 px。[修改前截图](docs/ui-preview/feedback-shares-before.jpg)与[修改后截图](docs/ui-preview/feedback-shares-light.jpg)来自同一 1363 × 936、密度 1 的云浏览器。
+
+[聚焦并置对照](docs/ui-preview/feedback-shares-comparison.jpg)保留原像素，比较环图比例、图例顺序和文字起点；修改前页面处于滚动状态，截取环图完整可见的区域，不据此比较页面纵向位置。修改后的完整桌面截图用于复核整体密度和卡片高度。[深色](docs/ui-preview/feedback-shares-dark.jpg)、[窄屏](docs/ui-preview/feedback-shares-mobile.jpg)和[同名对照](docs/ui-preview/feedback-name-alignment.jpg)补充状态检查。窄屏为原生 390 × 844 iframe、密度 1，内容宽度 375 px（另有原生滚动条），没有缩放或整页横向溢出。
+
+P2 修正：环图随列宽放大并居中；色点从节点按钮内移到独立列，百分比靠右；长图例单独滚动。节点外框使用 outline，文字内偏移从有框 6 px／无框 0 px 统一为 0 px，排行单行均为 19 px，同名对照名称相对表格单元格的左边距均为 10 px。SVG 改为块级显示，消除底部基线留白，环图容器保持正方形。聚焦并置图和实际 DOM 几何均已复核。
+
+时间桶的 P2 属于隔离示例接口，生产前端联动没有回归。云浏览器实测日对应 `2026-10-18T00:00+08:00`、周／月对应按日标签、年对应 `2026-10`；[日视图截图](docs/ui-preview/feedback-buckets-day.jpg)显示按小时对照。示例接口现在按范围和粒度查询合成事件，空范围为空；不把模拟数据当作真实计量验证。
+
+字体、字号、语义配色和原图标资产保持；新增描边沿用现有颜色变量，两种主题可读。检查了排行／占比等高、名称悬浮及 Escape、同名对照、周期切换与窄屏；应用控制台 error／warn 为 0，浏览器扩展自身日志另计。前端 67 项和最终构建通过；新增浏览器回归由本批 CI 单独核对。没有遗留可执行的 P0／P1／P2；用户对新布局的偏好确认仍待反馈。
+
+本轮 final result: passed
+
+---
+
+## 第一版复核归档
+
 本轮范围：#23，独立草稿 [PR #27](https://github.com/lengmh/v2rayN-Monitor/pull/27)，基于 PR #26 的 `0fc5c6ef29fb200ac65cfcf0bbb62b601b619085`。不修改 main，不发布版本，不替换运行包。
 
 ## 视觉目标
