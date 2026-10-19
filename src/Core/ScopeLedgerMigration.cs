@@ -53,6 +53,12 @@ public static class ScopeLedgerMigration
         ["scope_minutes"] = "start_ticks,scope_id", ["scope_unallocated"] = "id", ["scope_gaps"] = "id"
     };
 
+    private static readonly Dictionary<string, string> DisplayOrdering = new()
+    {
+        ["ui_display_cursors"] = "entity_key",
+        ["ui_display_records"] = "entity_key,kind,start_ticks,end_ticks,snapshot"
+    };
+
     public static ScopeMigrationResult Migrate(string historyPath, string backupPath)
     {
         var (history, backup) = Backup(historyPath, backupPath, Preflight);
@@ -86,7 +92,12 @@ public static class ScopeLedgerMigration
         static void PreflightDisplay(SqliteConnection db, SqliteTransaction? transaction)
         {
             var version = Scalar(db, transaction, "PRAGMA user_version;");
-            if (version == 1) Preflight(db, transaction);
+            if (version == 1)
+            {
+                Preflight(db, transaction);
+                Require(TrafficDisplayStore.Open(db, transaction) is null,
+                    "UI initialization requires an unextended history ledger.");
+            }
             else
             {
                 ScopeLedger.ValidateSchema(db, transaction, version);
@@ -150,7 +161,28 @@ public static class ScopeLedgerMigration
         using var transaction = target.BeginTransaction();
         Preflight(target, transaction);
         CompareOriginal(target, transaction, snapshot);
+        CompareDisplay(target, transaction, snapshot);
         Execute(target, transaction, sql);
+        if (TrafficDisplayStore.Open(target, transaction) is not null)
+        {
+            // v1 display entities are node keys; v2 queries address the mapped legacy scope.
+            // Copy through temporary tables to avoid transient primary-key collisions.
+            foreach (var (table, columns) in new[]
+            {
+                ("ui_display_cursors", "at_ticks,snapshot"),
+                ("ui_display_records", "kind,start_ticks,end_ticks,snapshot,upload,download")
+            })
+                Execute(target, transaction, $"""
+                    CREATE TEMP TABLE migration_display AS SELECT * FROM {table};
+                    DELETE FROM {table};
+                    INSERT INTO {table}
+                    SELECT 'scope:' || s.scope_id,{string.Join(',', columns.Split(',').Select(x => "d." + x))}
+                    FROM migration_display d JOIN measurement_scopes s ON s.node_key=d.entity_key
+                    WHERE s.basis='legacy_proxy' AND s.identity_kind='legacy_node';
+                    DROP TABLE migration_display;
+                    """);
+        }
+        CompareDisplay(target, transaction, snapshot, mapped: true);
         CompareOriginal(target, transaction, snapshot);
         foreach (var table in Columns.Keys)
             Compare(target, transaction, Mapping[table], snapshot, $"SELECT * FROM {table} ORDER BY {Ordering[table]};");
@@ -189,7 +221,9 @@ public static class ScopeLedgerMigration
             "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name;"))
         using (var reader = command.ExecuteReader())
             while (reader.Read()) objects.Add(reader.GetString(0) + ":" + reader.GetString(1));
-        var expected = Ordering.Keys.Concat(ScopeOrdering.Keys).Select(x => "table:" + x).Concat(
+        var display = TrafficDisplayStore.Open(db, transaction) is not null;
+        var expected = Ordering.Keys.Concat(ScopeOrdering.Keys)
+            .Concat(display ? DisplayOrdering.Keys : Enumerable.Empty<string>()).Select(x => "table:" + x).Concat(
             new[] { "minutes_node_time", "unallocated_time", "gaps_time", "scope_gap_open", "scope_minutes_time",
                 "scope_unallocated_time", "scope_gaps_time" }.Select(x => "index:" + x)).Order(StringComparer.Ordinal);
         Require(objects.SequenceEqual(expected), "Unsupported objects in v2 history.");
@@ -202,6 +236,7 @@ public static class ScopeLedgerMigration
         var schema = "SELECT type,name,tbl_name,sql FROM sqlite_master" +
             (directoryChanged ? " WHERE name<>'measurement_scopes'" : "") + " ORDER BY type,name;";
         Compare(target, transaction, schema, snapshot, schema);
+        CompareDisplay(target, transaction, snapshot);
         foreach (var (table, ordering) in Ordering.Concat(ScopeOrdering))
         {
             var rows = $"SELECT * FROM {table} ORDER BY {ordering};";
@@ -212,6 +247,7 @@ public static class ScopeLedgerMigration
     private static void Preflight(SqliteConnection db, SqliteTransaction? transaction)
     {
         Require(Scalar(db, transaction, "PRAGMA user_version;") == 1, "Only a supported v1 history ledger can be migrated.");
+        var display = TrafficDisplayStore.Open(db, transaction) is not null;
         using (var command = Command(db, transaction,
             "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND type<>'index' ORDER BY name;"))
         using (var reader = command.ExecuteReader())
@@ -222,9 +258,15 @@ public static class ScopeLedgerMigration
                 Require(reader.GetString(1) == "table", "Unsupported history schema objects.");
                 names.Add(reader.GetString(0));
             }
-            Require(names.SequenceEqual(Columns.Keys.Order(StringComparer.Ordinal)), "Not an unmodified v1 history database.");
+            Require(names.SequenceEqual(Columns.Keys.Concat(display ? DisplayOrdering.Keys : Enumerable.Empty<string>()).Order(StringComparer.Ordinal)), "Not an unmodified v1 history database.");
         }
         CheckLegacyColumns(db, transaction);
+        if (display)
+            foreach (var table in DisplayOrdering.Keys)
+                Require(Scalar(db, transaction, $"""
+                    SELECT COUNT(*) FROM {table} d LEFT JOIN nodes n ON d.entity_key=n.node_key
+                    WHERE n.node_key IS NULL;
+                    """) == 0, "Orphan display metadata association.");
         CheckIntegrity(db, transaction);
         foreach (var table in new[] { "cursors", "minutes", "unallocated" })
             Require(Scalar(db, transaction, $"""
@@ -273,6 +315,26 @@ public static class ScopeLedgerMigration
             var signature = new List<string>();
             while (reader.Read()) signature.Add($"{reader.GetString(1)}:{reader.GetString(2)}:{reader.GetInt64(5)}");
             Require(string.Join('|', signature) == expected, "Unsupported legacy column layout.");
+        }
+    }
+
+    private static void CompareDisplay(SqliteConnection target, SqliteTransaction transaction,
+        SqliteConnection snapshot, bool mapped = false)
+    {
+        const string schema = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('ui_display_cursors','ui_display_records') ORDER BY type,name;";
+        Compare(target, transaction, schema, snapshot, schema);
+        if (TrafficDisplayStore.Open(snapshot) is null) return;
+        foreach (var (table, order) in DisplayOrdering)
+        {
+            var rows = $"SELECT * FROM {table} ORDER BY {order};";
+            var columns = table == "ui_display_cursors" ? "at_ticks,snapshot" :
+                "kind,start_ticks,end_ticks,snapshot,upload,download";
+            var actual = mapped ? $"""
+                SELECT s.node_key,{string.Join(',', columns.Split(',').Select(x => "d." + x))}
+                FROM {table} d LEFT JOIN measurement_scopes s ON d.entity_key='scope:' || s.scope_id
+                ORDER BY s.node_key{(table == "ui_display_records" ? ",d.kind,d.start_ticks,d.end_ticks,d.snapshot" : "")};
+                """ : rows;
+            Compare(target, transaction, actual, snapshot, rows);
         }
     }
 
