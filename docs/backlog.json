@@ -8,13 +8,13 @@
   },
   "plan_date": "2026-10-09",
   "active_checkpoint": {
-    "issue": 23,
+    "issue": 18,
     "status": "in_progress",
     "branch": "feat/issue18-xray-multi-outbounds",
-    "scope": "统一有匹配历史生成tag证据的旧成员原名与组标签展示；排行、明细、筛选、对照和导出共用读取投影，保留身份、字节与未知历史倍率",
+    "scope": "S5.8 Xray Observatory及Burst Observatory内部探测独立计量；固定实验核心、同响应解析和原v3联合记账，保留原出站口径并统一探测名称",
     "implementation_status": "complete",
-    "remaining": "定向5项、Core371／Server41／前端71／混排浏览器1项及桌面手机目视通过；真实副本导出字节、身份、估算与13表旧值保持。精确CI与启用另核，当前运行69ffdfa尚无本展示修复",
-    "resume_requirement": "完成本检查点的提交及精确CI；新包启用前提醒，只退出Monitor、保持核心和原v3。随后继续#15/#18受控流量、切换与生命周期验收，不重复覆盖仍匹配test.5的sing-box-client.exe"
+    "remaining": "原生回归、两类回环核心、实际响应到隔离账本、干净源码重建、Core374／Server41／前端71／浏览器3通过；Host后续五项定向及原核心六批/五段/范围只读兼容通过，精确提交CI另核。原生构建为本地证据，未改CI配置。3237a5a探测旧名称已在实际副本核实，当前运行69ffdfa保持",
+    "resume_requirement": "先完成源码检查点与精确CI；原安装核心源码身份未证明等价，实验核心替换和重载需具体接入流程及启用前提醒，不能自行中断代理。原v3无需迁移，实机探测和#15/#18受控验收继续保留"
   },
   "remote_created_in_this_delivery": true,
   "milestones": [
@@ -580,7 +580,7 @@
         "S5.6"
       ],
       "status": "in_progress",
-      "work": "用户要求覆盖urltest等内部接口并单独统计。首两批实现test.5/Core、v3历史与受控迁移；第三批接入Windows同一响应联合采样及HTML四维页面。第四批配套实机启用，旧值保留、首接基线及持续被动对账通过；后续已只读核对自然非零探测的逐范围累计与入账，新页目视和DNS/规则集逐条核实待后续。",
+      "work": "用户要求覆盖urltest等内部接口并单独统计。sing-box test.5、v3历史、Windows联合采样及HTML四维页面已配套启用并核对自然非零探测。2026-10-19继续实现Xray Observatory/Burst Observatory实验核心与同响应记账，原生回归、回环核心及隔离账本通过，真实启用另核；DNS/规则集等接口仍待后续。",
       "outputs": [
         "每成员及代理/排除/未知探测累计",
         "版本化账本扩展与单维查询",
