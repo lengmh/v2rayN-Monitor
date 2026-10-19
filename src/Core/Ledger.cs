@@ -219,12 +219,12 @@ public sealed class Ledger : IDisposable
             var recovered = new Bytes();
             var partial = new Bytes();
             var unbucketed = new Bytes();
-            var series = new Dictionary<string, (long FirstTick, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
+            var series = new Dictionary<string, (long FirstTick, Bytes Bytes, Bytes Recovered, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var nodes = new Dictionary<string, (string Name, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
             var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
             var estimate = new TrafficDisplayStore.Summary();
             var nodeDisplay = new Dictionary<string, TrafficDisplayStore.Summary>(StringComparer.Ordinal);
-            var comparisons = new Dictionary<string, Bytes>(StringComparer.Ordinal);
+            var comparisons = new Dictionary<string, (Bytes Bytes, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var records = new List<TrafficRow>();
             var matchingKeys = new HashSet<string>(StringComparer.Ordinal);
             if (query.NodeName is not null)
@@ -263,8 +263,9 @@ public sealed class Ledger : IDisposable
                     estimate.Add(row.Display);
                     if (!nodeDisplay.TryGetValue(key, out var summary)) nodeDisplay.Add(key, summary = new());
                     summary.Add(row.Display);
-                    if (!comparisons.TryGetValue(name, out var comparison)) comparisons.Add(name, comparison = new());
-                    comparison.Add(up, down);
+                    if (!comparisons.TryGetValue(name, out var comparison)) comparisons.Add(name, comparison = (new(), new()));
+                    comparison.Bytes.Add(up, down);
+                    comparison.Display.Add(row.Display);
                     if (!nodes.TryGetValue(key, out var node))
                     {
                         node = (row.NodeName, new Bytes(), new Bytes());
@@ -280,12 +281,13 @@ public sealed class Ledger : IDisposable
                     }
                     if (!series.TryGetValue(label, out var bucket))
                     {
-                        bucket = (start, new Bytes(), new Bytes());
+                        bucket = (start, new Bytes(), new Bytes(), new());
                         series.Add(label, bucket);
                     }
                     bucket.Bytes.Add(up, down);
+                    bucket.Display.Add(row.Display);
                     if (recovery) bucket.Recovered.Add(up, down);
-                    if (start < bucket.FirstTick) series[label] = (start, bucket.Bytes, bucket.Recovered);
+                    if (start < bucket.FirstTick) series[label] = (start, bucket.Bytes, bucket.Recovered, bucket.Display);
                 }
             }
             var gaps = 0;
@@ -311,7 +313,8 @@ public sealed class Ledger : IDisposable
             transaction.Commit();
             return new HistoryResult(Iso(query.Start.UtcTicks), Iso(query.End.UtcTicks), totals.UploadText, totals.DownloadText,
                 unallocated.UploadText, unallocated.DownloadText, gaps,
-                series.OrderBy(x => x.Value.FirstTick).Select(x => new SeriesPoint(x.Key, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText, x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)).ToArray(),
+                series.OrderBy(x => x.Value.FirstTick).Select(x => new SeriesPoint(x.Key, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText, x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)
+                    { Display = x.Value.Display.Result() }).ToArray(),
                 nodes.OrderByDescending(x => x.Value.Bytes.Upload + x.Value.Bytes.Download).ThenBy(x => x.Key, StringComparer.Ordinal)
                     .Select(x => new NodeTotal(x.Key, x.Value.Name, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText,
                         x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)
@@ -322,7 +325,8 @@ public sealed class Ledger : IDisposable
                 PartialUpload = partial.UploadText, PartialDownload = partial.DownloadText,
                 UnbucketedUpload = unbucketed.UploadText, UnbucketedDownload = unbucketed.DownloadText,
                 Gaps = gapDetails, PartialCoverage = partialCoverage, Display = estimate.Result(), DisplayMetadataEnabled = SupportsDisplayMetadata,
-                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.UploadText, x.Value.DownloadText)).ToArray()
+                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText)
+                    { Display = x.Value.Display.Result() }).ToArray()
             };
         }
     }
