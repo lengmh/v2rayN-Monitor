@@ -805,3 +805,97 @@ test('comparison shares and node ranking keep independent exact denominators and
   assert.equal(get('comparison-view').hidden, true);
   assert.deepEqual(errors, []);
 });
+
+test('polished metrics preserve exact text and mobile filters disclose current selections', async t => {
+  const { w, get, change, errors } = await fixture(t);
+  assert.equal(get('total-value').textContent, '16.106 GB');
+  assert.equal(get('total-value').querySelector('.metric-unit').textContent, ' GB');
+  assert.equal(get('filter-disclosure').getAttribute('aria-expanded'), 'false');
+  assert.match(get('filter-disclosure').textContent, /全部节点.*按日.*GB/);
+  get('filter-disclosure').click();
+  assert.equal(get('filter-extra').classList.contains('expanded'), true);
+  assert.equal(get('filter-disclosure').getAttribute('aria-expanded'), 'true');
+  change('unit', 'GiB');
+  assert.equal(get('total-value').textContent, '15.000 GiB');
+  assert.match(get('filter-disclosure').textContent, /GiB/);
+  get('filter-disclosure').click();
+  assert.equal(get('filter-extra').classList.contains('expanded'), false);
+  assert.equal(get('filter-disclosure').getAttribute('aria-expanded'), 'false');
+  assert.equal(get('ranking').classList.contains('user-view-change'), false);
+  get('ranking-share').click();
+  assert.equal(w.document.querySelector('.motion-snapshot'), null); // No WAAPI in JSDOM: synchronous fallback.
+  get('ranking').dispatchEvent(new w.Event('animationend'));
+  assert.equal(get('ranking').classList.contains('user-view-change'), false);
+  assert.deepEqual(errors, []);
+});
+
+test('node sorting sits before list/share in the card heading without duplicate controls', async t => {
+  const { w, get } = await fixture(t);
+  assert.equal(w.document.querySelectorAll('#comparison-node-sort').length, 1);
+  assert.ok(get('comparison-node-sort').closest('.panel-heading-actions'));
+  assert.equal(get('comparison-node-sort-control').nextElementSibling.getAttribute('aria-label'), '同名节点对照显示方式');
+  assert.equal(get('comparison-nodes-list').querySelector('#comparison-node-sort'), null);
+});
+
+test('same-name footer pages whole node pairs, keeps full share denominators, and resets on sort and filters', async t => {
+  let reads=0, empty=false;
+  const nodes=Array.from({length:52},(_,i)=>({key:`n${i}`,name:`Node ${String(i+1).padStart(2,'0')}`,upload:String(i+1),download:'0'}));
+  const providerNodes=[...nodes.map((n,i)=>({name:n.name,rawBytes:String(100-i),billedBytes:`${100-i}.000123`})),{name:'Provider only',rawBytes:'999',billedBytes:'999.000123'}];
+  const local={...history,upload:'1378',download:'0',nodes,records:[],recordCount:52};
+  const provider={source:'paged',rawBytes:'4873',billedBytes:'4873.006519',recordCount:53,nodes:providerNodes,series:[],records:[]};
+  const {get,change,w,errors}=await fixture(t,{
+    '/api/provider/sources':()=>Response.json(['paged']),
+    '/api/provider/nodes':()=>Response.json(providerNodes.map(n=>({key:n.name,name:n.name}))),
+    '/api/provider/history':u=>Response.json({...provider,nodes:empty?[]:u.searchParams.has('nodeKey')?providerNodes.filter(n=>n.name===u.searchParams.get('nodeKey')):providerNodes}),
+    '/api/history':u=>Response.json(reads++?{...local,nodes:empty?[]:u.searchParams.has('nodeName')?nodes.filter(n=>n.name===u.searchParams.get('nodeName')):nodes}:history)
+  });
+  await until(()=>get('statistics-source').options.length===2);
+  change('statistics-source','paged');await until(()=>get('summary').getAttribute('aria-busy')==='false');
+  get('compare-toggle').checked=true;get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(()=>get('comparison-node-page').textContent.includes('共 53'));
+  assert.match(get('comparison-node-page').textContent,/第 1 \/ 2 页.*每页 50 个/);
+  assert.equal(get('comparison-nodes').children.length,100);assert.equal(get('comparison-node-previous').disabled,true);
+  get('comparison-node-next').click();
+  assert.equal(get('comparison-nodes').children.length,6);assert.match(get('comparison-node-page').textContent,/第 2 \/ 2 页/);
+  const keys=[...get('comparison-nodes').children].map(r=>JSON.parse(r.dataset.motionKey));
+  for(let i=0;i<keys.length;i+=2){assert.equal(keys[i][0],keys[i+1][0]);assert.deepEqual([keys[i][1],keys[i+1][1]],[0,1]);}
+  assert.ok(parseFloat(get('comparison-nodes').querySelector('.paired-bar').style.width)<10); // Full-query scale, not current page.
+  assert.equal(get('comparison-node-next').disabled,true);
+  w.document.querySelector('[data-comparison-section=nodes][data-comparison-mode=share]').click();
+  assert.equal(get('comparison-nodes-shares').querySelector('[data-source=local]').querySelectorAll('.rank-row').length,52);
+  assert.equal(get('comparison-nodes-shares').querySelector('[data-source=provider]').querySelectorAll('.rank-row').length,53);
+  w.document.querySelector('[data-comparison-section=nodes][data-comparison-mode=list]').click();
+  assert.match(get('comparison-node-page').textContent,/第 2 \/ 2 页/);
+  change('comparison-node-sort','provider');assert.match(get('comparison-node-page').textContent,/第 1 \/ 2 页/);
+  assert.equal(get('comparison-nodes').querySelector('.comparison-name').textContent,'Provider only');
+  get('comparison-node-next').click();change('provider-metric','billed');assert.match(get('comparison-node-page').textContent,/第 1 \/ 2 页/);
+  get('comparison-node-next').click();change('node-filter','Node 01');
+  await until(()=>get('comparison-node-page').textContent.includes('共 1 个节点'));
+  assert.equal(get('comparison-nodes').children.length,2);assert.equal(get('comparison-node-next').disabled,true);
+  empty=true;change('bucket','hour');await until(()=>get('comparison-node-page').textContent.includes('共 0 个节点'));
+  assert.match(get('comparison-node-page').textContent,/第 1 \/ 1 页/);assert.equal(get('comparison-node-previous').disabled,true);assert.equal(get('comparison-node-next').disabled,true);
+  change('statistics-source','');
+  assert.equal(get('comparison-node-page').textContent,'正在读取…');
+  assert.equal(get('comparison-node-previous').disabled,true);assert.equal(get('comparison-node-next').disabled,true);
+  assert.deepEqual(errors,[]);
+});
+
+test('comparison list flex layout anchors pagination without stretching table rows', async () => {
+  const css = await readFile(new URL('../src/ui.css', import.meta.url), 'utf8');
+  const dom = new JSDOM(html);
+  try {
+    const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
+    for (const kind of ['nodes', 'buckets']) {
+      const list = dom.window.document.getElementById(`comparison-${kind}-list`);
+      const computed = el => dom.window.getComputedStyle(el);
+      assert.equal(computed(list.parentElement).flexDirection, 'column');
+      assert.equal(computed(list).display, 'flex');
+      assert.equal(computed(list).flexGrow, '1');
+      assert.equal(computed(list.querySelector('.pagination')).marginTop, 'auto');
+      assert.equal(computed(list.querySelector('.table-scroll')).flexGrow, '0');
+      assert.equal(computed(list.querySelector('.table-scroll')).maxHeight, '450px');
+      list.hidden = true;
+      assert.notEqual(computed(list).display, 'flex');
+    }
+  } finally { dom.window.close(); }
+});
