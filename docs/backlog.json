@@ -10,10 +10,10 @@
   "active_checkpoint": {
     "issue": 23,
     "status": "in_progress",
-    "branch": "feat/issue23-comparison-shares",
-    "scope": "同名节点与时间桶各自新增本机／服务商独立占比；同名节点配对列表按所选来源流量降序，时间桶列表保持时间顺序；不纳入暂停动效候选",
+    "branch": "feat/issue23-billing-comparison",
+    "scope": "复用倍率快照，让同名节点和时间桶的本机／服务商一起切换原始量或计费量，列表、趋势、排序和占比一致；新采集时节点无倍率标记按1倍，其他按原名标记，组标签不覆盖，旧值不回填",
     "implementation_status": "complete",
-    "remaining": "用户报告预览符合预期；精确CI和自动审查待本批PR核对，新增浏览器回归由CI执行；未合并、部署或发布",
+    "remaining": "本地实现与相关验证已完成；本批提交／推送／草稿PR与精确CI范围已确定，结果另核。当前c877509仍运行，未启用本批；Xray多出站随后另批提交",
     "resume_requirement": "UI 后恢复采集主线时，Xray 多出站及策略组实际成员覆盖属于收尾必需项，当前不实施"
   },
   "remote_created_in_this_delivery": true,

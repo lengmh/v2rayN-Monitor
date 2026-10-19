@@ -30,6 +30,50 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('raw and billing comparisons switch both sources and disclose missing multiplier coverage', async ({ page }) => {
+  let reads = 0;
+  const display = { originalName: 'Synthetic known multiplier', groups: [], mergeKey: null, rate: null, rateStatus: 'partial',
+    estimatedBilledBytes: '1000000000.5', estimateCoveredBytes: '2000000001', estimateUnknownBytes: '999999999' };
+  const local = { ...history, upload: '1000000000', download: '3000000000',
+    display: { ...display, estimateUnknownBytes: '1999999999' },
+    nodes: [{ key: 'known', name: display.originalName, upload: '1000000000', download: '2000000000', display },
+      { key: 'unknown', name: 'Synthetic unknown multiplier', upload: '0', download: '1000000000' }],
+    series: [{ label: '2026-10-09', upload: '1000000000', download: '3000000000',
+      display: { ...display, estimateUnknownBytes: '1999999999' } }] };
+  const provider = { source: 'Synthetic billing source', rawBytes: '5000000000', billedBytes: '2500000000.000000000123', recordCount: 1,
+    nodes: [{ name: display.originalName, rawBytes: '5000000000', billedBytes: '2500000000.000000000123' }],
+    series: [{ label: '2026-10-09', rawBytes: '5000000000', billedBytes: '2500000000.000000000123' }], records: [] };
+  await mock(page, {
+    '/api/provider/sources': route => route.fulfill(json([provider.source])),
+    '/api/provider/nodes': route => route.fulfill(json(provider.nodes.map(n => ({ key: n.name, name: n.name })))),
+    '/api/provider/history': route => route.fulfill(json(provider)),
+    '/api/history': route => route.fulfill(json(reads++ ? local : history))
+  });
+  await page.selectOption('#statistics-source', provider.source);
+  await page.check('#compare-toggle');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('4,000,000,000 bytes');
+  await page.selectOption('#provider-metric', 'billed');
+  await expect(page.locator('#comparison-local-title')).toHaveText('本机估算计费量');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('1,000,000,000.5 bytes');
+  await expect(page.locator('#comparison-estimate-note')).toContainText('未估算原始量 1,999,999,999 bytes');
+  const unknown = page.locator('#comparison-nodes tr').filter({ has: page.locator('.comparison-name', { hasText: 'Synthetic unknown multiplier' }) });
+  await expect(unknown.locator('.paired-value')).toHaveText('—');
+  await expect(page.locator('#comparison-nodes .rank-upload, #comparison-nodes .rank-download')).toHaveCount(0);
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/billing-comparison-${suffix}.png`, fullPage: true });
+    await page.click('[data-comparison-section="nodes"][data-comparison-mode="share"]');
+    await expect(page.locator('#comparison-nodes-shares [data-source="local"] h3')).toHaveText('本机估算计费量');
+    await expect(page.locator('#comparison-nodes-shares [data-source="local"] circle')).toHaveCount(1);
+    await page.screenshot({ path: `test-results/billing-shares-${suffix}.png`, fullPage: true });
+    await page.click('[data-comparison-section="nodes"][data-comparison-mode="list"]');
+  }
+  await page.selectOption('#provider-metric', 'raw');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('4,000,000,000 bytes');
+  await expect(page.locator('#comparison-nodes .rank-download')).toHaveCount(2);
+  await expect(page.locator('#comparison-estimate-note')).toBeHidden();
+});
 test('probe view separates dimensions and keeps a readable desktop and mobile layout', async ({ page }) => {
   const calls = await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic collector', demo: false,
@@ -416,7 +460,9 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#exact-value-text')).toContainText('3,500,000,000 bytes');
   await page.locator('#exact-value-dialog form button').click();
   await page.selectOption('#provider-metric', 'billed');
-  await expect(page.locator('#comparison-nodes .paired-value').nth(1)).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
+  await expect(page.locator('#comparison-nodes').getByRole('button', { name: /计费量 3,200,000,000.000123 bytes/ })).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
+  await expect(localValue).toHaveText('—');
+  await page.selectOption('#provider-metric', 'raw');
   const only = page.locator('#comparison-nodes tr').filter({ hasText: 'CSV only' });
   await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
   await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);

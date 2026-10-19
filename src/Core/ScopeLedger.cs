@@ -309,13 +309,13 @@ public sealed class ScopeLedger : IDisposable
             ThrowIfDisposed();
             using var transaction = connection.BeginTransaction();
             var total = new Bytes(); var recovered = new Bytes(); var partial = new Bytes(); var unbucketed = new Bytes();
-            var series = new Dictionary<string, (long At, Bytes Total, Bytes Recovered)>(StringComparer.Ordinal);
+            var series = new Dictionary<string, (long At, Bytes Total, Bytes Recovered, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var scopes = new Dictionary<long, (string Name, Bytes Total, Bytes Recovered)>();
             var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
             var estimate = new TrafficDisplayStore.Summary();
             var scopeDisplay = new Dictionary<long, TrafficDisplayStore.Summary>();
             var scopeMerge = new Dictionary<long, string?>();
-            var comparisons = new Dictionary<string, Bytes>(StringComparer.Ordinal);
+            var comparisons = new Dictionary<string, (Bytes Bytes, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var rows = new List<ScopeTrafficRow>();
             long count = 0;
             var matchingScopes = new HashSet<long>();
@@ -347,8 +347,9 @@ public sealed class ScopeLedger : IDisposable
                     estimate.Add(row.Display);
                     if (!scopeDisplay.TryGetValue(id, out var summary)) scopeDisplay.Add(id, summary = new());
                     summary.Add(row.Display); scopeMerge[id] = row.Display.MergeKey;
-                    if (!comparisons.TryGetValue(comparisonName, out var comparison)) comparisons.Add(comparisonName, comparison = new());
-                    comparison.Add(up, down);
+                    if (!comparisons.TryGetValue(comparisonName, out var comparison)) comparisons.Add(comparisonName, comparison = (new(), new()));
+                    comparison.Bytes.Add(up, down);
+                    comparison.Display.Add(row.Display);
                     if (recovery) recovered.Add(up, down);
                     if (!scopes.TryGetValue(id, out var scope))
                         scopes.Add(id, scope = (row.Name, new Bytes(), new Bytes()));
@@ -358,10 +359,11 @@ public sealed class ScopeLedger : IDisposable
                     if (recovery && label != Ledger.BucketLabel(new(end - 1, TimeSpan.Zero), zone, query.Bucket))
                     { unbucketed.Add(up, down); continue; }
                     if (!series.TryGetValue(label, out var bucket))
-                        series.Add(label, bucket = (start, new Bytes(), new Bytes()));
+                        series.Add(label, bucket = (start, new Bytes(), new Bytes(), new()));
                     bucket.Total.Add(up, down);
+                    bucket.Display.Add(row.Display);
                     if (recovery) bucket.Recovered.Add(up, down);
-                    if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered);
+                    if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered, bucket.Display);
                 }
             // Gaps are not paged with traffic. NULL legacy gaps remain disclosed as unassigned history.
             var gaps = new List<ScopeGap>();
@@ -409,13 +411,14 @@ public sealed class ScopeLedger : IDisposable
             return new(query.Basis, total.Up, total.Down, recovered.Up, recovered.Down, partial.Up, partial.Down,
                 unbucketed.Up, unbucketed.Down,
                 series.OrderBy(x => x.Value.At).Select(x => new SeriesPoint(x.Key, x.Value.Total.Up, x.Value.Total.Down,
-                    x.Value.Recovered.Up, x.Value.Recovered.Down)).ToArray(),
+                    x.Value.Recovered.Up, x.Value.Recovered.Down) { Display = x.Value.Display.Result() }).ToArray(),
                 scopes.OrderBy(x => x.Key).Select(x => new ScopeTotal(x.Key, x.Value.Name, x.Value.Total.Up,
                     x.Value.Total.Down, x.Value.Recovered.Up, x.Value.Recovered.Down)
                     { Display = scopeDisplay[x.Key].Result(scopeMerge[x.Key]) }).ToArray(), rows, count, gaps)
             {
                 EarliestRecord = earliest, Display = estimate.Result(), DisplayMetadataEnabled = SupportsDisplayMetadata,
-                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.Up, x.Value.Down)).ToArray()
+                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.Bytes.Up, x.Value.Bytes.Down)
+                    { Display = x.Value.Display.Result() }).ToArray()
             };
         }
     }

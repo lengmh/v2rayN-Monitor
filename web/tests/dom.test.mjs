@@ -571,6 +571,62 @@ test('partial-only recovery is unknown in comparison while provider recorded zer
   assert.match(get('comparison-nodes-shares').querySelector('[data-source="local"]').textContent, /只有零值记录/);
 });
 
+test('comparison switches both sources between raw and billing while unknown multipliers stay unknown', async t => {
+  let localReads = 0;
+  const captured = { originalName: 'Same', groups: [], mergeKey: null, rate: null, rateStatus: 'partial',
+    estimatedBilledBytes: '1000000000.5', estimateCoveredBytes: '2000000001', estimateUnknownBytes: '999999999' };
+  const local = { ...history, upload: '1000000000', download: '3000000000', display: {
+    ...captured, estimateUnknownBytes: '1999999999'
+  }, nodes: [
+    { key: 'same', name: 'Same', upload: '1000000000', download: '2000000000', display: captured },
+    { key: 'unknown', name: 'Unknown', upload: '0', download: '1000000000' }
+  ], series: [{ label: '2026-10-09', upload: '1000000000', download: '3000000000', display: { ...captured, estimateUnknownBytes: '1999999999' } }] };
+  const provider = { source: 'billing', rawBytes: '5000000000', billedBytes: '2500000000.000000000123', recordCount: 1,
+    nodes: [{ name: 'Same', rawBytes: '5000000000', billedBytes: '2500000000.000000000123' }],
+    series: [{ label: '2026-10-09', rawBytes: '5000000000', billedBytes: '2500000000.000000000123' }], records: [] };
+  const { get, change, w, errors } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(['billing']),
+    '/api/provider/nodes': () => Response.json(provider.nodes.map(n => ({ key: n.name, name: n.name }))),
+    '/api/provider/history': () => Response.json(provider),
+    '/api/history': () => Response.json(localReads++ ? local : history)
+  });
+  change('statistics-source', 'billing');
+  await until(() => get('compare-control').hidden === false);
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-local-exact').textContent === '4,000,000,000 bytes');
+  assert.equal(get('provider-metric-caption').textContent, '对比口径');
+  assert.equal(get('comparison-estimate-note').hidden, true);
+  change('provider-metric', 'billed');
+  assert.equal(get('comparison-local-title').textContent, '本机估算计费量');
+  assert.equal(get('comparison-local-exact').textContent, '1,000,000,000.5 bytes');
+  assert.ok(get('comparison-estimate-note').textContent.includes('未估算原始量 1,999,999,999 bytes'));
+  assert.equal(get('comparison-local-legend').hidden, false);
+  assert.equal(get('comparison-upload-legend').hidden, true);
+  const pairs = [...get('comparison-nodes').querySelectorAll('tr')];
+  const same = pairs.find(row => row.querySelector('.comparison-name')?.textContent === 'Same');
+  assert.ok(same.querySelector('.paired-value').title.includes('1,000,000,000.5 bytes'));
+  assert.ok(same.querySelector('.paired-value').title.includes('未估算原始量 999,999,999 bytes'));
+  assert.equal(same.querySelectorAll('.rank-upload,.rank-download').length, 0);
+  const unknown = pairs.find(row => row.querySelector('.comparison-name')?.textContent === 'Unknown');
+  assert.equal(unknown.querySelector('.paired-value').textContent, '—');
+  assert.ok(unknown.querySelector('.paired-value').title.includes('倍率快照'));
+  assert.ok([...get('comparison-chart').querySelectorAll('.chart-column')].some(column => column.title.includes('1,000,000,000.5 bytes')));
+  assert.equal(get('comparison-chart').querySelectorAll('.rank-upload,.rank-download').length, 0);
+  get('comparison-nodes').querySelector('.paired-value').focus();
+  assert.ok(get('detail-popover').textContent.includes('仅倍率已知部分'));
+  w.document.querySelector('[data-comparison-section="nodes"][data-comparison-mode="share"]').click();
+  const shares = get('comparison-nodes-shares').querySelector('[data-source="local"]');
+  assert.equal(shares.querySelector('h3').textContent, '本机估算计费量');
+  assert.equal(shares.querySelectorAll('circle').length, 1);
+  assert.ok(shares.textContent.includes('未估算部分不参与占比'));
+  change('provider-metric', 'raw');
+  assert.equal(get('comparison-local-exact').textContent, '4,000,000,000 bytes');
+  assert.equal(get('comparison-local-title').textContent, '本机原始量');
+  assert.equal(get('comparison-local-legend').hidden, true);
+  assert.equal(get('comparison-nodes-shares').querySelector('[data-source="local"]').querySelectorAll('circle').length, 2);
+  assert.equal(errors.length, 0);
+});
+
 test('comparison bucket table pages long hourly ranges without dropping exact totals', async t => {
   let reads = 0;
   const series = Array.from({ length: 101 }, (_, i) => ({
@@ -793,8 +849,11 @@ test('comparison shares and node ranking keep independent exact denominators and
   assert.match(tiny.title, /0\.0000000000000000000000000001 bytes/);
   change('node-filter', 'A');
   await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeName') === 'A' && get('summary').getAttribute('aria-busy') === 'false');
-  assert.deepEqual(percentages('nodes', 'local'), ['100.00%']);
+  assert.deepEqual(percentages('nodes', 'local'), []);
+  assert.ok(shares('nodes', 'local').textContent.includes('没有可估算的倍率快照'));
   assert.deepEqual(percentages('nodes', 'provider'), ['100.00%']);
+  change('provider-metric', 'raw');
+  assert.deepEqual(percentages('nodes', 'local'), ['100.00%']);
   assert.equal(get('comparison-nodes-list').hidden, true);
   w.document.querySelector('[data-comparison-section="nodes"][data-comparison-mode="list"]').click();
   assert.equal(get('comparison-nodes-shares').hidden, true);
