@@ -334,6 +334,51 @@ test('issue23 captured rates, group names and exact copy work across business an
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/issue23-captured-mobile.png', fullPage: true });
 });
+test('historical and captured group members use the same labels without merging same-name identities', async ({ page }) => {
+  const nodes = history.nodes.map((node, index) => {
+    const name = index < 2 ? 'Synthetic historical member' : 'Synthetic current member';
+    const total = String(BigInt(node.upload) + BigInt(node.download));
+    return { ...node, name, display: { originalName: name, groups: ['Synthetic Route'], mergeKey: null,
+      rate: index < 2 ? null : '1', rateStatus: index < 2 ? 'unknown' : 'known',
+      estimatedBilledBytes: index < 2 ? null : total,
+      estimateCoveredBytes: index < 2 ? '0' : total, estimateUnknownBytes: index < 2 ? total : '0' } };
+  });
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray',
+      currentNode: 'Synthetic current member', demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'unsupported', message: 'Synthetic stock Xray; saved probe history remains visible' } })),
+    '/api/nodes': route => route.fulfill(json(nodes.map(node => ({ key: node.key, name: node.name })))),
+    '/api/history': route => route.fulfill(json({ ...history, nodes, records: nodes.map(node => ({
+      ...history.records[0], nodeKey: node.key, nodeName: node.name, upload: node.upload, download: node.download,
+      display: node.display
+    })) }))
+  });
+  await expect(page.locator('#ranking .rank-node.has-groups')).toHaveCount(3);
+  await expect(page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' })).toHaveCount(2);
+  await expect(page.locator('#node-filter option').filter({ hasText: 'Synthetic historical member' })).toHaveCount(2);
+  await expect(page.locator('#records .has-groups')).toHaveCount(3);
+  await expect(page.locator('#records tr').first().locator('td').nth(6)).toHaveText('—');
+  await page.locator('#ranking .has-groups').first().hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
+  await page.locator('#ranking .has-groups').first().press('Escape');
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/historical-groups-${suffix}.png`, fullPage: true, animations: 'disabled' });
+  }
+  await page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' }).first().click();
+  await expect(page.locator('#node-filter')).toHaveValue('a');
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#statistics-title')).toHaveText('探测流量');
+  await expect(page.locator('#probe-state')).toHaveText('当前核心未支持探测计量');
+  await expect(page.locator('#ranking .rank-node.has-groups')).toHaveCount(3);
+  await expect(page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' })).toHaveCount(2);
+  await page.locator('#ranking .has-groups').first().hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
+  await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
+});
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray proxy',
@@ -353,7 +398,8 @@ test('cross-core history stays visible with Xray active and setup copy is curren
   }
   await page.click('.nav-item[data-view=settings]');
   await expect(page.locator('#settings-view')).not.toContainText('test.2');
-  await expect(page.locator('#settings-view')).toContainText('策略组实际成员');
+  await expect(page.locator('#settings-view')).toContainText('策略组实际出站');
+  await expect(page.locator('#settings-view')).toContainText('Xray Observatory 探测');
 });
 test('partial sing-box coverage is visible on desktop and mobile after collection resumes', async ({ page }) => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
