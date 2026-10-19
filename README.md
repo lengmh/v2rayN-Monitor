@@ -1,4 +1,24 @@
-![v2rayN Monitor](./docs/images/readme-header.svg)
+<p align="center">
+  <img src="./docs/images/readme-header.svg" alt="v2rayN Monitor" width="1200" />
+</p>
+
+<p align="center">
+  <strong>Your traffic history, organized by node.</strong><br />
+  Track local usage over time and explore daily, weekly, monthly, and yearly totals.
+</p>
+
+<p align="center">
+  <a href="https://github.com/lengmh/v2rayN-Monitor/releases"><img src="https://img.shields.io/github/v/release/lengmh/v2rayN-Monitor?style=flat-square" alt="Release" /></a>
+  <a href="https://github.com/lengmh/v2rayN-Monitor/stargazers"><img src="https://img.shields.io/github/stars/lengmh/v2rayN-Monitor?style=flat-square" alt="Stars" /></a>
+  <a href="https://github.com/lengmh/v2rayN-Monitor/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lengmh/v2rayN-Monitor?style=flat-square" alt="License" /></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/QUICKSTART.md">Quick Start</a> ·
+  <a href="#已实现的主流程">Features</a> ·
+  <a href="https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/architecture.md">Docs</a> ·
+  <a href="https://github.com/lengmh/v2rayN-Monitor/releases">Releases</a>
+</p>
 
 # v2rayN Monitor
 
