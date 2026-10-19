@@ -26,6 +26,7 @@ public static class ScopeCollector
                 ? new MeasurementScope("actual_member", "index_id", id, snapshot.NodeName, id, member.OutboundTag)
                 : new MeasurementScope("actual_member", "outbound", JsonSerializer.Serialize(new[] { digest, member.OutboundTag }),
                     member.DisplayName ?? member.OutboundTag, OutboundTag: member.OutboundTag);
+            scope = scope with { CapturedName = member.CapturedName };
             var available = enabled.Contains(member.OutboundTag) && statistics.Members.TryGetValue(member.OutboundTag, out _);
             var reason = !enabled.Contains(member.OutboundTag) ? "member_statistics_disabled"
                 : statistics.UnavailableMembers.GetValueOrDefault(member.OutboundTag, "missing_counter");
