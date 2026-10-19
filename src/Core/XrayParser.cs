@@ -63,30 +63,57 @@ public static class XrayParser
             using var document = JsonDocument.Parse(json);
             if (!Property(document.RootElement, "stats", out var stats) || !Property(stats, "outbound", out var outbounds) ||
                 outbounds.ValueKind != JsonValueKind.Object) return false;
-            var complete = new Dictionary<string, XrayCounters>(StringComparer.Ordinal);
-            var unavailable = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var tag in tags)
-            {
-                var entries = outbounds.EnumerateObject().Where(x => x.NameEquals(tag)).ToArray();
-                if (entries.Length == 0) { unavailable.Add(tag, "missing_counter"); continue; }
-                if (entries.Length != 1) { unavailable.Add(tag, "duplicate_counter"); continue; }
-                var entry = entries[0].Value;
-                if (!Property(entry, "uplink", out var up) || !Property(entry, "downlink", out var down))
-                {
-                    unavailable.Add(tag, entry.ValueKind == JsonValueKind.Object &&
-                        entry.EnumerateObject().GroupBy(x => x.Name, StringComparer.Ordinal).Any(x => x.Count() > 1)
-                        ? "invalid_counter" : "missing_counter");
-                    continue;
-                }
-                if (up.ValueKind != JsonValueKind.Number || down.ValueKind != JsonValueKind.Number ||
-                    !up.TryGetInt64(out var upload) || !down.TryGetInt64(out var download) || upload < 0 || download < 0)
-                    unavailable.Add(tag, "invalid_counter");
-                else complete.Add(tag, new(upload, download));
-            }
-            counters = new(new ReadOnlyDictionary<string, XrayCounters>(complete), new ReadOnlyDictionary<string, string>(unavailable));
+            counters = ReadPairs(outbounds, tags);
             return true;
         }
         catch (Exception e) when (e is JsonException or InvalidOperationException) { return false; }
+    }
+
+    public static bool TryReadProbeCounters(ReadOnlyMemory<byte> json, IReadOnlyCollection<string> tags,
+        out V2RayProbeStatistics? counters)
+    {
+        counters = null;
+        if (tags.Count == 0 || tags.Any(x => string.IsNullOrWhiteSpace(x) || x.Contains(">>>", StringComparison.Ordinal)) ||
+            tags.Distinct(StringComparer.Ordinal).Count() != tags.Count) throw new ArgumentException("Distinct outbound tags are required.");
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (!Property(document.RootElement, "monitor_probes", out var probes) ||
+                !Property(probes, "version", out var version) || !version.TryGetInt32(out var number) || number != 1 ||
+                !Text(probes, "kind", out var kind) || kind != "observatory" ||
+                !Property(probes, "members", out var members) || members.ValueKind != JsonValueKind.Object ||
+                !Property(probes, "totals", out var totals) || totals.ValueKind != JsonValueKind.Object) return false;
+            var memberPairs = ReadPairs(members, tags);
+            var totalPairs = ReadPairs(totals, ["business", "excluded", "unknown"]);
+            counters = new(memberPairs.Counters, memberPairs.UnavailableOutbounds, totalPairs.Counters, totalPairs.UnavailableOutbounds);
+            return true;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException) { return false; }
+    }
+
+    private static V2RayOutboundStatistics ReadPairs(JsonElement values, IReadOnlyCollection<string> tags)
+    {
+        var complete = new Dictionary<string, XrayCounters>(StringComparer.Ordinal);
+        var unavailable = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var tag in tags)
+        {
+            var entries = values.EnumerateObject().Where(x => x.NameEquals(tag)).ToArray();
+            if (entries.Length == 0) { unavailable.Add(tag, "missing_counter"); continue; }
+            if (entries.Length != 1) { unavailable.Add(tag, "duplicate_counter"); continue; }
+            var entry = entries[0].Value;
+            if (!Property(entry, "uplink", out var up) || !Property(entry, "downlink", out var down))
+            {
+                unavailable.Add(tag, entry.ValueKind == JsonValueKind.Object &&
+                    entry.EnumerateObject().GroupBy(x => x.Name, StringComparer.Ordinal).Any(x => x.Count() > 1)
+                    ? "invalid_counter" : "missing_counter");
+                continue;
+            }
+            if (up.ValueKind != JsonValueKind.Number || down.ValueKind != JsonValueKind.Number ||
+                !up.TryGetInt64(out var upload) || !down.TryGetInt64(out var download) || upload < 0 || download < 0)
+                unavailable.Add(tag, "invalid_counter");
+            else complete.Add(tag, new(upload, download));
+        }
+        return new(new ReadOnlyDictionary<string, XrayCounters>(complete), new ReadOnlyDictionary<string, string>(unavailable));
     }
 
     /// <summary>Builds independent outbound identities from the already bound standard configuration.</summary>

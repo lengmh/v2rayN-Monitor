@@ -63,11 +63,14 @@ public sealed record ProxyCollectionScope(int UncollectedOutbounds, int Uncollec
 {
     public int CollectedOutbounds { get; init; }
     public int CollectedGroups { get; init; }
+    public bool HasSeparateProbeCounters { get; init; }
     public bool IsPartial => UncollectedOutbounds > 0 || UncollectedGroups > 0;
     public string Description => Basis == "xray_outbound_members"
         ? $"采集 {CollectedOutbounds} 个 Xray 独立代理出站自身的累计字节，包含 {CollectedGroups} 个策略组选择实际出站后的连接；不叠加策略组，排除直连和阻断。"
             + (IsPartial ? $" 另有 {UncollectedOutbounds} 个代理出站未覆盖，流量保持未知。" : "")
-            + " 内部探测尚未单独区分，不能仅凭出站计数判断流量用途。"
+            + (HasSeparateProbeCounters
+                ? " 内部 HTTP 探测另列；原出站累计仍可能包含探测，两种口径不能相加或直接相减。"
+                : " 内部探测尚未单独区分，不能仅凭出站计数判断流量用途。")
         : Basis == "xray_outbound_proxy"
         ? IsPartial
             ? $"仅采集 Xray proxy 出站自身的累计字节，包含策略组选中该出站的连接；其他 {UncollectedOutbounds} 个代理出站未采集，配置含 {UncollectedGroups} 个策略组。当前合计不是全部代理流量，内部探测未单独区分。"
@@ -82,4 +85,7 @@ public sealed record ProxyCollectionScope(int UncollectedOutbounds, int Uncollec
 public sealed record XraySnapshot(
     string InstanceId, string NodeId, string NodeName, string ProcessIdentity,
     string Generation, DateTimeOffset ProcessStartedAt, DateTimeOffset ConfigurationWrittenAt,
-    string ListenerIdentity, Uri MetricsEndpoint, string CoreName = "Xray", ProxyCollectionScope? Scope = null);
+    string ListenerIdentity, Uri MetricsEndpoint, string CoreName = "Xray", ProxyCollectionScope? Scope = null)
+{
+    public bool XrayProbeExtensionVerified { get; init; }
+}

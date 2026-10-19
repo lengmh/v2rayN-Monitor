@@ -344,6 +344,10 @@ test('historical and captured group members use the same labels without merging 
       estimateCoveredBytes: index < 2 ? '0' : total, estimateUnknownBytes: index < 2 ? total : '0' } };
   });
   await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray',
+      currentNode: 'Synthetic current member', demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'unsupported', message: 'Synthetic stock Xray; saved probe history remains visible' } })),
     '/api/nodes': route => route.fulfill(json(nodes.map(node => ({ key: node.key, name: node.name })))),
     '/api/history': route => route.fulfill(json({ ...history, nodes, records: nodes.map(node => ({
       ...history.records[0], nodeKey: node.key, nodeName: node.name, upload: node.upload, download: node.download,
@@ -366,6 +370,14 @@ test('historical and captured group members use the same labels without merging 
   }
   await page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' }).first().click();
   await expect(page.locator('#node-filter')).toHaveValue('a');
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#statistics-title')).toHaveText('探测流量');
+  await expect(page.locator('#probe-state')).toHaveText('当前核心未支持探测计量');
+  await expect(page.locator('#ranking .rank-node.has-groups')).toHaveCount(3);
+  await expect(page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' })).toHaveCount(2);
+  await page.locator('#ranking .has-groups').first().hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
+  await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
 });
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
