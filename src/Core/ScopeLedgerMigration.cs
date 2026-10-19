@@ -5,6 +5,7 @@ namespace V2rayNMonitor.Core;
 
 public sealed record ScopeMigrationResult(string HistoryPath, string BackupPath, long LegacyScopes);
 public sealed record ProbeMigrationResult(string HistoryPath, string BackupPath, long PreservedScopes);
+public sealed record DisplayMigrationResult(string HistoryPath, string BackupPath, long HistoryVersion);
 
 /// <summary>Explicit offline migration. The caller must stop all writers and obtain authorization first.</summary>
 public static class ScopeLedgerMigration
@@ -77,6 +78,47 @@ public static class ScopeLedgerMigration
         finally { Execute(target, null, "PRAGMA foreign_keys=ON;"); }
         Require(Scalar(target, null, "PRAGMA foreign_keys;") == 1, "Foreign key enforcement was not restored.");
         return new(history, backup, Scalar(target, null, "SELECT COUNT(*) FROM measurement_scopes;"));
+    }
+
+    /// <summary>Additive, explicit offline UI metadata extension. Old rows/DDL and user_version remain unchanged.</summary>
+    public static DisplayMigrationResult InitializeDisplay(string historyPath, string backupPath)
+    {
+        static void PreflightDisplay(SqliteConnection db, SqliteTransaction? transaction)
+        {
+            var version = Scalar(db, transaction, "PRAGMA user_version;");
+            if (version == 1) Preflight(db, transaction);
+            else
+            {
+                ScopeLedger.ValidateSchema(db, transaction, version);
+                Require(Scalar(db, transaction, "SELECT count(*) FROM sqlite_schema WHERE type='table';") == 11,
+                    "UI initialization requires an unextended history ledger.");
+            }
+        }
+        var (history, backup) = Backup(historyPath, backupPath, PreflightDisplay);
+        using var snapshot = Open(backup, SqliteOpenMode.ReadOnly);
+        using var target = Open(history, SqliteOpenMode.ReadWrite);
+        Execute(target, null, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA locking_mode=EXCLUSIVE;");
+        using var transaction = target.BeginTransaction();
+        PreflightDisplay(target, transaction);
+        var version = Scalar(snapshot, null, "PRAGMA user_version;");
+        CompareOriginal(target, transaction, snapshot);
+        if (version > 1)
+            foreach (var (table, order) in ScopeOrdering)
+                Compare(target, transaction, $"SELECT * FROM {table} ORDER BY {order};", snapshot, $"SELECT * FROM {table} ORDER BY {order};");
+        Execute(target, transaction, TrafficDisplayStore.Schema);
+        Require(Scalar(target, transaction, "PRAGMA user_version;") == version, "UI metadata must not change the core ledger version.");
+        CompareOriginal(target, transaction, snapshot);
+        if (version > 1)
+        {
+            foreach (var (table, order) in ScopeOrdering)
+                Compare(target, transaction, $"SELECT * FROM {table} ORDER BY {order};", snapshot, $"SELECT * FROM {table} ORDER BY {order};");
+            Compare(target, transaction,
+                "SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'ui_display_%' AND sql IS NOT NULL ORDER BY type,name;",
+                snapshot, "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name;");
+        }
+        CheckIntegrity(target, transaction);
+        transaction.Commit();
+        return new(history, backup, version);
     }
 
     private static (string History, string Backup) Backup(string historyPath, string backupPath,

@@ -23,6 +23,20 @@ internal static class Program
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
         using var mutex = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created);
         if (!created) { MessageBox.Show("v2rayN Monitor 已在此数据目录运行，请从系统托盘打开。", "v2rayN Monitor"); return; }
+        if (args.Contains("--initialize-display-metadata", StringComparer.Ordinal))
+        {
+            try
+            {
+                var backup = Array.IndexOf(args, "--backup");
+                if (index < 0 || index + 1 >= args.Length) throw new ArgumentException("An explicit --data-dir is required.");
+                if (backup < 0 || backup + 1 >= args.Length) throw new ArgumentException("A fresh --backup path is required.");
+                var result = ScopeLedgerMigration.InitializeDisplay(Path.Combine(root, "history.db"), args[backup + 1]);
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+            }
+            catch (Exception) { Environment.ExitCode = 1; Console.Error.WriteLine("UI metadata initialization failed; history was not promoted. Check the offline ledger and new backup path."); }
+            finally { mutex.ReleaseMutex(); }
+            return;
+        }
         var probeMode = args.Contains("--probe-ledger", StringComparer.OrdinalIgnoreCase);
         var scopeMode = probeMode || args.Contains("--scope-ledger", StringComparer.OrdinalIgnoreCase);
         try { Application.Run(new TrayContext(root, demo, scopeMode, probeMode)); }

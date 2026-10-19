@@ -11,9 +11,11 @@ public sealed class Ledger : IDisposable
     private const long ShortInterval = 10 * TimeSpan.TicksPerSecond;
     private readonly object gate = new();
     private readonly SqliteConnection connection;
+    private readonly TrafficDisplayStore? display;
+    public bool SupportsDisplayMetadata => display is not null;
     private bool disposed;
 
-    public Ledger(string dbPath)
+    public Ledger(string dbPath, bool includeDisplayMetadata = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
         if (dbPath != ":memory:")
@@ -58,7 +60,9 @@ public sealed class Ledger : IDisposable
                 CREATE INDEX IF NOT EXISTS gaps_time ON gaps(start_ticks, end_ticks);
                 PRAGMA user_version=1;
                 """);
+            if (version == 0 && includeDisplayMetadata) Execute(transaction, TrafficDisplayStore.Schema);
             transaction.Commit();
+            display = TrafficDisplayStore.Open(connection);
         }
         catch
         {
@@ -98,6 +102,8 @@ public sealed class Ledger : IDisposable
                 return "stale";
             }
             UpsertNode(transaction, key, sample.InstanceId, sample.NodeId, sample.NodeName);
+            var captured = display?.Observe(transaction, key,
+                TrafficDisplayStore.Capture("legacy_proxy", key, new(sample.NodeName)), at, previous?.At);
             var status = "baseline";
             if (previous is not null)
             {
@@ -125,7 +131,7 @@ public sealed class Ledger : IDisposable
                     }
                     else
                     {
-                        Allocate(transaction, previous.At, at, key, upload, download);
+                        Allocate(transaction, previous.At, at, key, upload, download, captured);
                         status = "recorded";
                     }
                 }
@@ -201,7 +207,7 @@ public sealed class Ledger : IDisposable
         var zone = TimeZoneInfo.FindSystemTimeZoneById(query.TimeZoneId);
         var parameters = new (string, object?)[]
         {
-            ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey), ("$name", query.NodeName)
+            ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey), ("$name", null)
         };
         lock (gate)
         {
@@ -215,67 +221,59 @@ public sealed class Ledger : IDisposable
             var unbucketed = new Bytes();
             var series = new Dictionary<string, (long FirstTick, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
             var nodes = new Dictionary<string, (string Name, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
-            using (var command = Command(transaction, """
-                SELECT m.start_ticks,m.node_key,n.name,m.upload,m.download
-                FROM minutes m JOIN nodes n ON n.node_key=m.node_key
-                WHERE m.start_ticks >= $start AND m.start_ticks < $end AND ($node IS NULL OR m.node_key=$node)
-                    AND ($name IS NULL OR n.name=$name COLLATE BINARY)
-                ORDER BY m.start_ticks;
-                """, parameters))
+            var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
+            var estimate = new TrafficDisplayStore.Summary();
+            var nodeDisplay = new Dictionary<string, TrafficDisplayStore.Summary>(StringComparer.Ordinal);
+            var comparisons = new Dictionary<string, Bytes>(StringComparer.Ordinal);
+            var records = new List<TrafficRow>();
+            var matchingKeys = new HashSet<string>(StringComparer.Ordinal);
+            if (query.NodeName is not null)
+            {
+                using var names = Command(transaction, "SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY;", ("$name", query.NodeName));
+                using var named = names.ExecuteReader();
+                while (named.Read()) matchingKeys.Add(named.GetString(0));
+            }
+            var count = 0;
+            using (var command = RecordCommand(transaction, query with { NodeName = null }, -1, 0))
             using (var reader = command.ExecuteReader())
             {
                 while (reader.Read())
+                foreach (var row in ReadRecords(reader, metadata))
                 {
-                    var up = reader.GetInt64(3);
-                    var down = reader.GetInt64(4);
-                    totals.Add(up, down);
-                    var label = BucketLabel(new DateTimeOffset(reader.GetInt64(0), TimeSpan.Zero), zone, query.Bucket);
-                    if (!series.TryGetValue(label, out var bucket))
+                    var name = row.Display!.OriginalName ?? row.NodeName;
+                    if (query.NodeName is not null && name != query.NodeName) continue;
+                    matchingKeys.Add(row.NodeKey);
+                    var start = reader.GetInt64(0); var end = reader.GetInt64(1);
+                    var key = row.NodeKey;
+                    var up = long.Parse(row.Upload, CultureInfo.InvariantCulture); var down = long.Parse(row.Download, CultureInfo.InvariantCulture);
+                    var recovery = reader.GetInt32(7) == 1;
+                    if (!query.NonZeroRecords || up != 0 || down != 0)
                     {
-                        bucket = (reader.GetInt64(0), new Bytes(), new Bytes());
-                        series.Add(label, bucket);
+                        if (count >= (long)query.Page * query.PageSize && records.Count < query.PageSize) records.Add(row);
+                        count++;
                     }
-                    bucket.Bytes.Add(up, down);
-                    var key = reader.GetString(1);
-                    if (!nodes.TryGetValue(key, out var node))
-                    {
-                        node = (reader.GetString(2), new Bytes(), new Bytes());
-                        nodes.Add(key, node);
-                    }
-                    node.Bytes.Add(up, down);
-                }
-            }
-            using (var command = Command(transaction, """
-                SELECT u.start_ticks,u.end_ticks,u.node_key,n.name,u.upload,u.download
-                FROM unallocated u JOIN nodes n ON n.node_key=u.node_key
-                WHERE u.start_ticks < $end AND u.end_ticks > $start AND ($node IS NULL OR u.node_key=$node)
-                    AND ($name IS NULL OR n.name=$name COLLATE BINARY);
-                """, parameters))
-            using (var reader = command.ExecuteReader())
-                while (reader.Read())
-                {
-                    var start = reader.GetInt64(0);
-                    var end = reader.GetInt64(1);
-                    var up = reader.GetInt64(4);
-                    var down = reader.GetInt64(5);
-                    unallocated.Add(up, down);
-                    if (start < query.Start.UtcTicks || end > query.End.UtcTicks)
+                    if (recovery) unallocated.Add(up, down);
+                    if (recovery && (start < query.Start.UtcTicks || end > query.End.UtcTicks))
                     {
                         partial.Add(up, down);
                         continue;
                     }
-                    recovered.Add(up, down);
+                    if (recovery) recovered.Add(up, down);
                     totals.Add(up, down);
-                    var key = reader.GetString(2);
+                    estimate.Add(row.Display);
+                    if (!nodeDisplay.TryGetValue(key, out var summary)) nodeDisplay.Add(key, summary = new());
+                    summary.Add(row.Display);
+                    if (!comparisons.TryGetValue(name, out var comparison)) comparisons.Add(name, comparison = new());
+                    comparison.Add(up, down);
                     if (!nodes.TryGetValue(key, out var node))
                     {
-                        node = (reader.GetString(3), new Bytes(), new Bytes());
+                        node = (row.NodeName, new Bytes(), new Bytes());
                         nodes.Add(key, node);
                     }
                     node.Bytes.Add(up, down);
-                    node.Recovered.Add(up, down);
+                    if (recovery) node.Recovered.Add(up, down);
                     var label = BucketLabel(new DateTimeOffset(start, TimeSpan.Zero), zone, query.Bucket);
-                    if (label != BucketLabel(new DateTimeOffset(end - 1, TimeSpan.Zero), zone, query.Bucket))
+                    if (recovery && label != BucketLabel(new DateTimeOffset(end - 1, TimeSpan.Zero), zone, query.Bucket))
                     {
                         unbucketed.Add(up, down);
                         continue;
@@ -286,60 +284,45 @@ public sealed class Ledger : IDisposable
                         series.Add(label, bucket);
                     }
                     bucket.Bytes.Add(up, down);
-                    bucket.Recovered.Add(up, down);
+                    if (recovery) bucket.Recovered.Add(up, down);
                     if (start < bucket.FirstTick) series[label] = (start, bucket.Bytes, bucket.Recovered);
                 }
-            var count = checked((int)Scalar(transaction, """
-                SELECT (SELECT COUNT(*) FROM minutes WHERE start_ticks >= $start AND start_ticks < $end AND ($node IS NULL OR node_key=$node)
-                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY))
-                            AND ($nonzero=0 OR upload<>0 OR download<>0))
-                     + (SELECT COUNT(*) FROM unallocated WHERE start_ticks < $end AND end_ticks > $start AND ($node IS NULL OR node_key=$node)
-                            AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY))
-                            AND ($nonzero=0 OR upload<>0 OR download<>0));
-                """, [.. parameters, ("$nonzero", query.NonZeroRecords ? 1 : 0)]));
-            var gaps = checked((int)Scalar(transaction, """
-                SELECT COUNT(*) FROM gaps
-                WHERE ((start_ticks < $end AND end_ticks > $start)
-                    OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
-                    AND ($node IS NULL OR node_key=$node OR node_key IS NULL)
-                    AND ($name IS NULL OR node_key IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY));
-                """, parameters));
-            var partialCoverage = Scalar(transaction, """
-                SELECT EXISTS(SELECT 1 FROM gaps
-                WHERE reason='uncollected_outbounds'
-                    AND ((start_ticks < $end AND end_ticks > $start)
-                        OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
-                    AND ($node IS NULL OR node_key=$node)
-                    AND ($name IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY)));
-                """, parameters) != 0;
+            }
+            var gaps = 0;
+            var partialCoverage = false;
             var gapDetails = new List<GapInfo>();
             using (var command = Command(transaction, """
-                SELECT start_ticks,end_ticks,reason,is_open FROM gaps
+                SELECT start_ticks,end_ticks,reason,is_open,node_key FROM gaps
                 WHERE ((start_ticks < $end AND end_ticks > $start)
                     OR (start_ticks=end_ticks AND start_ticks >= $start AND start_ticks < $end))
                     AND ($node IS NULL OR node_key=$node OR node_key IS NULL)
                     AND ($name IS NULL OR node_key IS NULL OR node_key IN (SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY))
-                ORDER BY start_ticks DESC LIMIT 200;
+                ORDER BY start_ticks DESC;
                 """, parameters))
             using (var reader = command.ExecuteReader())
                 while (reader.Read())
-                    gapDetails.Add(new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2), reader.GetInt64(3) != 0));
-            var records = new List<TrafficRow>();
-            using (var command = RecordCommand(transaction, query, query.PageSize, checked((long)query.Page * query.PageSize), query.NonZeroRecords))
-            using (var reader = command.ExecuteReader())
-                while (reader.Read()) records.Add(ReadRecord(reader));
+                {
+                    if (query.NodeName is not null && !reader.IsDBNull(4) && !matchingKeys.Contains(reader.GetString(4))) continue;
+                    gaps++;
+                    partialCoverage |= reader.GetString(2) == "uncollected_outbounds";
+                    if (gapDetails.Count < 200)
+                        gapDetails.Add(new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2), reader.GetInt64(3) != 0));
+                }
             transaction.Commit();
             return new HistoryResult(Iso(query.Start.UtcTicks), Iso(query.End.UtcTicks), totals.UploadText, totals.DownloadText,
                 unallocated.UploadText, unallocated.DownloadText, gaps,
                 series.OrderBy(x => x.Value.FirstTick).Select(x => new SeriesPoint(x.Key, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText, x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)).ToArray(),
                 nodes.OrderByDescending(x => x.Value.Bytes.Upload + x.Value.Bytes.Download).ThenBy(x => x.Key, StringComparer.Ordinal)
-                    .Select(x => new NodeTotal(x.Key, x.Value.Name, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText, x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)).ToArray(),
+                    .Select(x => new NodeTotal(x.Key, x.Value.Name, x.Value.Bytes.UploadText, x.Value.Bytes.DownloadText,
+                        x.Value.Recovered.UploadText, x.Value.Recovered.DownloadText)
+                        { Display = nodeDisplay[x.Key].Result(TrafficDisplayStore.MergeKey("legacy_proxy", x.Key)) }).ToArray(),
                 records, count)
             {
                 RecoveredUpload = recovered.UploadText, RecoveredDownload = recovered.DownloadText,
                 PartialUpload = partial.UploadText, PartialDownload = partial.DownloadText,
                 UnbucketedUpload = unbucketed.UploadText, UnbucketedDownload = unbucketed.DownloadText,
-                Gaps = gapDetails, PartialCoverage = partialCoverage
+                Gaps = gapDetails, PartialCoverage = partialCoverage, Display = estimate.Result(), DisplayMetadataEnabled = SupportsDisplayMetadata,
+                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.UploadText, x.Value.DownloadText)).ToArray()
             };
         }
     }
@@ -353,13 +336,17 @@ public sealed class Ledger : IDisposable
         {
             ThrowIfDisposed();
             // The single SELECT fixes the snapshot; the gate keeps the collector off this connection.
-            using var command = RecordCommand(null, query, 100001, 0);
+            using var transaction = connection.BeginTransaction();
+            var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
+            using var command = RecordCommand(transaction, query with { NodeName = null }, -1, 0);
             using var reader = command.ExecuteReader();
             var rows = new List<TrafficRow>();
             while (reader.Read())
+            foreach (var row in ReadRecords(reader, metadata))
             {
+                if (query.NodeName is not null && (row.Display!.OriginalName ?? row.NodeName) != query.NodeName) continue;
                 if (rows.Count == 100000) throw new ArgumentException("导出最多 100000 条分钟记录，请缩小日期范围或选择单个节点。");
-                rows.Add(ReadRecord(reader));
+                rows.Add(row);
             }
             return rows;
         }
@@ -391,9 +378,16 @@ public sealed class Ledger : IDisposable
             ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey), ("$name", query.NodeName),
             ("$minute", Minute), ("$limit", limit), ("$offset", offset), ("$nonzero", nonZero ? 1 : 0));
 
-    private static TrafficRow ReadRecord(SqliteDataReader reader) =>
-        new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2),
-            reader.GetString(3), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6), reader.GetInt64(9) != 0);
+    private static IEnumerable<TrafficRow> ReadRecords(SqliteDataReader reader,
+        Dictionary<TrafficDisplayStore.RecordKey, List<TrafficDisplayStore.Part>>? metadata = null)
+    {
+        var start = reader.GetInt64(0); var end = reader.GetInt64(1); var key = reader.GetString(2);
+        var up = Text(reader.GetInt64(4)); var down = Text(reader.GetInt64(5));
+        foreach (var part in TrafficDisplayStore.Split(metadata?.GetValueOrDefault(new(key, reader.GetInt32(7), start, end)),
+            up, down, TrafficDisplayStore.MergeKey("legacy_proxy", key)))
+            yield return new(Iso(start), Iso(end), key, part.Name ?? reader.GetString(3), part.Upload, part.Download, reader.GetString(6), reader.GetInt64(9) != 0)
+                { Display = part.Display };
+    }
 
     public IReadOnlyList<NodeInfo> GetNodes()
     {
@@ -444,7 +438,7 @@ public sealed class Ledger : IDisposable
         }
     }
 
-    private void Allocate(SqliteTransaction transaction, long start, long end, string key, long upload, long download)
+    private void Allocate(SqliteTransaction transaction, long start, long end, string key, long upload, long download, string? captured)
     {
         var duration = end - start;
         var allocatedUpload = 0L;
@@ -459,6 +453,8 @@ public sealed class Ledger : IDisposable
             var cumulativeDownload = to == end ? download : (long)((BigInteger)download * (to - start) / duration);
             AddMinute(transaction, minute, key, checked(cumulativeUpload - allocatedUpload),
                 checked(cumulativeDownload - allocatedDownload), approximate);
+            display?.Add(transaction, key, minute, minute + Minute,
+                cumulativeUpload - allocatedUpload, cumulativeDownload - allocatedDownload, captured);
             allocatedUpload = cumulativeUpload;
             allocatedDownload = cumulativeDownload;
             from = to;

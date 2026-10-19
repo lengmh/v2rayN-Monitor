@@ -13,6 +13,8 @@ public sealed class ScopeLedger : IDisposable
     private const long ShortInterval = 10 * TimeSpan.TicksPerSecond;
     private readonly object gate = new();
     private readonly SqliteConnection connection;
+    private readonly TrafficDisplayStore? display;
+    public bool SupportsDisplayMetadata => display is not null;
     private bool disposed;
     internal static readonly string SchemaSql = ReadSchema("ScopeLedgerV2.sql");
     internal static readonly string ProbeUpgradeSql = ReadSchema("ScopeLedgerV3.sql");
@@ -37,13 +39,14 @@ public sealed class ScopeLedger : IDisposable
                 throw new InvalidOperationException("An explicitly initialized v2 or v3 history ledger is required.");
             SupportsProbes = version == 3;
             ValidateSchema(connection, null, version);
+            display = TrafficDisplayStore.Open(connection);
             Execute(null, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;");
         }
         catch { connection.Dispose(); throw; }
     }
 
     /// <summary>Reserves a new file; refuses every existing path, including an empty file. No migration API.</summary>
-    public static ScopeLedger CreateNew(string dbPath, bool includeProbes = false)
+    public static ScopeLedger CreateNew(string dbPath, bool includeProbes = false, bool includeDisplayMetadata = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
         if (dbPath == ":memory:") throw new ArgumentException("Use a new, explicit file path.", nameof(dbPath));
@@ -68,7 +71,8 @@ public sealed class ScopeLedger : IDisposable
                 throw new InvalidOperationException("New history initialization requires an empty ledger.");
             using var transaction = db.BeginTransaction();
             command.Transaction = transaction;
-            command.CommandText = SchemaSql + (includeProbes ? "\n" + ProbeUpgradeSql : "");
+            command.CommandText = SchemaSql + (includeProbes ? "\n" + ProbeUpgradeSql : "") +
+                (includeDisplayMetadata ? "\n" + TrafficDisplayStore.Schema : "");
             command.ExecuteNonQuery();
             ValidateSchema(db, transaction, includeProbes ? 3 : 2);
             transaction.Commit();
@@ -153,6 +157,7 @@ public sealed class ScopeLedger : IDisposable
                 known.TryGetValue(id, out var previous);
                 if (reading.UnavailableReason is not null)
                 {
+                    display?.Observe(transaction, "scope:" + id, null, at, previous?.At);
                     Gap(transaction, id, previous?.At ?? at, at, reading.UnavailableReason, true);
                     Execute(transaction, """
                         UPDATE scope_cursors SET interrupted=1,
@@ -163,6 +168,11 @@ public sealed class ScopeLedger : IDisposable
                     continue;
                 }
                 var status = "baseline";
+                var scope = reading.Scope;
+                var snapshot = TrafficDisplayStore.Capture(scope.Basis,
+                    scope.NodeId is null ? null : Key(batch.InstanceId, scope.NodeId),
+                    scope.CapturedName ?? (scope.NodeId is null ? null : new(scope.Name)));
+                var captured = display?.Observe(transaction, "scope:" + id, snapshot, at, previous?.At);
                 var continuous = previous is not null && previous.Valid && !reading.InvalidateContinuity &&
                     previous.Session == batch.SessionId && previous.Generation == batch.Generation;
                 var reset = previous is not null && (reading.Upload!.Value < previous.Upload || reading.Download!.Value < previous.Download);
@@ -184,7 +194,7 @@ public sealed class ScopeLedger : IDisposable
                         if (!previous.Interrupted) Gap(transaction, id, previous.At, at, "long_interval");
                         status = "unallocated";
                     }
-                    else { Allocate(transaction, previous.At, at, id, up, down); status = "recorded"; }
+                    else { Allocate(transaction, previous.At, at, id, up, down, captured); status = "recorded"; }
                 }
                 Execute(transaction, """
                     INSERT INTO scope_cursors(scope_id,session_id,generation,at_ticks,upload,download,interrupted,continuity_valid)
@@ -265,6 +275,22 @@ public sealed class ScopeLedger : IDisposable
         }
     }
 
+    public IReadOnlyList<NodeInfo> GetDisplayNodes(string basis)
+    {
+        lock (gate)
+        {
+            var directory = GetScopes(basis);
+            return directory.GroupBy(x => x.Scope.NodeId is null ? "scope:" + x.Id :
+                    "merge:" + TrafficDisplayStore.MergeKey(x.Scope.Basis, Key(x.InstanceId, x.Scope.NodeId)), StringComparer.Ordinal)
+                .Select(group =>
+                {
+                    var first = group.First();
+                    var name = display?.CurrentName("scope:" + first.Id)?.OriginalName ?? first.Scope.Name;
+                    return new NodeInfo(group.Count() > 1 ? group.Key : "scope:" + first.Id, name);
+                }).ToArray();
+        }
+    }
+
     public ScopeHistory Query(ScopeQuery query)
     {
         ArgumentNullException.ThrowIfNull(query);
@@ -276,7 +302,7 @@ public sealed class ScopeLedger : IDisposable
         var zone = TimeZoneInfo.FindSystemTimeZoneById(query.TimeZoneId);
         var parameters = new (string, object?)[]
         {
-            ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", query.ScopeName), ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks)
+            ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", null), ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks)
         };
         lock (gate)
         {
@@ -285,17 +311,47 @@ public sealed class ScopeLedger : IDisposable
             var total = new Bytes(); var recovered = new Bytes(); var partial = new Bytes(); var unbucketed = new Bytes();
             var series = new Dictionary<string, (long At, Bytes Total, Bytes Recovered)>(StringComparer.Ordinal);
             var scopes = new Dictionary<long, (string Name, Bytes Total, Bytes Recovered)>();
+            var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
+            var estimate = new TrafficDisplayStore.Summary();
+            var scopeDisplay = new Dictionary<long, TrafficDisplayStore.Summary>();
+            var scopeMerge = new Dictionary<long, string?>();
+            var comparisons = new Dictionary<string, Bytes>(StringComparer.Ordinal);
+            var rows = new List<ScopeTrafficRow>();
+            long count = 0;
+            var matchingScopes = new HashSet<long>();
+            if (query.ScopeName is not null)
+            {
+                using var names = Command(transaction, "SELECT scope_id FROM measurement_scopes WHERE name=$name COLLATE BINARY;", ("$name", query.ScopeName));
+                using var named = names.ExecuteReader();
+                while (named.Read()) matchingScopes.Add(named.GetInt64(0));
+            }
             using (var command = Command(transaction, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id;", parameters))
             using (var reader = command.ExecuteReader())
                 while (reader.Read())
+                foreach (var row in ReadDisplayRecords(reader, metadata))
                 {
+                    if (query.ScopeIds is not null && !query.ScopeIds.Contains(row.ScopeId)) continue;
+                    var comparisonName = row.Display!.OriginalName ?? row.Name;
+                    if (query.ScopeName is not null && comparisonName != query.ScopeName) continue;
+                    matchingScopes.Add(row.ScopeId);
                     var start = reader.GetInt64(0); var end = reader.GetInt64(1); var id = reader.GetInt64(2);
-                    var up = reader.GetInt64(4); var down = reader.GetInt64(5); var recovery = reader.GetInt64(7) == 1;
+                    var up = long.Parse(row.Upload, CultureInfo.InvariantCulture); var down = long.Parse(row.Download, CultureInfo.InvariantCulture);
+                    var recovery = reader.GetInt64(7) == 1;
+                    if (!query.NonZeroRecords || up != 0 || down != 0)
+                    {
+                        if (count >= (long)query.Page * query.PageSize && rows.Count < query.PageSize) rows.Add(row);
+                        count++;
+                    }
                     if (recovery && (start < query.Start.UtcTicks || end > query.End.UtcTicks)) { partial.Add(up, down); continue; }
                     total.Add(up, down);
+                    estimate.Add(row.Display);
+                    if (!scopeDisplay.TryGetValue(id, out var summary)) scopeDisplay.Add(id, summary = new());
+                    summary.Add(row.Display); scopeMerge[id] = row.Display.MergeKey;
+                    if (!comparisons.TryGetValue(comparisonName, out var comparison)) comparisons.Add(comparisonName, comparison = new());
+                    comparison.Add(up, down);
                     if (recovery) recovered.Add(up, down);
                     if (!scopes.TryGetValue(id, out var scope))
-                        scopes.Add(id, scope = (reader.GetString(3), new Bytes(), new Bytes()));
+                        scopes.Add(id, scope = (row.Name, new Bytes(), new Bytes()));
                     scope.Total.Add(up, down);
                     if (recovery) scope.Recovered.Add(up, down);
                     var label = Ledger.BucketLabel(new(start, TimeSpan.Zero), zone, query.Bucket);
@@ -307,19 +363,6 @@ public sealed class ScopeLedger : IDisposable
                     if (recovery) bucket.Recovered.Add(up, down);
                     if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered);
                 }
-            var detailsSql = query.NonZeroRecords
-                ? "SELECT * FROM (" + RecordsSql + ") WHERE upload<>0 OR download<>0"
-                : RecordsSql;
-            var count = Scalar(transaction, "SELECT COUNT(*) FROM (" + detailsSql + ");", parameters);
-            var rows = new List<ScopeTrafficRow>();
-            using (var command = Command(transaction,
-                detailsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id LIMIT $limit OFFSET $offset;",
-                [.. parameters, ("$limit", query.PageSize), ("$offset", checked((long)query.Page * query.PageSize))]))
-            using (var reader = command.ExecuteReader())
-                while (reader.Read())
-                    rows.Add(new(reader.GetString(10), reader.GetInt64(2), reader.GetString(3), Iso(reader.GetInt64(0)),
-                        Iso(reader.GetInt64(1)), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6),
-                        reader.GetInt64(9) != 0));
             // Gaps are not paged with traffic. NULL legacy gaps remain disclosed as unassigned history.
             var gaps = new List<ScopeGap>();
             using (var command = Command(transaction, """
@@ -333,10 +376,23 @@ public sealed class ScopeLedger : IDisposable
                 """, parameters))
             using (var reader = command.ExecuteReader())
                 while (reader.Read())
-                    gaps.Add(new(reader.IsDBNull(0) ? null : reader.GetInt64(0), reader.GetString(1),
+                    if ((query.ScopeIds is null || reader.IsDBNull(0) || query.ScopeIds.Contains(reader.GetInt64(0))) &&
+                        (query.ScopeName is null || reader.IsDBNull(0) || matchingScopes.Contains(reader.GetInt64(0))))
+                        gaps.Add(new(reader.IsDBNull(0) ? null : reader.GetInt64(0), reader.GetString(1),
                         Iso(reader.GetInt64(2)), Iso(reader.GetInt64(3)), reader.GetString(4), reader.GetInt64(5) != 0));
             string? earliest = null;
-            if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal))
+            if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal) && query.ScopeName is not null)
+            {
+                var allMetadata = display?.Read(transaction, 0, DateTimeOffset.MaxValue.UtcTicks);
+                using var command = Command(transaction, RecordsSql + " ORDER BY start_ticks,scope_id,kind,row_id;",
+                    ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", null), ("$start", 0), ("$end", DateTimeOffset.MaxValue.UtcTicks));
+                using var reader = command.ExecuteReader();
+                while (earliest is null && reader.Read())
+                    foreach (var row in ReadDisplayRecords(reader, allMetadata))
+                        if ((query.ScopeIds is null || query.ScopeIds.Contains(row.ScopeId)) &&
+                            (row.Display!.OriginalName ?? row.Name) == query.ScopeName) { earliest = row.Start; break; }
+            }
+            else if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal))
             {
                 using var command = Command(transaction, """
                     SELECT MIN(r.start_ticks) FROM (
@@ -344,8 +400,9 @@ public sealed class ScopeLedger : IDisposable
                         UNION ALL SELECT scope_id,start_ticks FROM scope_unallocated
                     ) r JOIN measurement_scopes s ON s.scope_id=r.scope_id
                     WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id)
-                        AND ($name IS NULL OR s.name=$name COLLATE BINARY);
-                    """, ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", query.ScopeName));
+                        AND ($ids IS NULL OR s.scope_id IN (SELECT value FROM json_each($ids)));
+                    """, ("$basis", query.Basis), ("$id", query.ScopeId),
+                    ("$ids", query.ScopeIds is null ? null : JsonSerializer.Serialize(query.ScopeIds)));
                 if (command.ExecuteScalar() is long ticks) earliest = Iso(ticks);
             }
             transaction.Commit();
@@ -354,8 +411,12 @@ public sealed class ScopeLedger : IDisposable
                 series.OrderBy(x => x.Value.At).Select(x => new SeriesPoint(x.Key, x.Value.Total.Up, x.Value.Total.Down,
                     x.Value.Recovered.Up, x.Value.Recovered.Down)).ToArray(),
                 scopes.OrderBy(x => x.Key).Select(x => new ScopeTotal(x.Key, x.Value.Name, x.Value.Total.Up,
-                    x.Value.Total.Down, x.Value.Recovered.Up, x.Value.Recovered.Down)).ToArray(), rows, count, gaps)
-            { EarliestRecord = earliest };
+                    x.Value.Total.Down, x.Value.Recovered.Up, x.Value.Recovered.Down)
+                    { Display = scopeDisplay[x.Key].Result(scopeMerge[x.Key]) }).ToArray(), rows, count, gaps)
+            {
+                EarliestRecord = earliest, Display = estimate.Result(), DisplayMetadataEnabled = SupportsDisplayMetadata,
+                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.Up, x.Value.Down)).ToArray()
+            };
         }
     }
 
@@ -366,7 +427,7 @@ public sealed class ScopeLedger : IDisposable
             0 AS kind,0 AS row_id,
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=m.scope_id AND g.reason='uncollected_outbounds'
                 AND g.start_ticks < m.start_ticks+600000000 AND g.end_ticks > m.start_ticks) AS partial_coverage,
-            s.basis AS basis
+            s.basis AS basis,s.node_key AS node_key
         FROM scope_minutes m JOIN measurement_scopes s ON s.scope_id=m.scope_id
         WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
             AND m.start_ticks >= $start AND m.start_ticks < $end
@@ -375,7 +436,7 @@ public sealed class ScopeLedger : IDisposable
             CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
             1,u.id,
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=u.scope_id AND g.reason='uncollected_outbounds'
-                AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks), s.basis
+                AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks), s.basis,s.node_key
         FROM scope_unallocated u JOIN measurement_scopes s ON s.scope_id=u.scope_id
         WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
             AND u.start_ticks < $end AND u.end_ticks > $start
@@ -389,19 +450,35 @@ public sealed class ScopeLedger : IDisposable
         lock (gate)
         {
             ThrowIfDisposed();
-            using var command = Command(null, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id LIMIT 100001;",
-                ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", query.ScopeName),
+            using var transaction = connection.BeginTransaction();
+            var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
+            using var command = Command(transaction, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id;",
+                ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", null),
                 ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks));
             using var reader = command.ExecuteReader();
             var rows = new List<ScopeTrafficRow>();
             while (reader.Read())
+            foreach (var row in ReadDisplayRecords(reader, metadata))
             {
+                if (query.ScopeIds is not null && !query.ScopeIds.Contains(row.ScopeId)) continue;
+                if (query.ScopeName is not null && (row.Display!.OriginalName ?? row.Name) != query.ScopeName) continue;
                 if (rows.Count == 100000) throw new ArgumentException("导出最多 100000 条记录，请缩小范围。");
-                rows.Add(new(reader.GetString(10), reader.GetInt64(2), reader.GetString(3), Iso(reader.GetInt64(0)),
-                    Iso(reader.GetInt64(1)), Text(reader.GetInt64(4)), Text(reader.GetInt64(5)), reader.GetString(6), reader.GetInt64(9) != 0));
+                rows.Add(row);
             }
             return rows;
         }
+    }
+
+    private static IEnumerable<ScopeTrafficRow> ReadDisplayRecords(SqliteDataReader reader,
+        Dictionary<TrafficDisplayStore.RecordKey, List<TrafficDisplayStore.Part>>? metadata)
+    {
+        var id = reader.GetInt64(2); var start = reader.GetInt64(0); var end = reader.GetInt64(1);
+        var up = Text(reader.GetInt64(4)); var down = Text(reader.GetInt64(5)); var basis = reader.GetString(10);
+        var parts = metadata?.GetValueOrDefault(new("scope:" + id, reader.GetInt32(7), start, end));
+        var mergeKey = reader.IsDBNull(11) ? null : TrafficDisplayStore.MergeKey(basis, reader.GetString(11));
+        foreach (var part in TrafficDisplayStore.Split(parts, up, down, mergeKey))
+            yield return new(basis, id, part.Name ?? reader.GetString(3), Iso(start), Iso(end), part.Upload, part.Download, reader.GetString(6), reader.GetInt64(9) != 0)
+                { Display = part.Display };
     }
 
     private long Register(SqliteTransaction transaction, string instance, MeasurementScope scope)
@@ -434,7 +511,7 @@ public sealed class ScopeLedger : IDisposable
         return reader.GetInt64(0);
     }
 
-    private void Allocate(SqliteTransaction transaction, long start, long end, long id, long upload, long download)
+    private void Allocate(SqliteTransaction transaction, long start, long end, long id, long upload, long download, string? captured)
     {
         long allocatedUp = 0, allocatedDown = 0;
         var approximate = MinuteStart(start) != MinuteStart(end - 1);
@@ -457,6 +534,7 @@ public sealed class ScopeLedger : IDisposable
                     approximate=MAX(scope_minutes.approximate,excluded.approximate);
                 """, ("$at", minute), ("$id", id), ("$up", checked(oldUp + sliceUp)),
                 ("$down", checked(oldDown + sliceDown)), ("$approximate", approximate ? 1 : 0));
+            display?.Add(transaction, "scope:" + id, minute, minute + Minute, sliceUp, sliceDown, captured);
             allocatedUp = cumulativeUp; allocatedDown = cumulativeDown; from = to;
         }
     }

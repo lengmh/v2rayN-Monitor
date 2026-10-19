@@ -2,12 +2,17 @@ export interface Settings { v2rayNPath: string; timeZoneId: string; demo: boolea
 export interface ProxyCollectionScope { basis: 'routed_proxy' | 'xray_outbound_proxy'; isPartial: boolean; uncollectedOutbounds: number; uncollectedGroups: number; description: string }
 export interface CollectorStatus { state: string; message: string; currentNode: string | null; lastSample: string | null; uploadPerSecond: string | null; downloadPerSecond: string | null; demo: boolean; scope?: ProxyCollectionScope | null; collectionBasis?: string; probes?: { historyEnabled: boolean; state: string; message: string } | null }
 export interface NodeInfo { key: string; name: string }
-export interface TrafficRow { start: string; end: string; nodeKey: string; nodeName: string; upload: string; download: string; quality: string; partialCoverage?: boolean }
+export interface TrafficDisplay { originalName: string | null; groups: string[]; mergeKey: string | null; rate: string | null; rateStatus: string; estimatedBilledBytes: string | null; estimateCoveredBytes: string; estimateUnknownBytes: string }
+export interface LocalNode extends NodeInfo { upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string; display?: TrafficDisplay | null }
+export interface TrafficRow { start: string; end: string; nodeKey: string; nodeName: string; upload: string; download: string; quality: string; partialCoverage?: boolean; display?: TrafficDisplay | null }
 export interface HistoryResult {
   basis?: string;
   start: string; end: string; upload: string; download: string; unallocatedUpload: string; unallocatedDownload: string;
   gapCount: number; series: { label: string; upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string }[];
-  nodes: { key: string; name: string; upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string }[];
+  nodes: LocalNode[];
+  comparisonNodes?: LocalNode[] | null;
+  display?: TrafficDisplay | null;
+  displayMetadataEnabled?: boolean;
   records: TrafficRow[]; recordCount: number;
   recoveredUpload?: string; recoveredDownload?: string; partialUpload?: string; partialDownload?: string;
   unbucketedUpload?: string; unbucketedDownload?: string;

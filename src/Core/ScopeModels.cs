@@ -2,7 +2,10 @@ namespace V2rayNMonitor.Core;
 
 /// <summary>Identity comes from verified discovery, never from a display name or an RPC counter name.</summary>
 public sealed record MeasurementScope(string Basis, string IdentityKind, string IdentityValue, string Name,
-    string? NodeId = null, string? OutboundTag = null);
+    string? NodeId = null, string? OutboundTag = null)
+{
+    public CapturedNodeName? CapturedName { get; init; }
+}
 
 /// <summary>Supply either a complete counter pair or a diagnostic category, not guessed zeroes.</summary>
 public sealed record ScopeReading(MeasurementScope Scope, long? Upload = null, long? Download = null,
@@ -19,11 +22,18 @@ public sealed record ScopeQuery(string Basis, DateTimeOffset Start, DateTimeOffs
 {
     public string? ScopeName { get; init; }
     public bool NonZeroRecords { get; init; }
+    public IReadOnlyList<long>? ScopeIds { get; init; }
 }
 public sealed record ScopeTrafficRow(string Basis, long ScopeId, string Name, string Start, string End,
-    string Upload, string Download, string Quality, bool PartialCoverage);
+    string Upload, string Download, string Quality, bool PartialCoverage)
+{
+    public TrafficDisplay? Display { get; init; }
+}
 public sealed record ScopeTotal(long ScopeId, string Name, string Upload, string Download,
-    string RecoveredUpload, string RecoveredDownload);
+    string RecoveredUpload, string RecoveredDownload)
+{
+    public TrafficDisplay? Display { get; init; }
+}
 public sealed record ScopeGap(long? ScopeId, string Origin, string Start, string End, string Reason, bool IsOpen);
 public sealed record ScopeHistory(string Basis, string Upload, string Download,
     string RecoveredUpload, string RecoveredDownload, string PartialUpload, string PartialDownload,
@@ -34,4 +44,7 @@ public sealed record ScopeHistory(string Basis, string Upload, string Download,
     // Earliest saved interval for this basis/filter, independent of the requested date range.
     // Minute rows are rounded to the minute; this is not the exact first sampling baseline.
     public string? EarliestRecord { get; init; }
+    public TrafficDisplay? Display { get; init; }
+    public IReadOnlyList<NodeTotal> ComparisonNodes { get; init; } = [];
+    public bool DisplayMetadataEnabled { get; init; }
 }
