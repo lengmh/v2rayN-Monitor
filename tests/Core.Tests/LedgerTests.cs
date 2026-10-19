@@ -1351,6 +1351,8 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Theory]
+    [InlineData(1, "CREATE INDEX unexpected_display ON ui_display_records(start_ticks);")]
+    [InlineData(2, "CREATE INDEX unexpected_display ON ui_display_records(start_ticks);")]
     [InlineData(1, "DROP TABLE ui_display_records;")]
     [InlineData(2, "DROP TABLE ui_display_records;")]
     [InlineData(1, "ALTER TABLE ui_display_cursors ADD COLUMN unexpected TEXT;")]
@@ -1488,6 +1490,7 @@ public sealed class LedgerTests : IDisposable
     [InlineData("INSERT INTO gaps VALUES(999,0,1,'orphan','synthetic',0);")]
     [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
     [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    [InlineData("CREATE INDEX unexpected_history ON minutes(upload);")]
     public void ScopeMigrationPreflightRejectsUnsupportedHistoryBeforeCreatingBackup(string mutation)
     {
         using (var old = new Ledger(Database)) old.Accept(Sample(0, 10));
@@ -1773,6 +1776,7 @@ public sealed class LedgerTests : IDisposable
     [Theory]
     [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
     [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    [InlineData("CREATE INDEX unexpected_history ON minutes(upload);")]
     [InlineData("DROP INDEX scope_gap_open;")]
     public void ProbeMigrationRejectsUnsupportedV2BeforeCreatingBackup(string mutation)
     {
