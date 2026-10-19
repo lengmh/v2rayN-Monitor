@@ -40,10 +40,12 @@ public sealed class ApiTests : IAsyncLifetime
         var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
         Assert.True(history.GetProperty("displayMetadataEnabled").GetBoolean());
         Assert.Equal("25", history.GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("25", history.GetProperty("series")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
         Assert.Equal("10", history.GetProperty("display").GetProperty("estimateUnknownBytes").GetString());
         var old = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeName=Original%200.5x");
         Assert.Equal("10", old.GetProperty("upload").GetString());
         Assert.Equal("5", old.GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("5", old.GetProperty("comparisonNodes")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
         var csv = await client.GetStringAsync("/api/export" + query + "&nodeName=Original%200.5x");
         Assert.Contains("original_name,group_labels,rate,estimated_billed_bytes,estimate_covered_bytes,estimate_unknown_bytes", csv);
         Assert.Contains("\"Original 0.5x\",\"\",\"0.5\",\"5\",\"10\",\"0\"", csv);
@@ -72,7 +74,10 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.DoesNotContain("private-synthetic-index", history.GetRawText());
         var named = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeName=Original");
         Assert.Equal("11", named.GetProperty("upload").GetString());
-        Assert.Equal("5.5", named.GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("11", named.GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("1", named.GetProperty("display").GetProperty("rate").GetString());
+        Assert.Equal("11", named.GetProperty("comparisonNodes")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("11", named.GetProperty("series")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
         var grouped = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeKey=" + Uri.EscapeDataString("merge:" + merge));
         Assert.Equal("11", grouped.GetProperty("upload").GetString());
         var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
