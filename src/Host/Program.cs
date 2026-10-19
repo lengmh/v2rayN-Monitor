@@ -23,8 +23,12 @@ internal static class Program
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
         using var mutex = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created);
         if (!created) { MessageBox.Show("v2rayN Monitor 已在此数据目录运行，请从系统托盘打开。", "v2rayN Monitor"); return; }
-        try { Application.Run(new TrayContext(root, demo)); }
-        catch (Exception) { MessageBox.Show("启动失败。请确认数据目录可写、磁盘空间足够且应用文件完整。历史数据库不会被自动删除。", "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        var probeMode = args.Contains("--probe-ledger", StringComparer.OrdinalIgnoreCase);
+        var scopeMode = probeMode || args.Contains("--scope-ledger", StringComparer.OrdinalIgnoreCase);
+        try { Application.Run(new TrayContext(root, demo, scopeMode, probeMode)); }
+        catch (Exception) { MessageBox.Show(scopeMode
+            ? "多范围启动失败。--scope-ledger 使用 v2，--probe-ledger 使用 v3；请选择全新目录或已受控迁移的对应账本，不会自动升级。请检查目录权限、磁盘空间及应用文件。原有历史保留。"
+            : "启动失败。请确认数据目录可写、磁盘空间足够且应用文件完整。历史数据库不会被自动删除。", "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { mutex.ReleaseMutex(); }
     }
 }
@@ -37,24 +41,25 @@ internal sealed class TrayContext : ApplicationContext
     private readonly CancellationTokenSource stop = new();
     private readonly Task collectTask;
     private readonly string directory;
-    public TrayContext(string dataDir, bool demo)
+    public TrayContext(string dataDir, bool demo, bool scopeMode = false, bool probeMode = false)
     {
         directory = dataDir;
-        server = MonitorServer.StartAsync(dataDir, Path.Combine(AppContext.BaseDirectory, "wwwroot"), demo).GetAwaiter().GetResult();
+        server = MonitorServer.StartAsync(dataDir, Path.Combine(AppContext.BaseDirectory, "wwwroot"), demo,
+            useScopeLedger: scopeMode, useProbeLedger: probeMode).GetAwaiter().GetResult();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开统计页面", null, (_, _) => Open());
         menu.Items.Add("选择 v2rayN 数据目录…", null, (_, _) => ChooseDirectory());
         menu.Items.Add("打开 Monitor 数据目录", null, (_, _) => Process.Start(new ProcessStartInfo(directory) { UseShellExecute = true }));
         if (!demo)
         {
-            var startup = new ToolStripMenuItem("登录 Windows 时启动") { Checked = IsStartupEnabled() };
+            var startup = new ToolStripMenuItem("登录 Windows 时启动") { Checked = IsStartupEnabled(scopeMode, probeMode) };
             startup.Click += (_, _) =>
             {
                 try
                 {
                     using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
                     if (startup.Checked) key.DeleteValue("V2rayNMonitor", false);
-                    else key.SetValue("V2rayNMonitor", $"\"{Environment.ProcessPath}\" --background --data-dir \"{directory}\"");
+                    else key.SetValue("V2rayNMonitor", MonitorStartup.Command(Environment.ProcessPath!, directory, scopeMode, probeMode));
                     startup.Checked = !startup.Checked;
                 }
                 catch (Exception) { MessageBox.Show("无法更新开机启动设置，请检查当前用户权限。", "v2rayN Monitor"); }
@@ -77,10 +82,11 @@ internal sealed class TrayContext : ApplicationContext
         using var icon = new Icon(stream, SystemInformation.SmallIconSize);
         return (Icon)icon.Clone();
     }
-    private bool IsStartupEnabled()
+    private bool IsStartupEnabled(bool scopeMode, bool probeMode)
     {
         using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
-        return key?.GetValue("V2rayNMonitor") is string value && value.Contains(Environment.ProcessPath ?? "__invalid__", StringComparison.OrdinalIgnoreCase);
+        return key?.GetValue("V2rayNMonitor") is string value &&
+            string.Equals(value, MonitorStartup.Command(Environment.ProcessPath ?? "__invalid__", directory, scopeMode, probeMode), StringComparison.OrdinalIgnoreCase);
     }
     private void Open()
     {
@@ -98,6 +104,11 @@ internal sealed class TrayContext : ApplicationContext
     private async Task CollectAsync()
     {
         using var discovery = new WindowsDiscovery();
+        if (server.Scopes is { } scopes)
+        {
+            await CollectScopesAsync(discovery, scopes);
+            return;
+        }
         CounterSample? previous = null;
         while (!stop.IsCancellationRequested)
         {
@@ -145,6 +156,50 @@ internal sealed class TrayContext : ApplicationContext
                     discovery.AcknowledgePersistence();
                 }
                 catch (Exception) { /* Failed writes do not advance the durable cursor or acknowledge the guard. */ }
+            }
+            try { await Task.Delay(TimeSpan.FromSeconds(1), stop.Token); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+    private async Task CollectScopesAsync(WindowsDiscovery discovery, ScopeLedger ledger)
+    {
+        var basis = "actual_member";
+        while (!stop.IsCancellationRequested)
+        {
+            try
+            {
+                var reading = await discovery.ReadScopesAsync(server.Settings.V2rayNPath, stop.Token, ledger.SupportsProbes);
+                if (reading.Batch is { } batch)
+                {
+                    var result = ScopeCollector.Commit(ledger, batch);
+                    discovery.AcknowledgePersistence();
+                    var unavailable = result.Scopes.Values.Count(x => x == "unavailable");
+                    basis = batch.Readings.Any(x => x.Scope.Basis == "actual_member") ? "actual_member" : "legacy_proxy";
+                    var baseline = result.Scopes.Values.All(x => x is "baseline" or "reset");
+                    server.SetStatus(new(unavailable != 0 ? "partial" : baseline ? "baseline" : "collecting",
+                        reading.Message + (unavailable == 0 ? "" : $" {unavailable} 个范围计数未知，未补零。"),
+                         reading.CurrentNode, batch.At, Scope: reading.Scope, CollectionBasis: basis, Probes: reading.Probes));
+                }
+                else
+                {
+                    ledger.RecordGap(DateTimeOffset.UtcNow, reading.State, reading.InvalidateContinuity);
+                    discovery.AcknowledgePersistence();
+                    server.SetStatus(new(reading.State, reading.Message, reading.CurrentNode,
+                        CollectionBasis: basis, Probes: ledger.SupportsProbes
+                            ? new(true, "unavailable", reading.Message) : null));
+                }
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+            catch (Exception)
+            {
+                try
+                {
+                    ledger.RecordGap(DateTimeOffset.UtcNow, "collector_error", discovery.RequiresBaseline);
+                    discovery.AcknowledgePersistence();
+                }
+                catch (Exception) { /* Failed persistence must not acknowledge the generation guard. */ }
+                server.SetStatus(new("error", "多范围采集或原子写入失败，已有历史保留。", CollectionBasis: basis,
+                    Probes: ledger.SupportsProbes ? new(true, "unavailable", "探测采集或写入失败，已有历史保留。") : null));
             }
             try { await Task.Delay(TimeSpan.FromSeconds(1), stop.Token); }
             catch (OperationCanceledException) { break; }

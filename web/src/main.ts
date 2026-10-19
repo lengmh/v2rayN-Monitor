@@ -48,6 +48,8 @@ let comparisonBucketCount = 0;
 let latestStatus: CollectorStatus | null = null;
 let lastBatchList: ImportBatch[] = [];
 let activeView = 'overview';
+let probeBasis = 'probe_urltest_member';
+const probeView = (): boolean => activeView === 'probes';
 let importRequest: { source: string; timeZoneId: string; csv: string } | null = null;
 let importRevision = 0;
 
@@ -72,10 +74,12 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 const post = <T>(path: string, body: unknown): Promise<T> => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
 const errorText = (error: unknown): string => error instanceof Error ? error.message : '操作失败，请检查本机采集器。';
-function query(localComparison = false): string {
+function query(localComparison = false, nonZeroRecords = false): string {
   const params = new URLSearchParams({ start: range.start, end: range.end, timeZoneId: settings.timeZoneId, bucket, page: String(page), pageSize: String(pageSize) });
   if (nodeKey) params.set(localComparison ? 'nodeName' : 'nodeKey', nodeKey);
   if (statisticsSource && !localComparison) params.set('source', statisticsSource);
+  if (nonZeroRecords) params.set('nonZeroRecords', 'true');
+  if (probeView()) params.set('basis', probeBasis);
   return params.toString();
 }
 function updateRange(): void {
@@ -103,15 +107,18 @@ function selectPeriod(next: Period): void {
 function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
   const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
-  const state = status.scope?.isPartial ? '部分采集' : states[status.state.toLowerCase()] || status.state;
+  const state = status.scope?.isPartial || status.state === 'partial' ? '部分采集' : states[status.state.toLowerCase()] || status.state;
   const message = [status.message || '等待有效采样。', status.scope?.description].filter(Boolean).join(' ');
   put('collector-state', state);
   put('collector-message', message);
   put('current-node', status.currentNode || '未确定'); el('current-node').title = status.currentNode || '未确定';
   put('live-upload', `↑ ${rate(status.uploadPerSecond, unit)}`); put('live-download', `↓ ${rate(status.downloadPerSecond, unit)}`);
   put('settings-collector-status', `当前状态：${state}。${message} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
-  el('status-dot').className = `status-dot ${status.scope?.isPartial ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
+  el('status-dot').className = `status-dot ${status.scope?.isPartial || status.state === 'partial' ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
   show('demo-notice', status.demo); show('demo-controls', status.demo);
+  const probeStates: Record<string, string> = { disabled: '探测历史未启用', waiting: '等待探测采样', unavailable: '探测计数暂不可用', unsupported: '当前核心未支持探测计量', partial: '探测部分采集', available: '探测计数可用' };
+  put('probe-state', probeStates[status.probes?.state ?? 'disabled'] ?? '探测状态未知');
+  put('probe-message', status.probes?.message ?? '此实例未提供探测能力信息；探测量保持未知。');
 }
 function renderNodes(nodes: NodeInfo[]): void {
   const select = el<HTMLSelectElement>('node-filter');
@@ -165,6 +172,12 @@ function renderHistory(history: HistoryResult): void {
   latestHistory = history;
   latestProvider = null;
   statisticLabels();
+  const attribution = el('attribution-note');
+  attribution.textContent = probeView()
+    ? '探测与业务分别记账。成员和总量分别查看，不重复相加。'
+    : history.basis === 'local_proxy'
+    ? '包含当前账本中的 sing-box 成员和 Xray／旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。'
+    : '按已核实的节点或出站身份分账，名称和策略组前缀仅用于展示。';
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
@@ -176,9 +189,19 @@ function renderHistory(history: HistoryResult): void {
   const recovered = bytes(history.recoveredUpload ?? '0') + bytes(history.recoveredDownload ?? '0');
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
-  const quality = ['已知总量不等于完整使用量；缺失记录不等于零流量。'];
+  const quality = ['首次采样建立基线，接入前累计不回填；缺失记录不等于零流量。'];
+  if (probeView()) {
+    quality.push('当前仅为所选 URLTest 探测维度，不与业务流量或服务商计费相加。');
+    put('probe-coverage', history.earliestRecord
+      ? `最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}（按分钟显示，不是精确的首次基线）。`
+      : '所选维度及节点尚无已保存的探测区间；首次有效采样只建立基线，不回填此前累计。');
+  }
+  if (history.basis === 'actual_member')
+    quality.push('当前为实际成员维度，直连和汇总分别保存。');
+  if ((history.gaps ?? []).some(gap => gap.origin === 'legacy' && gap.isOpen))
+    quality.push('本范围仍有历史遗留开放缺口。');
   if (history.partialCoverage || (history.gaps ?? []).some(gap => gap.reason === 'uncollected_outbounds') || history.records.some(record => record.partialCoverage))
-    quality.push('本范围包含其他出站未采集的区间；组和其他代理的流量未知，合计仅包含已核实的计量范围。');
+    quality.push('本范围包含其他出站未采集的区间；未覆盖范围的流量未知，合计仅包含已核实的计量范围。');
   if (recovered > 0n) quality.push(`合计及节点排行已包含恢复量 ${formatBytes(recovered, unit)}（${exactBytes(recovered)}）。`);
   if (unbucketed > 0n) quality.push(`其中 ${formatBytes(unbucketed, unit)} 跨越多个时间桶，已计入合计，尚未分配到当前趋势图。`);
   if (partial > 0n) quality.push(`另有部分重叠的恢复区间，共 ${formatBytes(partial, unit)}（${exactBytes(partial)}）；本范围内用量未知，未计入合计，不能跨日期相加。`);
@@ -189,7 +212,7 @@ function renderHistory(history: HistoryResult): void {
   const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
   for (const gap of history.gaps ?? []) details.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
   show('gap-details', history.gapCount > 0);
-  put('gap-summary', `查看历史间断（${history.gapCount} 段，最多展示最近 200 段）`);
+  put('gap-summary', `查看历史间断与覆盖缺口（${history.gapCount} 段）`);
   put('trend-subtitle', `${({ hour: '小时', day: '日', week: '周', month: '月', year: '年' } as const)[bucket]}分桶 · ${settings.timeZoneId}`);
   renderChart(history);
   const ranking = el('ranking'); ranking.replaceChildren();
@@ -211,7 +234,7 @@ function renderHistory(history: HistoryResult): void {
   });
   const records = el('records'); records.replaceChildren();
   const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
-  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有采集记录。请检查采集器状态或选择其他日期。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
+  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有非零采集明细。零字节记录已隐藏，采集缺口仍单独显示。', 'empty-state'); cell.colSpan = 5; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr');
     const time = element('td', timestamp(record.start, settings.timeZoneId)); time.title = `${record.start} → ${record.end}`;
@@ -225,17 +248,22 @@ function renderHistory(history: HistoryResult): void {
     qualityCell.append(label);
     row.append(time, name, download, upload, qualityCell); records.append(row);
   }
-  pagination(history.recordCount);
+  pagination(history.recordCount, true);
   el('summary').setAttribute('aria-busy', 'false');
 }
-function pagination(count: number): void {
+function pagination(count: number, nonZeroRecords = false): void {
   const pages = Math.max(1, Math.ceil(count / pageSize));
-  put('record-count', `${count.toLocaleString('zh-CN')} 条记录`); put('page-label', `第 ${page + 1} / ${pages} 页 · 每页 ${pageSize} 条`);
+  put('record-count', `${count.toLocaleString('zh-CN')} 条${nonZeroRecords ? '非零' : ''}记录`); put('page-label', `第 ${page + 1} / ${pages} 页 · 每页 ${pageSize} 条`);
   el<HTMLButtonElement>('previous-page').disabled = page === 0;
   el<HTMLButtonElement>('next-page').disabled = (page + 1) * pageSize >= count;
 }
 function statisticLabels(): void {
   const provider = statisticsSource !== '';
+  const probe = probeView();
+  show('source-controls', !probe); show('probe-controls', probe); show('probe-notice', probe);
+  put('statistics-title', probe ? '探测流量' : '流量统计');
+  put('statistics-eyebrow', probe ? 'URLTEST PROBES' : 'TRAFFIC OVERVIEW');
+  put('statistics-subtitle', probe ? '独立查看测活与延迟探测，按实际成员、日期和已知范围排查。' : '按来源和节点查看历史，清楚区分已知流量与采集间断。');
   el('records').closest('.records-panel')?.classList.toggle('local-records', !provider);
   const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
   show('provider-metric-control', provider); show('upload-legend', !provider);
@@ -246,15 +274,15 @@ function statisticLabels(): void {
   el('summary').classList.toggle('provider-summary', provider);
   show('raw-card', !provider || providerMetric !== 'raw'); show('billed-card', !provider || providerMetric !== 'billed');
   put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : '本机内核统计 · 含可确定范围的恢复量');
-  put('total-title', provider ? metric : '区间已知合计');
-  put('total-note', provider ? '仅当前来源 · 不与本机流量相加' : '上传 + 下载 · 包含区间内恢复量');
+  put('total-title', provider ? metric : probe ? '所选维度探测量' : '区间已知合计');
+  put('total-note', provider ? '仅当前来源 · 不与本机流量相加' : probe ? '上传 + 下载 · 与业务分别保存' : '上传 + 下载 · 包含区间内恢复量');
   put('download-title', provider ? '服务商原始量' : '下载'); put('upload-title', provider ? '服务商计费量' : '上传');
-  put('download-note', provider ? 'CSV 原始字节 · 未乘倍率' : '从代理节点接收');
-  put('upload-note', provider ? '保留 CSV 精确数值 · 不重新计算' : '通过代理节点发送');
+  put('download-note', provider ? 'CSV 原始字节 · 未乘倍率' : probe ? '从探测目标接收的流字节' : '从代理节点接收');
+  put('upload-note', provider ? '保留 CSV 精确数值 · 不重新计算' : probe ? '发往探测目标的流字节' : '通过代理节点发送');
   put('download-legend', provider ? metric : '下载');
   put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
-  put('records-heading', provider ? '服务商记录' : '采集明细');
-  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : `本机独立账本 · 自动单位（${unit === 'GB' ? '1000' : '1024'} 进制）· 悬停查看原始 bytes`);
+  put('records-heading', provider ? '服务商记录' : probe ? '探测明细' : '采集明细');
+  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未知' : `仅显示非零明细 · 自动单位（${unit === 'GB' ? '1000' : '1024'} 进制）· 导出保留零记录`);
   put('download-column', provider ? '原始量' : '下载'); put('upload-column', provider ? '计费量' : '上传');
   put('quality-column', provider ? '倍率' : '质量');
 }
@@ -388,6 +416,31 @@ async function refresh(force = false): Promise<void> {
   const controller = new AbortController(); refreshController = controller;
   if (force) { show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
   try {
+    let probeStatus: CollectorStatus | undefined;
+    if (probeView()) {
+      probeStatus = await api<CollectorStatus>('/api/status', { signal: controller.signal });
+      if (controller.signal.aborted || refreshController !== controller) return;
+      renderStatus(probeStatus);
+      if (!probeStatus.probes?.historyEnabled) {
+        latestHistory = null; statisticLabels();
+        for (const id of ['total-value', 'upload-value', 'download-value', 'node-count']) put(id, '—');
+        for (const id of ['total-exact', 'upload-exact', 'download-exact']) put(id, '探测量未知');
+        for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
+        put('probe-coverage', '尚未启用探测历史；现有业务历史继续保留。');
+        put('quality-notice', '探测量未知，不能记为零。首次接入建立基线，不能追记此前探测流量。');
+        put('quality-summary', '探测历史未启用');
+        put('attribution-note', '探测量与业务分别保存。当前实例未启用探测历史，不以业务量推算探测量。');
+        el('chart').classList.add('empty');
+        el('chart').append(element('p', '探测历史尚未启用，流量未知。'));
+        el('chart').setAttribute('aria-label', '探测量未知');
+        show('gap-details', false); pagination(0);
+        el('summary').setAttribute('aria-busy', 'false');
+        el<HTMLButtonElement>('export-button').disabled = true;
+        put('refresh-note', '探测未启用 · 5 秒检查');
+        return;
+      }
+      el<HTMLButtonElement>('export-button').disabled = false;
+    }
     // Imported history changes only on an explicit operation, not each collector tick.
     if (statisticsSource && (latestProvider || latestComparison) && !force) {
       const status = await api<CollectorStatus>('/api/status', { signal: controller.signal });
@@ -411,9 +464,9 @@ async function refresh(force = false): Promise<void> {
       return;
     }
     const results = await Promise.allSettled([
-      api<CollectorStatus>('/api/status', { signal: controller.signal }),
-      api<NodeInfo[]>(statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : '/api/nodes', { signal: controller.signal }),
-      api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query()}`, { signal: controller.signal })
+      probeStatus ? Promise.resolve(probeStatus) : api<CollectorStatus>('/api/status', { signal: controller.signal }),
+      api<NodeInfo[]>(statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : `/api/nodes${probeView() ? `?basis=${probeBasis}` : ''}`, { signal: controller.signal }),
+      api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal })
     ]);
     if (controller.signal.aborted || refreshController !== controller) return;
     const [status, nodes, history] = results;
@@ -432,10 +485,16 @@ async function refresh(force = false): Promise<void> {
   }
 }
 function navigate(view: string): void {
+  const wasProbe = probeView();
   activeView = view;
-  for (const id of ['overview', 'settings', 'provider']) show(`${id}-view`, id === view);
+  for (const id of ['overview', 'settings', 'provider']) show(`${id}-view`, id === view || (id === 'overview' && probeView()));
   for (const nav of document.querySelectorAll<HTMLButtonElement>('.nav-item')) { const active = nav.dataset.view === view; nav.classList.toggle('active', active); if (active) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current'); }
-  put('page-name', ({ overview: '流量统计', settings: '采集与设置', provider: '导入记录' } as Record<string, string>)[view]);
+  put('page-name', ({ overview: '流量统计', probes: '探测流量', settings: '采集与设置', provider: '导入记录' } as Record<string, string>)[view]);
+  if (wasProbe !== probeView()) {
+    chooseSource(probeView() ? '' : statisticsSource);
+    el<HTMLButtonElement>('export-button').disabled = expired || !ready;
+    if (ready) void refresh(true);
+  }
   if (view === 'provider' && ready) void loadBatches();
 }
 async function loadBatches(): Promise<void> {
@@ -482,6 +541,7 @@ function chooseSource(source: string): void {
   for (const id of ['local', 'raw', 'billed']) { put(`comparison-${id}`, '—'); put(`comparison-${id}-exact`, '正在读取…'); }
   pagination(0); put('chart-scale', ''); show('gap-details', false);
   put('quality-notice', '正在读取所选来源…'); put('quality-summary', '正在读取所选来源…');
+  if (probeView()) put('probe-coverage', '正在读取所选探测维度及节点的历史起点…');
 }
 function invalidateImport(): void { importRevision++; importRequest = null; show('import-preview', false); put('import-result', ''); }
 function formResult(id: string, value: string, isError = false): void { put(id, value); el(id).classList.toggle('error', isError); }
@@ -507,6 +567,10 @@ el('comparison-bucket-next').addEventListener('click', () => {
 el('statistics-source').addEventListener('change', () => {
   chooseSource(el<HTMLSelectElement>('statistics-source').value);
   void refresh(true);
+});
+el('probe-basis').addEventListener('change', () => {
+  probeBasis = el<HTMLSelectElement>('probe-basis').value;
+  chooseSource(''); void refresh(true);
 });
 el('provider-metric').addEventListener('change', () => {
   providerMetric = el<HTMLSelectElement>('provider-metric').value as 'raw' | 'billed';

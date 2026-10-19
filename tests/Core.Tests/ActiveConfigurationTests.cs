@@ -82,6 +82,52 @@ public sealed class ActiveConfigurationTests : IDisposable
         return result;
     }
 
+    [Fact]
+    public void IdenticalPeriodicGuiReplacementRetainsCounterContinuity()
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "gui.json");
+        var bytes = Bytes(Gui);
+        File.WriteAllBytes(path, bytes);
+        var writtenAt = new DateTimeOffset(File.GetLastWriteTimeUtc(path));
+        using var ledger = new Ledger(History);
+        var guard = new XrayGenerationGuard();
+        Accept(ledger, guard, Snapshot(), 0, 100);
+        Accept(ledger, guard, Snapshot(), 1, 110);
+
+        var replacement = path + "_temp";
+        File.WriteAllBytes(replacement, bytes);
+        File.SetLastWriteTimeUtc(replacement, writtenAt.UtcDateTime.AddSeconds(1));
+        File.Move(replacement, path, true); // The pinned client saves through an atomic replacement.
+
+        Assert.True(WindowsDiscovery.GuiFileUnchanged(path, bytes, writtenAt));
+        Assert.Equal("recorded", Accept(ledger, guard, Snapshot(), 2, 130));
+        Assert.Equal("30", ledger.Query(All).Upload);
+        Assert.Equal(0, ledger.Query(All).GapCount);
+    }
+
+    [Theory]
+    [InlineData("selection")]
+    [InlineData("defaults")]
+    [InlineData("statistics")]
+    public void ChangedGuiReplacementStillRejectsTheCapturedSnapshot(string change)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "gui.json");
+        var bytes = Bytes(Gui);
+        File.WriteAllBytes(path, bytes);
+        var writtenAt = new DateTimeOffset(File.GetLastWriteTimeUtc(path));
+        var changed = change switch
+        {
+            "selection" => Gui.Replace("\"IndexId\":\"A\"", "\"IndexId\":\"B\""),
+            "defaults" => Gui.Replace("chrome", "firefox"),
+            _ => Gui.Replace("\"EnableStatistics\":true", "\"EnableStatistics\":false")
+        };
+        File.WriteAllText(path, changed);
+        File.SetLastWriteTimeUtc(path, writtenAt.UtcDateTime.AddSeconds(1));
+        Assert.False(WindowsDiscovery.GuiFileUnchanged(path, bytes, writtenAt));
+    }
+
     private const string AnyTlsConfiguration = """
         {"inbounds":[{"type":"mixed","tag":"mixed","listen":"127.0.0.1","listen_port":12344}],
          "outbounds":[{"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","server_port":443,
@@ -419,6 +465,331 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal(1, handler.Requests);
     }
 
+    [Fact]
+    public void V2RayMembersKeepMemberRouteAndAggregateDimensionsSeparate()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>member>>>business>>>traffic>>>uplink", 11),
+            ("monitor>>>member>>>business>>>traffic>>>downlink", 12),
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", long.MaxValue),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", null),
+            ("monitor>>>business>>>traffic>>>uplink", 21),
+            ("monitor>>>business>>>traffic>>>downlink", 22),
+            ("monitor>>>excluded>>>traffic>>>uplink", 31),
+            ("monitor>>>excluded>>>traffic>>>downlink", 32),
+            ("monitor>>>unknown>>>traffic>>>uplink", null),
+            ("monitor>>>unknown>>>traffic>>>downlink", 42),
+            ("outbound>>>proxy>>>traffic>>>uplink", 901),
+            ("outbound>>>proxy>>>traffic>>>downlink", 902));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(frame, ["business", "proxy"], out var result));
+        Assert.Equal("actual_member", result!.Basis);
+        Assert.Equal(new XrayCounters(11, 12), result.Members["business"]);
+        Assert.Equal(new XrayCounters(long.MaxValue, 0), result.Members["proxy"]);
+        Assert.Equal(new XrayCounters(21, 22), result.Totals["business"]);
+        Assert.Equal(new XrayCounters(31, 32), result.Totals["excluded"]);
+        Assert.Equal(new XrayCounters(0, 42), result.Totals["unknown"]);
+        Assert.Empty(result.UnavailableMembers);
+        Assert.Empty(result.UnavailableTotals);
+        Assert.True(V2RayStatistics.TryReadResponse(frame, out var legacy));
+        Assert.Equal(new XrayCounters(901, 902), legacy);
+    }
+
+    [Fact]
+    public void V2RayMembersPreserveIndependentPairsWhenMembersOrTotalsAreUnavailable()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>member>>>good>>>traffic>>>uplink", 1),
+            ("monitor>>>member>>>good>>>traffic>>>downlink", 2),
+            ("monitor>>>member>>>missing>>>traffic>>>uplink", 3),
+            ("monitor>>>member>>>duplicate>>>traffic>>>uplink", 4),
+            ("monitor>>>member>>>duplicate>>>traffic>>>uplink", 4),
+            ("monitor>>>member>>>duplicate>>>traffic>>>downlink", 5),
+            ("monitor>>>member>>>invalid>>>traffic>>>uplink", ulong.MaxValue),
+            ("monitor>>>member>>>invalid>>>traffic>>>downlink", 6),
+            ("monitor>>>business>>>traffic>>>uplink", 7),
+            ("monitor>>>business>>>traffic>>>downlink", 8),
+            ("monitor>>>excluded>>>traffic>>>uplink", 9),
+            ("monitor>>>excluded>>>traffic>>>uplink", 9),
+            ("monitor>>>excluded>>>traffic>>>downlink", 10),
+            ("monitor>>>unknown>>>traffic>>>uplink", ulong.MaxValue),
+            ("monitor>>>unknown>>>traffic>>>downlink", 11));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(frame,
+            ["good", "missing", "absent", "duplicate", "invalid"], out var result));
+        Assert.Equal(new XrayCounters(1, 2), Assert.Single(result!.Members).Value);
+        Assert.Equal("missing_counter", result.UnavailableMembers["missing"]);
+        Assert.Equal("missing_counter", result.UnavailableMembers["absent"]);
+        Assert.Equal("duplicate_counter", result.UnavailableMembers["duplicate"]);
+        Assert.Equal("invalid_counter", result.UnavailableMembers["invalid"]);
+        Assert.Equal(new XrayCounters(7, 8), Assert.Single(result.Totals).Value);
+        Assert.Equal("duplicate_counter", result.UnavailableTotals["excluded"]);
+        Assert.Equal("invalid_counter", result.UnavailableTotals["unknown"]);
+    }
+
+    [Fact]
+    public void V2RayMembersDoNotTreatTest2RouteCountersAsMemberEvidenceOrIdleZero()
+    {
+        var routeOnly = StatisticsFrame(
+            ("outbound>>>proxy>>>traffic>>>uplink", 100),
+            ("outbound>>>proxy>>>traffic>>>downlink", 200));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(routeOnly, ["proxy"], out var result));
+        Assert.Empty(result!.Members);
+        Assert.Empty(result.Totals);
+        Assert.Equal("missing_counter", result.UnavailableMembers["proxy"]);
+        Assert.Equal(3, result.UnavailableTotals.Count);
+        Assert.All(result.UnavailableTotals.Values, value => Assert.Equal("missing_counter", value));
+    }
+
+    [Fact]
+    public void V2RayMembersRejectMalformedWireWithoutPartialResults()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 1),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 2));
+        var compressed = frame.ToArray(); compressed[0] = 1;
+        var unknownWire = frame.ToArray(); unknownWire[5] = 0x0f;
+        foreach (var invalid in new[] { compressed, frame[..^1], unknownWire, new byte[65537] })
+        {
+            Assert.False(V2RayStatistics.TryReadMembersResponse(invalid, ["proxy"], out var result));
+            Assert.Null(result);
+        }
+    }
+
+    [Fact]
+    public void V2RayMembersAllowTotalsOnlyAndRejectAmbiguousTags()
+    {
+        Assert.True(V2RayStatistics.TryReadMembersResponse(StatisticsFrame(), [], out var totalsOnly));
+        Assert.Empty(totalsOnly!.Members);
+        Assert.Empty(totalsOnly.UnavailableMembers);
+        Assert.Equal(3, totalsOnly.UnavailableTotals.Count);
+        foreach (var tags in new[] { new[] { "" }, new[] { "proxy", "proxy" }, new[] { "a>>>b" } })
+            Assert.Throws<ArgumentException>(() => V2RayStatistics.TryReadMembersResponse(StatisticsFrame(), tags, out _));
+        Assert.True(V2RayStatistics.TryReadMembersResponse(StatisticsFrame(), ["proxy", "Proxy"], out var distinct));
+        Assert.Equal(2, distinct!.UnavailableMembers.Count);
+    }
+
+    [Fact]
+    public async Task V2RayMembersUseOneReadOnlyRpcAndKeepRequestFailuresUnavailable()
+    {
+        using var handler = new StatisticsHandler(StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 10),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 20)));
+        using var client = new HttpClient(handler);
+        var result = await V2RayStatistics.ReadMembersAsync(client, new Uri("http://127.0.0.1:10814/"),
+            ["proxy", "other"], CancellationToken.None);
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(new XrayCounters(10, 20), result!.Members["proxy"]);
+        Assert.Equal("missing_counter", result.UnavailableMembers["other"]);
+        await Assert.ThrowsAsync<ArgumentException>(() => V2RayStatistics.ReadMembersAsync(client,
+            new Uri("http://localhost:10814/"), ["proxy"], CancellationToken.None));
+        Assert.Equal(1, handler.Requests);
+        using var failedHandler = new StatisticsHandler(StatisticsFrame(), status: "13");
+        using var failedClient = new HttpClient(failedHandler);
+        await Assert.ThrowsAsync<HttpRequestException>(() => V2RayStatistics.ReadMembersAsync(failedClient,
+            new Uri("http://127.0.0.1:10814/"), ["proxy"], CancellationToken.None));
+    }
+
+    [Fact]
+    public void V2RayProbesAreSeparateFromBusinessAndMissingSupportIsUnavailable()
+    {
+        var frame = StatisticsFrame(
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>uplink", 11),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>downlink", 12),
+            ("monitor>>>probe>>>urltest>>>business>>>traffic>>>uplink", 11),
+            ("monitor>>>probe>>>urltest>>>business>>>traffic>>>downlink", 12),
+            ("monitor>>>business>>>traffic>>>uplink", 901),
+            ("monitor>>>business>>>traffic>>>downlink", 902));
+        Assert.True(V2RayStatistics.TryReadProbesResponse(frame, ["proxy", "idle"], out var probes));
+        Assert.Equal("urltest", probes!.ProbeKind);
+        Assert.Equal(new XrayCounters(11, 12), Assert.Single(probes.Members).Value);
+        Assert.Equal(new XrayCounters(11, 12), Assert.Single(probes.Totals).Value);
+        Assert.Equal("missing_counter", probes.UnavailableMembers["idle"]);
+        Assert.Equal(2, probes.UnavailableTotals.Count);
+        Assert.True(V2RayStatistics.TryReadMembersResponse(frame, ["proxy"], out var business));
+        Assert.Empty(business!.Members);
+        Assert.Equal(new XrayCounters(901, 902), business.Totals["business"]);
+        Assert.True(V2RayStatistics.TryReadProbesResponse(StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 100),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 200)), ["proxy"], out var oldCore));
+        Assert.Empty(oldCore!.Members);
+        Assert.Empty(oldCore.Totals);
+        Assert.Equal("missing_counter", oldCore.UnavailableMembers["proxy"]);
+        Assert.All(oldCore.UnavailableTotals.Values, value => Assert.Equal("missing_counter", value));
+    }
+
+    [Fact]
+    public void V2RayProbesPreserveValidPairsAndRejectMalformedFrames()
+    {
+        const string prefix = "monitor>>>probe>>>urltest>>>";
+        var frame = StatisticsFrame(
+            (prefix + "member>>>good>>>traffic>>>uplink", (ulong)long.MaxValue),
+            (prefix + "member>>>good>>>traffic>>>downlink", 0),
+            (prefix + "member>>>duplicate>>>traffic>>>uplink", 1),
+            (prefix + "member>>>duplicate>>>traffic>>>uplink", 1),
+            (prefix + "member>>>duplicate>>>traffic>>>downlink", 2),
+            (prefix + "member>>>invalid>>>traffic>>>uplink", ulong.MaxValue),
+            (prefix + "member>>>invalid>>>traffic>>>downlink", 2));
+        Assert.True(V2RayStatistics.TryReadProbesResponse(frame, ["good", "duplicate", "invalid"], out var result));
+        Assert.Equal(new XrayCounters(long.MaxValue, 0), Assert.Single(result!.Members).Value);
+        Assert.Equal("duplicate_counter", result.UnavailableMembers["duplicate"]);
+        Assert.Equal("invalid_counter", result.UnavailableMembers["invalid"]);
+        Assert.False(V2RayStatistics.TryReadProbesResponse(frame[..^1], ["good"], out var malformed));
+        Assert.Null(malformed);
+        Assert.Throws<ArgumentException>(() => V2RayStatistics.TryReadProbesResponse(frame, ["a>>>b"], out _));
+    }
+
+    [Fact]
+    public async Task V2RayProbesUseOneBoundedReadOnlyRpc()
+    {
+        using var handler = new StatisticsHandler(StatisticsFrame(
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>uplink", 10),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>downlink", 20)));
+        using var client = new HttpClient(handler);
+        var result = await V2RayStatistics.ReadProbesAsync(client, new Uri("http://127.0.0.1:10814/"),
+            ["proxy"], CancellationToken.None);
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(new XrayCounters(10, 20), result!.Members["proxy"]);
+        await Assert.ThrowsAsync<ArgumentException>(() => V2RayStatistics.ReadProbesAsync(client,
+            new Uri("http://localhost:10814/"), ["proxy"], CancellationToken.None));
+        Assert.Equal(1, handler.Requests);
+    }
+
+    [Fact]
+    public async Task JointScopeReaderProjectsBothDimensionsFromOneReadOnlyResponse()
+    {
+        using var handler = new StatisticsHandler(StatisticsFrame(
+            ("monitor>>>member>>>proxy>>>traffic>>>uplink", 9007199254740993),
+            ("monitor>>>member>>>proxy>>>traffic>>>downlink", 7),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>uplink", 13),
+            ("monitor>>>probe>>>urltest>>>member>>>proxy>>>traffic>>>downlink", 17)));
+        using var client = new HttpClient(handler);
+        var result = await V2RayStatistics.ReadScopesAsync(client, new Uri("http://127.0.0.1:10814/"),
+            ["proxy", "missing"], CancellationToken.None);
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(new XrayCounters(9007199254740993, 7), result!.Members.Members["proxy"]);
+        Assert.Equal(new XrayCounters(13, 17), result.Probes.Members["proxy"]);
+        Assert.Equal("missing_counter", result.Probes.UnavailableMembers["missing"]);
+        Assert.Equal("missing_counter", result.Members.UnavailableMembers["missing"]);
+    }
+
+    private const string MemberConfiguration = """
+        {"inbounds":[{"type":"mixed","tag":"in"}],"outbounds":[
+        {"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},
+        {"tag":"other","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},
+        {"tag":"direct","type":"direct"},
+        {"tag":"group","type":"selector","outbounds":["proxy","other","direct"],"default":"other"},
+        {"tag":"auto","type":"urltest","outbounds":["proxy","other"]},
+        {"tag":"chain","type":"socks","detour":"proxy"},
+        {"tag":"unsupported","type":"synthetic-unsupported"},
+        {"tag":"invalid>>>tag","type":"socks"}]}
+        """;
+
+    private static XraySnapshot MemberSnapshot(string configuration = MemberConfiguration)
+        => Snapshot(generation: XrayParser.Hash(Bytes(configuration)) + ":synthetic-config-and-sidecar-generation")
+            with { CoreName = "sing-box" };
+
+    [Fact]
+    public void MemberFriendlyNameUsesExplicitGroupMembershipWithoutChangingLedgerIdentity()
+    {
+        const string tag = "12345-proxy-US-1x-1-Synthetic A";
+        var config = MemberConfiguration.Replace("\"other\"", JsonSerializer.Serialize(tag), StringComparison.Ordinal)
+            .Replace("\"group\"", "\"12345-proxy-US-1x\"", StringComparison.Ordinal);
+        var snapshot = MemberSnapshot(config);
+        Assert.True(SingboxParser.TryReadMemberCatalog(snapshot, Bytes(config), out var catalog, out _));
+        var member = catalog!.Candidates[tag];
+        Assert.Equal("【US-1x】 1-Synthetic A", member.DisplayName);
+        Assert.Equal(tag, member.OutboundTag);
+        Assert.Null(member.IndexId);
+        Assert.Null(catalog.Candidates["proxy"].DisplayName);
+        var counters = ScopeCounters(10, 20);
+        counters = counters with { Members = new Dictionary<string, XrayCounters>
+            { ["proxy"] = new(10, 0), [tag] = new(20, 0) } };
+        var batch = ScopeCollector.Project(new(snapshot, catalog, ["proxy", tag]), counters, Start);
+        using var ledger = ScopeLedger.CreateNew(History);
+        ScopeCollector.Commit(ledger, batch with
+        {
+            Readings = batch.Readings.Select(x => x.Scope.OutboundTag == tag
+                ? x with { Scope = x.Scope with { Name = tag } } : x).ToArray()
+        });
+        var id = ledger.GetScopes("actual_member").Single(x => x.Scope.OutboundTag == tag).Id;
+        var commit = ScopeCollector.Commit(ledger, batch with { At = Start.AddSeconds(1) });
+        var renamed = ledger.GetScopes("actual_member").Single(x => x.Id == id);
+        Assert.Equal(member.DisplayName, renamed.Scope.Name);
+        Assert.Equal(tag, renamed.Scope.OutboundTag);
+        Assert.Null(renamed.Scope.NodeId);
+        Assert.Equal("recorded", commit.Scopes[id]);
+        Assert.DoesNotContain(ledger.Query(new("actual_member", Start.AddSeconds(-1), Start.AddMinutes(1), "UTC")).Gaps,
+            x => x.Reason == "identity_change");
+    }
+
+    [Fact]
+    public void MemberSharedBySelectorsKeepsOriginalTagInsteadOfGuessingAGroup()
+    {
+        var config = MemberConfiguration.Replace("\"type\":\"urltest\"", "\"type\":\"selector\"", StringComparison.Ordinal);
+        Assert.True(SingboxParser.TryReadMemberCatalog(MemberSnapshot(config), Bytes(config), out var catalog, out _));
+        Assert.Null(catalog!.Candidates["other"].DisplayName);
+        Assert.Equal("other", catalog.Candidates["other"].OutboundTag);
+        Assert.Null(catalog.Candidates["other"].IndexId);
+    }
+
+    [Fact]
+    public void SingboxMemberCatalogPreservesIndependentIdentityAndOnlyVerifiedProxyIndexId()
+    {
+        var snapshot = MemberSnapshot();
+        Assert.True(SingboxParser.TryReadMemberCatalog(snapshot, Bytes(MemberConfiguration), out var catalog, out var reason));
+        Assert.Equal("ready", reason);
+        Assert.Equal(snapshot.InstanceId, catalog!.InstanceId);
+        Assert.Equal(snapshot.Generation, catalog.Generation);
+        Assert.Equal(snapshot.ProcessIdentity, catalog.ProcessIdentity);
+        Assert.Equal(2, catalog.Candidates.Count);
+        Assert.Equal(new SingboxMemberIdentity("proxy", "anytls", "A"), catalog.Candidates["proxy"]);
+        Assert.Null(catalog.Candidates["other"].IndexId); // Even an identical endpoint/credential is not another IndexId proof.
+        Assert.Equal("group_not_member", catalog.UnavailableOutbounds["group"]);
+        Assert.Equal("group_not_member", catalog.UnavailableOutbounds["auto"]);
+        Assert.Equal("excluded_outbound", catalog.UnavailableOutbounds["direct"]);
+        Assert.Equal("dependent_outbound", catalog.UnavailableOutbounds["chain"]);
+        Assert.Equal("unsupported_member_type", catalog.UnavailableOutbounds["unsupported"]);
+        Assert.Equal("invalid_statistics_tag", catalog.UnavailableOutbounds["invalid>>>tag"]);
+        var serialized = JsonSerializer.Serialize(catalog);
+        Assert.DoesNotContain("Synthetic-Credential", serialized);
+        Assert.DoesNotContain("node.synthetic.invalid", serialized);
+        Assert.DoesNotContain("Same synthetic name", serialized);
+    }
+
+    [Fact]
+    public void SingboxMemberCatalogRequiresMatchingConfigurationAndCore()
+    {
+        foreach (var snapshot in new[] { MemberSnapshot() with { CoreName = "Xray" },
+            MemberSnapshot() with { Generation = "unrelated-generation" }, MemberSnapshot() with { InstanceId = "" } })
+        {
+            Assert.False(SingboxParser.TryReadMemberCatalog(snapshot, Bytes(MemberConfiguration), out var catalog, out var reason));
+            Assert.Null(catalog);
+            Assert.Equal("snapshot_changed", reason);
+        }
+        var changed = MemberConfiguration.Replace("\"default\":\"other\"", "\"default\":\"proxy\"");
+        Assert.False(SingboxParser.TryReadMemberCatalog(MemberSnapshot(), Bytes(changed), out _, out _));
+        var next = MemberSnapshot(changed) with { ProcessIdentity = "core-2", NodeId = "B" };
+        Assert.True(SingboxParser.TryReadMemberCatalog(next, Bytes(changed), out var catalog2, out _));
+        Assert.Equal("core-2", catalog2!.ProcessIdentity);
+        Assert.Equal("B", catalog2.Candidates["proxy"].IndexId);
+        Assert.Null(catalog2.Candidates["other"].IndexId); // Group selection never supplies a member's subscription identity.
+    }
+
+    [Fact]
+    public void SingboxMemberCatalogRejectsAmbiguousOrOutOfScopeConfiguration()
+    {
+        foreach (var config in new[] {
+            MemberConfiguration.Replace("\"tag\":\"other\"", "\"tag\":\"proxy\""),
+            MemberConfiguration.Replace("\"tag\":\"other\"", "\"tag\":\"other\",\"tag\":\"other\""),
+            MemberConfiguration.Replace("\"type\":\"mixed\"", "\"type\":\"tun\""),
+            MemberConfiguration.Replace("\"inbounds\":", "\"endpoints\":[{\"type\":\"wireguard\"}],\"inbounds\":"),
+            "{}", "not-json" })
+        {
+            Assert.False(SingboxParser.TryReadMemberCatalog(MemberSnapshot(config), Bytes(config), out var catalog, out var reason));
+            Assert.Null(catalog);
+            Assert.Equal("unsupported_configuration", reason);
+        }
+    }
+
     private static byte[] StatisticsFrame(params (string Name, ulong? Value)[] stats)
     {
         static void Varint(List<byte> bytes, ulong value)
@@ -748,6 +1119,265 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal(restart ? "baseline" : "reset", Accept(ledger, guard, next, 2, 9000, restart ? 9000 : 10));
         Accept(ledger, guard, next, 3, 9003, restart ? 9004 : 14);
         Assert.Equal("13", ledger.Query(All).Upload); Assert.Equal("24", ledger.Query(All).Download);
+    }
+
+    private static ScopeCapture ScopeFixture(IReadOnlyList<string>? enabled = null, XraySnapshot? snapshot = null)
+    {
+        var bound = snapshot ?? MemberSnapshot();
+        Assert.True(SingboxParser.TryReadMemberCatalog(bound, Bytes(MemberConfiguration), out var catalog, out _));
+        return new(bound, catalog, enabled ?? ["proxy", "other"]);
+    }
+    private static V2RayMemberStatistics ScopeCounters(long proxy = 0, long other = 0) =>
+        new(new Dictionary<string, XrayCounters> { ["proxy"] = new(proxy, 0), ["other"] = new(other, 0) },
+            new Dictionary<string, string>(), new Dictionary<string, XrayCounters>
+            { ["business"] = new(proxy + other, 0), ["excluded"] = new(7, 0), ["unknown"] = new(9, 0) },
+            new Dictionary<string, string>());
+
+    [Fact]
+    public void ProbeProjectionUsesVerifiedMembersAndKeepsUnavailableScopesInTheJointBatch()
+    {
+        var capture = ScopeFixture(enabled: ["proxy"]);
+        var probes = new V2RayProbeStatistics(new Dictionary<string, XrayCounters>
+            { ["proxy"] = new(100, 200), ["other"] = new(999, 999), ["unverified"] = new(999, 999) },
+            new Dictionary<string, string>(), new Dictionary<string, XrayCounters>
+            { ["business"] = new(100, 200) }, new Dictionary<string, string>());
+        var batch = ScopeCollector.ProjectWithProbes(capture, ScopeCounters(10, 20), probes, Start);
+        var member = batch.Readings.Single(x => x.Scope.Basis == "probe_urltest_member" && x.Scope.OutboundTag == "proxy");
+        var business = batch.Readings.Single(x => x.Scope.Basis == "actual_member" && x.Scope.OutboundTag == "proxy");
+        Assert.Equal(business.Scope with { Basis = "probe_urltest_member" }, member.Scope);
+        Assert.Equal(100L, member.Upload);
+        var disabled = batch.Readings.Single(x => x.Scope.Basis == "probe_urltest_member" && x.Scope.OutboundTag == "other");
+        Assert.Equal("probe_statistics_disabled", disabled.UnavailableReason);
+        Assert.Null(disabled.Upload);
+        Assert.DoesNotContain(batch.Readings, x => x.Scope.OutboundTag == "unverified");
+        Assert.Equal("missing_counter", batch.Readings.Single(x => x.Scope.Basis == "probe_urltest_excluded").UnavailableReason);
+        using var ledger = ScopeLedger.CreateNew(History, includeProbes: true);
+        ScopeCollector.Commit(ledger, batch);
+        var next = ScopeCollector.ProjectWithProbes(capture, ScopeCounters(15, 20), probes with
+        {
+            Members = new Dictionary<string, XrayCounters> { ["proxy"] = new(107, 211) },
+            Totals = new Dictionary<string, XrayCounters> { ["business"] = new(107, 211) }
+        }, Start.AddSeconds(1));
+        ScopeCollector.Commit(ledger, next);
+        var query = new ScopeQuery("probe_urltest_member", Start.AddSeconds(-1), Start.AddMinutes(1), "UTC");
+        Assert.Equal("7", ledger.Query(query).Upload);
+        Assert.Equal("11", ledger.Query(query).Download);
+        Assert.Equal("5", ledger.Query(query with { Basis = "actual_member" }).Upload);
+        Assert.Contains(ledger.Query(query).Gaps, x => x.IsOpen);
+    }
+
+    [Fact]
+    public void ScopeSidecarIsStrictAndLegacyParserDoesNotSilentlyEnableMembers()
+    {
+        var json = Bytes("""{"listen":"127.0.0.1:10814","monitor_members":["proxy","other"]}""");
+        Assert.True(SingboxParser.TryReadMemberStatisticsSettings(json, out var endpoint, out var members));
+        Assert.Equal(10814, endpoint!.Port); Assert.Equal(["proxy", "other"], members);
+        Assert.False(SingboxParser.TryReadStatisticsEndpoint(json, out _));
+        foreach (var invalid in new[] {
+            """{"listen":"0.0.0.0:10814","monitor_members":["proxy"]}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":["proxy","proxy"]}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":["bad>>>tag"]}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":null}""",
+            """{"listen":"127.0.0.1:10814","monitor_members":[] }""",
+            """{"listen":"127.0.0.1:10814","route":{}}""" })
+            Assert.False(SingboxParser.TryReadMemberStatisticsSettings(Bytes(invalid), out _, out _));
+    }
+
+    [Fact]
+    public void ScopeProjectionUsesVerifiedIndexOnlyForProxyAndPreservesAllDimensions()
+    {
+        var capture = ScopeFixture(["proxy"]);
+        var batch = ScopeCollector.Project(capture, ScopeCounters(10, 20), Start);
+        Assert.Equal(5, batch.Readings.Count);
+        var proxy = Assert.Single(batch.Readings, x => x.Scope.OutboundTag == "proxy");
+        Assert.Equal("A", proxy.Scope.NodeId);
+        Assert.Equal("index_id", proxy.Scope.IdentityKind);
+        var other = Assert.Single(batch.Readings, x => x.Scope.OutboundTag == "other");
+        Assert.Null(other.Scope.NodeId); Assert.Null(other.Upload);
+        Assert.Equal("member_statistics_disabled", other.UnavailableReason);
+        Assert.Equal("outbound", other.Scope.IdentityKind);
+        Assert.Contains(XrayParser.Hash(Bytes(MemberConfiguration)), other.Scope.IdentityValue);
+        Assert.Equal(30, Assert.Single(batch.Readings, x => x.Scope.Basis == "business").Upload);
+        Assert.Equal(7, Assert.Single(batch.Readings, x => x.Scope.Basis == "excluded").Upload);
+        Assert.Equal(9, Assert.Single(batch.Readings, x => x.Scope.Basis == "unknown").Upload);
+        Assert.DoesNotContain("Synthetic-Credential", JsonSerializer.Serialize(batch));
+        Assert.Throws<ArgumentException>(() => ScopeCollector.Project(ScopeFixture(["group"]), ScopeCounters(), Start));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScopeWindowsBoundaryRejectsChangedCoreBeforeAnyBatchCanBeCommitted(bool includeProbes)
+    {
+        using var discovery = new WindowsDiscovery();
+        var first = ScopeFixture();
+        var second = ScopeFixture(snapshot: first.Snapshot with { ProcessIdentity = "core-2" });
+        var calls = 0;
+        var reading = await discovery.ReadScopesBoundAsync(() => calls++ == 0 ? first : second,
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((ScopeCounters(100, 200), null, null)),
+            CancellationToken.None, includeProbes);
+        Assert.Null(reading.Batch);
+        Assert.True(reading.InvalidateContinuity);
+        Assert.True(discovery.RequiresBaseline);
+    }
+
+    [Fact]
+    public async Task ScopeWindowsPipelineAndLedgerHandlePartialCountersAndPersistenceAcknowledgment()
+    {
+        using var discovery = new WindowsDiscovery();
+        using var ledger = ScopeLedger.CreateNew(History);
+        var capture = ScopeFixture();
+        var first = await discovery.ReadScopesBoundAsync(() => capture,
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((ScopeCounters(100, 200), null, null)), CancellationToken.None);
+        ScopeCollector.Commit(ledger, first.Batch! with { At = Start });
+        discovery.AcknowledgePersistence();
+        var partial = ScopeCounters(110, 220) with
+        { Members = new Dictionary<string, XrayCounters> { ["proxy"] = new(110, 0) }, UnavailableMembers = new Dictionary<string, string> { ["other"] = "missing_counter" } };
+        var next = await discovery.ReadScopesBoundAsync(() => capture,
+            (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((partial, null, null)), CancellationToken.None);
+        ScopeCollector.Commit(ledger, next.Batch! with { At = Start.AddSeconds(1) });
+        var query = new ScopeQuery("actual_member", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC");
+        Assert.Equal("10", ledger.Query(query).Upload);
+        Assert.Contains(ledger.Query(query).Gaps, x => x.IsOpen && x.Reason == "missing_counter");
+        Assert.False(discovery.RequiresBaseline);
+    }
+
+    [Fact]
+    public async Task ProbeWindowsPipelinePersistsJointBatchAndOldCoreKeepsBusinessCollecting()
+    {
+        using var discovery = new WindowsDiscovery();
+        using var ledger = ScopeLedger.CreateNew(History, includeProbes: true);
+        var capture = ScopeFixture();
+        V2RayProbeStatistics Probes(long n) => new(
+            new Dictionary<string, XrayCounters> { ["proxy"] = new(n, 0), ["other"] = new(2 * n, 0) },
+            new Dictionary<string, string>(),
+            new Dictionary<string, XrayCounters> { ["business"] = new(3 * n, 0), ["excluded"] = new(0, 0), ["unknown"] = new(0, 0) },
+            new Dictionary<string, string>());
+        async Task<ScopeCollectorReading> Read(long business, V2RayProbeStatistics probes) =>
+            await discovery.ReadScopesBoundAsync(() => capture,
+                (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((ScopeCounters(business, business), null, probes)),
+                CancellationToken.None, includeProbes: true);
+        var first = await Read(100, Probes(1000));
+        Assert.Equal("partial", first.Probes!.State); // Synthetic catalog also contains unsupported chain/outbound paths.
+        ScopeCollector.Commit(ledger, first.Batch! with { At = Start });
+        discovery.AcknowledgePersistence();
+        var query = new ScopeQuery("probe_urltest_member", Start.AddMinutes(-1), Start.AddMinutes(1), "UTC");
+        Assert.Equal("0", ledger.Query(query).Upload);
+        Assert.Null(ledger.Query(query).EarliestRecord);
+        var next = await Read(110, Probes(1007));
+        ScopeCollector.Commit(ledger, next.Batch! with { At = Start.AddSeconds(1) });
+        discovery.AcknowledgePersistence();
+        Assert.Equal("21", ledger.Query(query).Upload);
+        Assert.Equal("20", ledger.Query(query with { Basis = "actual_member" }).Upload);
+        Assert.NotNull(ledger.Query(query with { Start = Start.AddDays(10), End = Start.AddDays(11) }).EarliestRecord);
+        var old = await Read(115, new(new Dictionary<string, XrayCounters>(), new Dictionary<string, string>(),
+            new Dictionary<string, XrayCounters>(), new Dictionary<string, string>()));
+        Assert.Equal("unsupported", old.Probes!.State);
+        ScopeCollector.Commit(ledger, old.Batch! with { At = Start.AddSeconds(2) });
+        Assert.Equal("30", ledger.Query(query with { Basis = "actual_member" }).Upload);
+        Assert.Equal("21", ledger.Query(query).Upload);
+        Assert.Contains(ledger.Query(query).Gaps, gap => gap.IsOpen && gap.Reason == "missing_counter");
+    }
+
+    [Fact]
+    public void ProbeExtensionIsPinnedAndDoesNotBroadenLegacyApproval()
+    {
+        Assert.True(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedMemberSingboxSha256, true));
+        Assert.True(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedProbeSingboxSha256, true));
+        Assert.False(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedProbeSingboxSha256, false));
+        Assert.True(WindowsDiscovery.IsApprovedExtension(WindowsDiscovery.ApprovedSingboxSha256, false));
+        Assert.False(WindowsDiscovery.IsApprovedExtension(new string('0', 64), true));
+    }
+
+    [Fact]
+    public void ScopeCollectorGapInvalidationAndWholeMissingRpcDoNotFabricateZeroOrRecovery()
+    {
+        using var ledger = ScopeLedger.CreateNew(History);
+        ledger.RecordGap(Start.AddSeconds(-1), "unavailable", true);
+        ScopeCollector.Commit(ledger, ScopeCollector.Project(ScopeFixture(), ScopeCounters(100, 200), Start));
+        ledger.RecordGap(Start.AddSeconds(1), "mapping_changed", true);
+        ScopeCollector.Commit(ledger, ScopeCollector.Project(ScopeFixture(), ScopeCounters(500, 600), Start.AddSeconds(2)));
+        var query = new ScopeQuery("actual_member", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC");
+        Assert.Equal("0", ledger.Query(query).Upload);
+        Assert.All(ledger.Query(query).Gaps, x => Assert.False(x.IsOpen));
+        var missing = new V2RayMemberStatistics(new Dictionary<string, XrayCounters>(), new Dictionary<string, string>(),
+            new Dictionary<string, XrayCounters>(), new Dictionary<string, string>());
+        var batch = ScopeCollector.Project(ScopeFixture(), missing, Start.AddSeconds(3));
+        Assert.All(batch.Readings, x => { Assert.Null(x.Upload); Assert.Null(x.Download); Assert.NotNull(x.UnavailableReason); });
+        ScopeCollector.Commit(ledger, batch);
+        Assert.Equal("0", ledger.Query(query).Upload);
+        Assert.Throws<ArgumentException>(() => ScopeCollector.Commit(ledger,
+            ScopeCollector.Project(ScopeFixture(), ScopeCounters(900, 900), Start.AddSeconds(2.5))));
+    }
+
+    [Fact]
+    public async Task XrayPartialDiscoveryPersistsCoverageAndDoesNotMixPreviousMemberCounters()
+    {
+        CreateProfiles(Profile());
+        var config = Change(Configuration, root =>
+        {
+            root["outbounds"]!.AsArray().Add(new JsonObject { ["tag"] = "other", ["protocol"] = "vless" });
+            root["routing"] = JsonNode.Parse("""{"balancers":[{"tag":"group","selector":["other"]}]}""");
+        });
+        Assert.Equal("Same synthetic name", WindowsDiscovery.ReadProfile(Profiles, "A", Bytes(Gui),
+            Bytes(config), out var configuration));
+        var snapshot = Snapshot() with { Scope = configuration.Scope };
+        var capture = new ScopeCapture(snapshot, null, []);
+        using var discovery = new WindowsDiscovery();
+        using var ledger = ScopeLedger.CreateNew(History, includeProbes: true);
+        async Task<ScopeCollectorReading> Read(long up, long down) =>
+            await discovery.ReadScopesBoundAsync(() => capture,
+                (_, _) => Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?)>((null, new(up, down), null)),
+                CancellationToken.None, includeProbes: true);
+        var previous = ScopeCollector.ProjectWithProbes(ScopeFixture(), ScopeCounters(900, 800),
+            new(new Dictionary<string, XrayCounters>(), new Dictionary<string, string>(),
+                new Dictionary<string, XrayCounters>(), new Dictionary<string, string>()), Start.AddSeconds(-1));
+        ScopeCollector.Commit(ledger, previous);
+        var first = await Read(100, 200);
+        Assert.Equal("connected", first.State);
+        Assert.Equal(configuration.Scope, first.Scope);
+        Assert.Equal("unsupported", first.Probes!.State);
+        Assert.All(ScopeCollector.Commit(ledger, first.Batch! with { At = Start }).Scopes.Values,
+            status => Assert.Equal("baseline", status));
+        discovery.AcknowledgePersistence();
+        var second = await Read(113, 229);
+        ScopeCollector.Commit(ledger, second.Batch! with { At = Start.AddSeconds(1) });
+        var result = ledger.Query(new ScopeQuery("legacy_proxy", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC"));
+        Assert.Equal("13", result.Upload);
+        Assert.Equal("29", result.Download);
+        Assert.All(result.Records, row => Assert.True(row.PartialCoverage));
+        Assert.Contains(result.Gaps, gap => gap.Reason == "uncollected_outbounds");
+        Assert.Equal("0", ledger.Query(new ScopeQuery("actual_member", Start.AddMinutes(-1), Start.AddMinutes(2), "UTC")).Upload);
+    }
+
+    [Fact]
+    public void ScopeXrayProjectionPreservesLegacyBasisAndIntegerCounters()
+    {
+        var batch = ScopeCollector.ProjectLegacy(Snapshot(), new(9007199254740993, 7), Start, true);
+        var reading = Assert.Single(batch.Readings);
+        Assert.Equal("legacy_proxy", reading.Scope.Basis);
+        Assert.Equal("legacy_node", reading.Scope.IdentityKind);
+        Assert.True(reading.InvalidateContinuity);
+        Assert.Equal(9007199254740993, reading.Upload);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScopeAutostartPreservesModeAndKeepsDistinctDirectories(bool scopeMode)
+    {
+        const string executable = @"C:\Synthetic Program\v2rayN-Monitor.exe";
+        const string root = @"F:\Synthetic Data\scope-ledger";
+        var command = MonitorStartup.Command(executable, root, scopeMode);
+        Assert.StartsWith("\"" + executable + "\" --background", command);
+        Assert.EndsWith("--data-dir \"" + root + "\"", command);
+        Assert.Equal(scopeMode, command.Contains(" --scope-ledger ", StringComparison.Ordinal));
+        Assert.NotEqual(command, MonitorStartup.Command(executable, root, !scopeMode));
+        Assert.NotEqual(command, MonitorStartup.Command(executable, root + "-other", scopeMode));
+        var probes = MonitorStartup.Command(executable, root, scopeMode, probeMode: true);
+        Assert.Contains(" --scope-ledger --probe-ledger ", probes);
+        Assert.EndsWith("--data-dir \"" + root + "\"", probes);
+        Assert.NotEqual(command, probes);
     }
 
     public void Dispose() { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
