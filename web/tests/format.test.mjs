@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bytes, decimal, exactBytes, formatBytes, formatRecordBytes, recordByteParts, percentage, rate } from '../src/lib/format.ts';
 import { compareNames, compareBuckets } from '../src/lib/comparison.ts';
+import { displayNodes } from '../src/lib/display.ts';
 test('bytes beyond Number.MAX_SAFE_INTEGER remain exact', () => {
   assert.equal(bytes('9007199254740993'), 9007199254740993n);
   assert.equal(exactBytes('9007199254740993'), '9,007,199,254,740,993 bytes');
@@ -25,12 +26,44 @@ test('name comparison aggregates exact names only and preserves absent versus re
     series: [{ label: '2026-01-01T01:00+00:00', rawBytes: '0', billedBytes: '0' }] };
   const rows = compareNames(local, provider);
   assert.equal(rows.length, 4);
-  assert.deepEqual(rows.find(row => row.name === 'A'), { name: 'A', local: '9007199254740996', raw: '9', billed: '7.200000000123' });
+  assert.deepEqual(rows.find(row => row.name === 'A'), { name: 'A', local: '9007199254740996', upload: '9007199254740995', download: '1', raw: '9', billed: '7.200000000123',
+    localEstimate: null, estimateCoveredBytes: '0', estimateUnknownBytes: '9007199254740996' });
   assert.equal(rows.find(row => row.name === 'CSV only').local, null);
   assert.equal(rows.find(row => row.name === 'a').raw, null);
   const buckets = compareBuckets(local, provider);
   assert.equal(buckets[0].local, '0'); assert.equal(buckets[0].raw, null);
   assert.equal(buckets[1].local, null); assert.equal(buckets[1].billed, '0');
+});
+test('comparison carries exact captured estimates and leaves missing rates unknown in names and buckets', () => {
+  const display = { estimatedBilledBytes: '4503599627370496.5', estimateCoveredBytes: '9007199254740993', estimateUnknownBytes: '3' };
+  const local = { nodes: [], comparisonNodes: [
+    { name: 'A', upload: '9007199254740996', download: '0', display },
+    { name: 'A', upload: '2', download: '0', display: { estimatedBilledBytes: '0', estimateCoveredBytes: '2', estimateUnknownBytes: '0' } },
+    { name: 'A', upload: '1', download: '0' },
+    { name: 'Zero rate', upload: '2', download: '0', display: { estimatedBilledBytes: '0', estimateCoveredBytes: '2', estimateUnknownBytes: '0' } }
+  ], series: [{ label: '2026-01-01', upload: '9007199254740996', download: '0', display }] };
+  const provider = { nodes: [{ name: 'A', rawBytes: '1', billedBytes: '0.0000000000000000000000000001' }], series: [] };
+  const row = compareNames(local, provider)[0];
+  assert.equal(row.localEstimate, '4503599627370496.5');
+  assert.equal(row.estimateCoveredBytes, '9007199254740995');
+  assert.equal(row.estimateUnknownBytes, '4');
+  assert.equal(row.billed, '0.0000000000000000000000000001');
+  assert.equal(compareNames(local, provider).find(row => row.name === 'Zero rate').localEstimate, '0');
+  assert.equal(compareBuckets(local, provider)[0].localEstimate, '4503599627370496.5');
+  assert.equal(compareBuckets(local, provider)[0].estimateUnknownBytes, '3');
+});
+test('node display combines only verified keys and comparison uses captured original names', () => {
+  const node = (key, mergeKey, group) => ({ key, name: '【Display prefix】 same name', upload: '9007199254740993', download: '1',
+    display: { originalName: 'Same original', groups: [group], mergeKey } });
+  const grouped = displayNodes([node('a', 'actual_member:proof', 'US-1x'), node('b', 'actual_member:proof', 'HK-1x'),
+    node('c', null, 'US-1x'), node('d', 'legacy_proxy:proof', 'US-1x')]);
+  assert.equal(grouped.length, 3);
+  assert.equal(grouped[0].key, 'merge:actual_member:proof');
+  assert.equal(grouped[0].upload, '18014398509481986');
+  assert.deepEqual(grouped[0].display.groups, ['US-1x', 'HK-1x']);
+  assert.equal(compareNames({ nodes: [node('a', null, 'US-1x')],
+    comparisonNodes: [{ name: 'Same original', upload: '3', download: '4' }] },
+    { nodes: [{ name: 'Same original', rawBytes: '7', billedBytes: '3.5' }] })[0].local, '7');
 });
 
 test('local record display chooses decimal or binary units without losing integer precision', () => {

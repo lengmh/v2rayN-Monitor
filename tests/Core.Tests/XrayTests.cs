@@ -41,6 +41,55 @@ public sealed class XrayTests
         Assert.Equal(new XrayCounters(0, 0), counts);
     }
 
+    [Fact]
+    public void MultiOutboundMetricsKeepIndependentPairsAndIgnoreUnexpectedTags()
+    {
+        var json = Bytes("""
+            {"stats":{"outbound":{
+            "proxy":{"uplink":9007199254740993,"downlink":7},
+            "member":{"uplink":0,"downlink":0},
+            "missing-direction":{"uplink":1},
+            "duplicate":{"uplink":1,"uplink":2,"downlink":3},
+            "duplicate-tag":{"uplink":1,"downlink":2},"duplicate-tag":{"uplink":3,"downlink":4},
+            "overflow":{"uplink":9223372036854775808,"downlink":0},
+            "direct":{"uplink":999,"downlink":999},
+            "unexpected":{"uplink":123,"downlink":456}}}}
+            """);
+        Assert.True(XrayParser.TryReadOutboundsCounters(json, ["proxy", "member", "missing-direction", "duplicate", "duplicate-tag", "overflow", "absent"], out var result));
+        Assert.Equal(new XrayCounters(9007199254740993, 7), result!.Counters["proxy"]);
+        Assert.Equal(new XrayCounters(0, 0), result.Counters["member"]);
+        Assert.Equal(2, result.Counters.Count);
+        Assert.Equal("invalid_counter", result.UnavailableOutbounds["duplicate"]);
+        Assert.Equal("duplicate_counter", result.UnavailableOutbounds["duplicate-tag"]);
+        Assert.Equal("invalid_counter", result.UnavailableOutbounds["overflow"]);
+        Assert.Equal("missing_counter", result.UnavailableOutbounds["missing-direction"]);
+        Assert.Equal("missing_counter", result.UnavailableOutbounds["absent"]);
+    }
+
+    [Fact]
+    public void XrayCatalogBindsConfigurationAndUsesGroupNamesOnlyForDisplay()
+    {
+        var config = Bytes(Configuration(
+            """
+            ,{"tag":"123-proxy-US-1x-1-Synthetic 0.5x","protocol":"socks","settings":{"address":"127.0.0.1","port":1081}},
+            {"tag":"opaque-other","protocol":"vless","settings":{"address":"another.invalid","port":443,"id":"synthetic-secret"}}
+            """,
+            routing: ""","routing":{"balancers":[{"tag":"synthetic-group","selector":["123-proxy-US-1x"]}] }"""));
+        var snapshot = new XraySnapshot("instance", "selected", "Synthetic selected", "process",
+            XrayParser.Hash(config) + ":1", Now, Now.AddSeconds(-1), "listener", new("http://127.0.0.1:12345/debug/vars"));
+        Assert.True(XrayParser.TryReadOutboundCatalog(snapshot, config, out var catalog, out var reason));
+        Assert.Equal("ready", reason);
+        Assert.Equal(3, catalog!.Candidates.Count);
+        Assert.Equal(1, catalog.GroupCount);
+        Assert.Equal("Synthetic 0.5x", catalog.Candidates["123-proxy-US-1x-1-Synthetic 0.5x"].CapturedName!.OriginalName);
+        Assert.Equal("US-1x", catalog.Candidates["123-proxy-US-1x-1-Synthetic 0.5x"].CapturedName!.GroupLabel);
+        Assert.Null(catalog.Candidates["opaque-other"].CapturedName);
+        Assert.DoesNotContain("synthetic-secret", System.Text.Json.JsonSerializer.Serialize(catalog));
+        Assert.False(XrayParser.TryReadOutboundCatalog(snapshot with { Generation = new string('F', 64) + ":1" }, config, out _, out _));
+        var duplicate = Bytes(Encoding.UTF8.GetString(config).Replace("\"opaque-other\"", "\"proxy\""));
+        Assert.False(XrayParser.TryReadOutboundCatalog(snapshot with { Generation = XrayParser.Hash(duplicate) + ":1" }, duplicate, out _, out _));
+    }
+
     [Theory]
     [InlineData("not JSON")]
     [InlineData("{\"stats\":{\"inbound\":{\"proxy\":{\"uplink\":1,\"downlink\":2}}}}")]
@@ -116,11 +165,28 @@ public sealed class XrayTests
         => Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(proxyExtra: proxyExtra)), out _, out _));
 
     [Fact]
-    public void MultipleProxiesOrBalancerAreRejected()
+    public void MultipleProxiesAndBalancersKeepOnlyVerifiedProxyWithPartialCoverage()
     {
-        Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(",{\"tag\":\"proxy-2\",\"protocol\":\"vless\"}")), out _, out _));
-        Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(routing: ",\"routing\":{\"balancers\":[{\"tag\":\"group\"}]}")), out _, out _));
+        var json = Configuration(",{\"tag\":\"proxy-2\",\"protocol\":\"vless\"}",
+            routing: ",\"routing\":{\"balancers\":[{\"tag\":\"group\",\"selector\":[\"proxy\"]}]}");
+        Assert.True(XrayParser.TryReadConfiguration(Bytes(json), out var config, out _));
+        Assert.Equal(new ProxyCollectionScope(1, 1, "xray_outbound_proxy"), config!.Scope);
+        Assert.True(config.Scope!.IsPartial);
+        Assert.Contains("其他 1 个代理出站未采集", config.Scope.Description);
+        var snapshot = Snapshot() with { Scope = config.Scope };
+        var reading = Assert.Single(ScopeCollector.ProjectLegacy(snapshot, new(101, 202), Now, false).Readings);
+        Assert.True(reading.PartialCoverage);
+        Assert.Equal(101L, reading.Upload);
+        Assert.Equal(202L, reading.Download);
+        Assert.Equal("legacy_proxy", reading.Scope.Basis);
     }
+
+    [Theory]
+    [InlineData(",{\"tag\":\"proxy\",\"protocol\":\"vless\"}", "")]
+    [InlineData(",{\"tag\":\"other\",\"protocol\":\"vless\",\"proxySettings\":{\"tag\":\"proxy\"}}", "")]
+    [InlineData("", ",\"routing\":{\"balancers\":{}}")]
+    public void AmbiguousOrChainedMultiOutboundConfigurationsRemainRejected(string outbound, string routing)
+        => Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(outbound, routing: routing)), out _, out _));
 
     [Fact]
     public void MissingCounterEnablementIsNotAssumed()
