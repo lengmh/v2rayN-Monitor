@@ -398,7 +398,8 @@ test('cross-core history stays visible with Xray active and setup copy is curren
   }
   await page.click('.nav-item[data-view=settings]');
   await expect(page.locator('#settings-view')).not.toContainText('test.2');
-  await expect(page.locator('#settings-view')).toContainText('策略组实际成员');
+  await expect(page.locator('#settings-view')).toContainText('策略组实际出站');
+  await expect(page.locator('#settings-view')).toContainText('Xray Observatory 探测');
 });
 test('partial sing-box coverage is visible on desktop and mobile after collection resumes', async ({ page }) => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
