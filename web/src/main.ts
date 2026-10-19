@@ -410,6 +410,9 @@ function statisticLabels(): void {
   put('statistics-subtitle', probe ? '独立查看测活与延迟探测，按实际成员、日期和已知范围排查。' : '按来源和节点查看历史，清楚区分已知流量与采集间断。');
   el('records').closest('.records-panel')?.classList.toggle('local-records', !provider);
   const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
+  put('provider-metric-caption', comparison ? '对比口径' : '排行与趋势');
+  el<HTMLSelectElement>('provider-metric').options[0]!.text = comparison ? '原始量对比' : '服务商原始量';
+  el<HTMLSelectElement>('provider-metric').options[1]!.text = comparison ? '计费量对比' : '服务商计费量';
   show('provider-metric-control', provider); show('upload-legend', !provider);
   show('compare-control', provider); show('comparison-view', comparison);
   el('overview-view').classList.toggle('comparison-mode', comparison);
@@ -432,6 +435,12 @@ function statisticLabels(): void {
   put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未提供 · 点击数值查看精确值' : '仅显示非零明细 · 点击数值查看精确值 · 仅按采集时倍率快照估算，旧记录保持未知');
   put('billing-column', provider ? '计费量' : '估算计费量');
 }
+function comparisonValues(row: ComparisonRow): [string | null, string | null] {
+  return providerMetric === 'raw' ? [row.local, row.raw] : [row.localEstimate, row.billed];
+}
+function comparisonCoverage(row: Pick<ComparisonRow, 'estimateCoveredBytes' | 'estimateUnknownBytes'>): string {
+  return `已估算覆盖原始量 ${exactBytes(row.estimateCoveredBytes)}；未估算原始量 ${exactBytes(row.estimateUnknownBytes)}`;
+}
 function renderComparisonShares(section: 'nodes' | 'buckets', rows: ComparisonRow[]): void {
   const target = el(`comparison-${section}-shares`);
   target.replaceChildren();
@@ -444,14 +453,15 @@ function renderComparisonShares(section: 'nodes' | 'buckets', rows: ComparisonRo
   if (!share) return;
   const category = section === 'nodes' ? '节点' : '时间桶';
   for (const source of ['local', 'provider'] as const) {
-    const title = source === 'local' ? '本机已知量' : providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
+    const title = source === 'local' ? providerMetric === 'raw' ? '本机原始量' : '本机估算计费量' : providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
     const group = element('section', '', 'comparison-share-source'); group.dataset.source = source;
     group.append(element('h3', title));
-    const note = section === 'nodes' ? '分母为当前筛选下此来源的全部节点合计。' : '分母为当前筛选下此来源的全部已记录时间桶合计；不受翻页影响，不含未分时恢复量。';
+    const note = (section === 'nodes' ? '分母为当前筛选下此来源的全部节点合计。' : '分母为当前筛选下此来源的全部已记录时间桶合计；不受翻页影响，不含未分时恢复量。') +
+      (source === 'local' && providerMetric === 'billed' ? ' 仅包含有倍率快照的估算量，未估算部分不参与占比。' : '');
     group.append(element('p', note, 'comparison-share-note'));
     const content = element('div', '', 'ranking show-shares');
     const items = rows.flatMap((row, colorIndex) => {
-      const value = source === 'local' ? row.local : providerMetric === 'raw' ? row.raw : row.billed;
+      const value = comparisonValues(row)[source === 'local' ? 0 : 1];
       return value === null ? [] : [{ name: row.name, total: providerUnits(value), colorIndex }];
     }).sort((a, b) => a.total > b.total ? -1 : a.total < b.total ? 1 : a.name.localeCompare(b.name));
     const total = items.reduce((sum, item) => sum + item.total, 0n);
@@ -459,7 +469,8 @@ function renderComparisonShares(section: 'nodes' | 'buckets', rows: ComparisonRo
     const precise = (value: bigint): string => exactProviderTotal(providerUnitsText(value));
     if (!items.length || total === 0n) {
       content.classList.remove('show-shares');
-      content.append(element('p', !items.length ? '此来源无记录，不能视为零流量' : '此来源只有零值记录，暂无占比', 'empty-state'));
+      content.append(element('p', !items.length ? source === 'local' && providerMetric === 'billed' && rows.some(row => row.local !== null)
+        ? '没有可估算的倍率快照，不能视为零计费量' : '此来源无记录，不能视为零流量' : '此来源只有零值记录，暂无占比', 'empty-state'));
     } else {
       renderDonut(content, items, total, display, precise, `${title}的${category}占比。${note} 缺失记录不补零，与另一来源分别统计。`);
       const legend = element('div', '', 'share-legend');
@@ -486,8 +497,18 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
     put(`comparison-${id}`, value === null ? '—' : formatProviderTotal(value, unit));
     put(`comparison-${id}-exact`, value === null ? empty : exactProviderTotal(value));
   };
-  card('local', local.nodes.length ? (bytes(local.upload) + bytes(local.download)).toString() : null, '所选范围无已知量');
+  const billed = providerMetric === 'billed';
+  put('comparison-local-title', billed ? '本机估算计费量' : '本机原始量');
+  put('comparison-local-note', billed ? '仅采集时倍率快照覆盖部分' : '上传 + 下载 · 当前范围');
+  card('local', billed ? local.display?.estimatedBilledBytes ?? null : local.nodes.length ? (bytes(local.upload) + bytes(local.download)).toString() : null,
+    billed ? '没有可估算的倍率快照' : '所选范围无已知量');
   card('raw', provider.recordCount ? provider.rawBytes : null); card('billed', provider.recordCount ? provider.billedBytes : null);
+  show('comparison-estimate-note', billed);
+  put('comparison-estimate-note', `${comparisonCoverage({
+    estimateCoveredBytes: local.display?.estimateCoveredBytes ?? '0',
+    estimateUnknownBytes: local.display?.estimateUnknownBytes ?? (bytes(local.upload) + bytes(local.download)).toString()
+  })}。仅对已知倍率片段估算，不等同服务商实际扣费。`);
+  show('comparison-local-legend', billed); show('comparison-upload-legend', !billed); show('comparison-download-legend', !billed);
   const unbucketed = bytes(local.unbucketedUpload ?? '0') + bytes(local.unbucketedDownload ?? '0');
   const partial = bytes(local.partialUpload ?? '0') + bytes(local.partialDownload ?? '0');
   put('comparison-recovery', `本机历史间断 ${local.gapCount} 段。已计入总量但未分配到当前时间桶：${exactBytes(unbucketed)}；部分重叠恢复区间（未计入）：${exactBytes(partial)}。`);
@@ -497,12 +518,13 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   const table = (id: string, rows: ComparisonRow[], scaleRows = rows): void => {
     const body = el(id); detailPopover.beforeReplace(body); body.replaceChildren();
     const maximum = scaleRows.reduce((max, row) => {
-      for (const value of [row.local, providerMetric === 'raw' ? row.raw : row.billed])
+      for (const value of comparisonValues(row))
         if (value !== null && providerUnits(value) > max) max = providerUnits(value);
       return max;
     }, 0n);
     for (const row of rows) {
-      [row.local, providerMetric === 'raw' ? row.raw : row.billed].forEach((value, index) => {
+      comparisonValues(row).forEach((value, index) => {
+        const unknownEstimate = index === 0 && billed && row.local !== null && value === null;
         const tr = element('tr', '', `comparison-pair ${value === null ? 'missing' : ''}`);
         if (index === 0) {
           const name = element('td', row.name, 'comparison-name'); name.rowSpan = 2;
@@ -516,25 +538,28 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
           }
           tr.append(name);
         }
-        tr.append(element('td', index === 0 ? '本机' : '服务商'));
+        tr.append(element('td', index === 0 ? billed ? '本机估算' : '本机' : '服务商'));
         const cell = element('td', '', 'paired-traffic');
-        const amount = element('button', formatProviderTotal(value ?? '0', unit), 'paired-value');
+        const amount = element('button', unknownEstimate ? '—' : formatProviderTotal(value ?? '0', unit), 'paired-value');
         amount.type = 'button';
-        amount.title = value === null ? '此来源没有记录，显示零仅为占位，不代表实际零流量' :
-          index === 0 ? `上传 ${exactBytes(row.upload!)}\n下载 ${exactBytes(row.download!)}\n合计 ${exactProviderTotal(value)}` :
+        amount.title = unknownEstimate ? `没有可估算的倍率快照\n${comparisonCoverage(row)}` :
+          value === null ? '此来源没有记录，显示零仅为占位，不代表实际零流量' :
+          index === 0 ? billed ? `估算计费量 ${exactProviderTotal(value)}\n${comparisonCoverage(row)}\n非服务商实际扣费` :
+            `上传 ${exactBytes(row.upload!)}\n下载 ${exactBytes(row.download!)}\n合计 ${exactProviderTotal(value)}` :
             `${providerMetric === 'raw' ? '原始量' : '计费量'} ${exactProviderTotal(value)}\n方向未提供`;
         amount.setAttribute('aria-label', amount.title);
         detailPopover.connect(amount, { key: `comparison:${id}:${index}:${row.name}`, total: amount.textContent!,
-          upload: index === 0 && value !== null ? formatBytes(row.upload!, unit) : undefined,
-          download: index === 0 && value !== null ? formatBytes(row.download!, unit) : undefined,
-          exact: amount.title, note: value === null ? amount.title : index === 0 ? '本机已知量，与服务商分别计量。' : '服务商未提供上下行方向，与本机分别计量。' });
+          upload: index === 0 && !billed && value !== null ? formatBytes(row.upload!, unit) : undefined,
+          download: index === 0 && !billed && value !== null ? formatBytes(row.download!, unit) : undefined,
+          exact: amount.title, note: value === null ? amount.title : index === 0 ?
+            billed ? comparisonCoverage(row) + '。仅倍率已知部分，不等同服务商实际扣费。' : '本机已知量，与服务商分别计量。' : '服务商未提供上下行方向，与本机分别计量。' });
         const track = element('div', '', 'paired-track'), bar = element('div', '', 'paired-bar');
         bar.style.width = `${percentage(value === null ? 0n : providerUnits(value), maximum)}%`;
-        if (index === 0 && value !== null) {
+        if (index === 0 && !billed && value !== null) {
           const down = element('span', '', 'rank-download'), up = element('span', '', 'rank-upload');
           down.style.width = `${percentage(bytes(row.download!), bytes(value))}%`; up.style.flex = '1';
           bar.append(down, up);
-        } else bar.classList.add('rank-neutral');
+        } else bar.classList.add(index === 0 ? 'local-estimate' : 'rank-neutral');
         track.append(bar); cell.append(amount, track); tr.append(cell); body.append(tr);
       });
     }
@@ -542,7 +567,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   };
   const names = compareNames(local, provider);
   const sortSource = el<HTMLSelectElement>('comparison-node-sort').value;
-  const valueForSort = (row: ComparisonRow): string | null => sortSource === 'local' ? row.local : providerMetric === 'raw' ? row.raw : row.billed;
+  const valueForSort = (row: ComparisonRow): string | null => comparisonValues(row)[sortSource === 'local' ? 0 : 1];
   const sortedNames = [...names].sort((a, b) => {
     const x = valueForSort(a), y = valueForSort(b);
     if (x === null || y === null) return x === y ? a.name.localeCompare(b.name) : x === null ? 1 : -1;
@@ -570,7 +595,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   } else {
     const byLabel = new Map(buckets.map(row => [row.name, row]));
     const scale = buckets.reduce((max, row) => {
-      for (const value of [row.local, providerMetric === 'raw' ? row.raw : row.billed]) {
+      for (const value of comparisonValues(row)) {
         if (value !== null && providerUnits(value) > max) max = providerUnits(value);
       }
       return max;
@@ -578,17 +603,19 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
     const every = Math.max(1, Math.ceil(slots.length / Math.max(2, Math.floor((chart.clientWidth || 600) / 65))));
     slots.forEach(({ label }, index) => {
       const row = byLabel.get(label), column = element('div', '', 'chart-column comparison-column'), bars = element('div', '', 'comparison-bars');
-      const values = [row?.local ?? null, (providerMetric === 'raw' ? row?.raw : row?.billed) ?? null];
-      column.title = `${label}\n本机：${values[0] === null ? '无记录' : exactProviderTotal(values[0])}\n服务商：${values[1] === null ? '无记录' : exactProviderTotal(values[1])}`;
+      const values = row ? comparisonValues(row) : [null, null];
+      column.title = `${label}\n${billed ? '本机估算' : '本机'}：${values[0] == null ? billed && row?.local !== null ? '倍率未知或无记录' : '无记录' : exactProviderTotal(values[0])}\n服务商：${values[1] == null ? '无记录' : exactProviderTotal(values[1])}`;
+      if (billed && row?.local !== null && row) column.title += `\n${comparisonCoverage(row)}`;
       values.forEach((value, i) => {
         const bar = element('span', '', value === null ? 'chart-missing' : providerUnits(value) === 0n ? 'chart-zero' : i === 0 ? 'comparison-bar local' : 'comparison-bar provider');
         if (value !== null && providerUnits(value) > 0n) bar.style.height = `${percentage(providerUnits(value), scale)}%`;
-        if (i === 0 && value !== null && bytes(value) > 0n && row) {
+        if (i === 0 && !billed && value !== null && bytes(value) > 0n && row) {
           const down = element('span', '', 'rank-download'), up = element('span', '', 'rank-upload');
           down.style.height = `${percentage(bytes(row.download!), bytes(value))}%`;
           up.style.flex = '1'; bar.append(down, up);
           column.title += `\n本机上传 ${exactBytes(row.upload!)} · 下载 ${exactBytes(row.download!)}`;
         }
+        if (i === 0 && billed) bar.classList.add('local-estimate');
         bars.append(bar);
       });
       column.append(bars);

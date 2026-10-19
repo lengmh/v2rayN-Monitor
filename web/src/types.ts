@@ -8,7 +8,7 @@ export interface TrafficRow { start: string; end: string; nodeKey: string; nodeN
 export interface HistoryResult {
   basis?: string;
   start: string; end: string; upload: string; download: string; unallocatedUpload: string; unallocatedDownload: string;
-  gapCount: number; series: { label: string; upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string }[];
+  gapCount: number; series: { label: string; upload: string; download: string; recoveredUpload?: string; recoveredDownload?: string; display?: TrafficDisplay | null }[];
   nodes: LocalNode[];
   comparisonNodes?: LocalNode[] | null;
   display?: TrafficDisplay | null;
