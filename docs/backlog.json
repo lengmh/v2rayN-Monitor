@@ -11,27 +11,30 @@
     "issue": 18,
     "status": "in_progress",
     "branch": "feat/issue18-xray-multi-outbounds",
-    "scope": "能力分级：基础版使用原生Xray，完整版增加配套sing-box统计核心，扩展版按需增加两种核心的独立探测；S5.8不作为#15/#18普通统计的前置",
+    "scope": "Release按basic/full/extended三档独立分包；复用普通统计既有实机通过结果，纠正笼统重复验收表述；S5.8继续作为可选扩展",
     "implementation_status": "complete",
-    "remaining": "本批仅更新文档及任务分级，文档检查与精确CI另核；#15/#18普通统计的受控流量、切换及数据保存验收仍待收口。S5.8保留已有实现与历史，Xray实验核心仍未启用",
-    "resume_requirement": "先恢复#15/#18普通统计验收，不要求更换原生Xray；S5.8为可选扩展，后续核心替换、重载和新预览启用仍需具体范围及启用前提醒，现有test.5/v3不因分级重装或降级"
+    "remaining": "本批只更新发布约定及验收状态说明，文档检查与精确CI另核；普通采集/记账已有实机通过记录，不重开。尚未启用的名称修复与历史未覆盖的受控切换/重启分别保留；三档发布资产尚未构建或发布",
+    "resume_requirement": "复用sing-box成员统计/重开恢复和69ffdfa的Xray八批/35范围实机对账，不要求重做普通统计；后续只检查新改动及直接影响。三档发包按对应内容和摘要分别提供，实际发布另行授权；S5.8可选且不要求更换原生Xray，启用新预览前仍提醒"
   },
   "capability_levels": [
     {
       "id": "basic",
       "name": "基础版",
+      "release_asset_template": "v2rayn-monitor-<version>-basic-windows-x64.zip",
       "scope": "v2rayN使用原生Xray的普通流量统计；具体模式以支持矩阵为准",
       "core_requirement": "保留原生Xray，读取已启用的原生统计接口"
     },
     {
       "id": "full",
       "name": "完整版",
+      "release_asset_template": "v2rayn-monitor-<version>-full-windows-x64.zip",
       "scope": "基础版加sing-box，覆盖当前支持的两个核心及其已支持模式；独立探测不是验收前置",
       "core_requirement": "原生Xray保持；另装启用V2Ray API及相应统计能力的配套sing-box-client.exe，多出站及策略组需成员统计能力"
     },
     {
       "id": "extended",
       "name": "扩展版",
+      "release_asset_template": "v2rayn-monitor-<version>-extended-windows-x64.zip",
       "scope": "两种核心的独立探测计量为可选能力，分别启用并保留字节口径和未知边界",
       "core_requirement": "sing-box需对应探测能力，Xray需精确核验的探测实验核心；现有test.5已合并普通统计和探测，不因分级重新安装"
     }
