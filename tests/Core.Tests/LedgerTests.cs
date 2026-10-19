@@ -1328,8 +1328,8 @@ public sealed class LedgerTests : IDisposable
             var unknown = migrated.Query(ScopeAll("legacy_proxy") with { ScopeName = "Synthetic unknown" });
             Assert.Null(unknown.Display!.EstimatedBilledBytes);
             Assert.Equal("7", unknown.Display.EstimateUnknownBytes);
-            Assert.Null(Assert.Single(migrated.Export(ScopeAll("legacy_proxy"))
-                .Where(x => x.Quality == "recovered-contained")).Display!.EstimatedBilledBytes);
+            Assert.Null(Assert.Single(migrated.Export(ScopeAll("legacy_proxy")),
+                x => x.Quality == "recovered-contained").Display!.EstimatedBilledBytes);
         }
 
         var v2Rows = HistorySnapshot(Database, includeSchema: false);
@@ -1735,7 +1735,7 @@ public sealed class LedgerTests : IDisposable
         Assert.True(upgraded.SupportsDisplayMetadata);
         Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected),
             System.Text.Json.JsonSerializer.Serialize(upgraded.Query(ScopeAll()).Display));
-        var captured = Assert.Single(upgraded.Export(ScopeAll()).Where(x => x.Display!.Rate == "0.5"));
+        var captured = Assert.Single(upgraded.Export(ScopeAll()), x => x.Display!.Rate == "0.5");
         Assert.Equal("Synthetic raw 0.5x", captured.Display!.OriginalName);
         Assert.Equal("Synthetic group 2x", Assert.Single(captured.Display.Groups));
         Assert.NotNull(captured.Display.MergeKey);
