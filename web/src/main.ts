@@ -4,6 +4,7 @@ import { chartSlots, shortLabel } from './lib/chart.ts';
 import { compareNames, compareBuckets } from './lib/comparison.ts';
 import { displayNodes } from './lib/display.ts';
 import { initializeTheme } from './lib/theme.ts';
+import { createUiMotion } from './lib/motion.ts';
 import { createDetailPopover } from './lib/detail-popover.ts';
 import type { ComparisonRow } from './lib/comparison.ts';
 import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
@@ -18,7 +19,15 @@ const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   if (!found) throw new Error(`页面组件缺失：${id}`);
   return found as T;
 };
-const put = (id: string, value: string): void => { el(id).textContent = value; };
+const put = (id: string, value: string): void => {
+  const target = el(id);
+  // Preserve the exact text/accessibility name; only the display unit is quieter.
+  const amount = target.classList.contains('metric-value') ? /^(.*)( GB| GiB)$/.exec(value) : null;
+  if (amount) {
+    const suffix = document.createElement('span'); suffix.className = 'metric-unit'; suffix.textContent = amount[2];
+    target.replaceChildren(document.createTextNode(amount[1]), suffix);
+  } else target.textContent = value;
+};
 const show = (id: string, visible: boolean): void => { el(id).hidden = !visible; };
 const element = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag); node.textContent = text; node.className = className; return node;
@@ -26,6 +35,8 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '', class
 const fail = (message: string): void => { put('global-error', message); show('global-error', true); };
 initializeTheme(el<HTMLSelectElement>('theme'));
 const detailPopover = createDetailPopover(showExactValue);
+const motion = createUiMotion();
+el('theme').addEventListener('change', () => motion.cancel());
 function discloseGroups(button: HTMLButtonElement, groups: string[], key: string, note?: string): void {
   button.classList.add('has-groups');
   button.removeAttribute('title');
@@ -54,6 +65,8 @@ let statisticsSource = '';
 let providerMetric: 'raw' | 'billed' = 'raw';
 let comparison = false;
 let latestComparison: { local: HistoryResult; provider: ProviderHistory } | null = null;
+let comparisonNodePage = 0;
+let comparisonNodeCount = 0;
 let comparisonBucketPage = 0;
 let comparisonBucketCount = 0;
 let latestStatus: CollectorStatus | null = null;
@@ -312,6 +325,7 @@ function renderEstimate(display: TrafficDisplay | null | undefined): void {
     `名称倍率估算 · 覆盖 ${formatBytes(covered, unit)}${unknown && bytes(unknown) > 0n ? ` · 未估算 ${formatBytes(unknown, unit)}` : ''} · 非服务商扣费`);
 }
 function renderHistory(history: HistoryResult): void {
+  motion.cancel();
   latestHistory = history;
   latestProvider = null;
   statisticLabels();
@@ -436,6 +450,7 @@ function renderComparisonShares(section: 'nodes' | 'buckets', rows: ComparisonRo
   const target = el(`comparison-${section}-shares`);
   target.replaceChildren();
   const share = comparisonModes[section] === 'share';
+  if (section === 'nodes') show('comparison-node-sort-control', !share);
   show(`comparison-${section}-list`, !share); show(`comparison-${section}-shares`, share);
   for (const button of document.querySelectorAll<HTMLButtonElement>(`[data-comparison-section="${section}"]`)) {
     const selected = button.dataset.comparisonMode === comparisonModes[section];
@@ -480,7 +495,8 @@ function renderComparisonShares(section: 'nodes' | 'buckets', rows: ComparisonRo
   }
 }
 function renderComparison(local: HistoryResult, provider: ProviderHistory): void {
-  if (latestComparison?.local !== local || latestComparison?.provider !== provider) comparisonBucketPage = 0;
+  motion.cancel();
+  if (latestComparison?.local !== local || latestComparison?.provider !== provider) { comparisonBucketPage = 0; comparisonNodePage = 0; }
   latestComparison = { local, provider }; latestProvider = null; latestHistory = null; statisticLabels();
   const card = (id: string, value: string | null, empty = '所选范围无记录'): void => {
     put(`comparison-${id}`, value === null ? '—' : formatProviderTotal(value, unit));
@@ -504,6 +520,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
     for (const row of rows) {
       [row.local, providerMetric === 'raw' ? row.raw : row.billed].forEach((value, index) => {
         const tr = element('tr', '', `comparison-pair ${value === null ? 'missing' : ''}`);
+        tr.dataset.motionKey = JSON.stringify([row.name, index]);
         if (index === 0) {
           const name = element('td', row.name, 'comparison-name'); name.rowSpan = 2;
           if (id === 'comparison-nodes') {
@@ -548,7 +565,13 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
     if (x === null || y === null) return x === y ? a.name.localeCompare(b.name) : x === null ? 1 : -1;
     return providerUnits(x) > providerUnits(y) ? -1 : providerUnits(x) < providerUnits(y) ? 1 : a.name.localeCompare(b.name);
   });
-  table('comparison-nodes', sortedNames);
+  comparisonNodeCount = sortedNames.length;
+  const nodePages = Math.max(1, Math.ceil(comparisonNodeCount / pageSize));
+  comparisonNodePage = Math.min(comparisonNodePage, nodePages - 1);
+  table('comparison-nodes', sortedNames.slice(comparisonNodePage * pageSize, (comparisonNodePage + 1) * pageSize), sortedNames);
+  put('comparison-node-page', `共 ${comparisonNodeCount.toLocaleString('zh-CN')} 个节点 · 第 ${comparisonNodePage + 1} / ${nodePages} 页 · 每页 ${pageSize} 个`);
+  el<HTMLButtonElement>('comparison-node-previous').disabled = comparisonNodePage === 0;
+  el<HTMLButtonElement>('comparison-node-next').disabled = comparisonNodePage + 1 >= nodePages;
   renderComparisonShares('nodes', names);
   const buckets = compareBuckets(local, provider);
   renderComparisonShares('buckets', buckets);
@@ -600,6 +623,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   el('summary').setAttribute('aria-busy', 'false');
 }
 function renderProviderHistory(history: ProviderHistory): void {
+  motion.cancel();
   latestProvider = history; latestHistory = null; statisticLabels();
   const metric = (value: { rawBytes: string; billedBytes: string }): string => providerMetric === 'raw' ? value.rawBytes : value.billedBytes;
   put('total-value', formatBytes(history.rawBytes, unit)); put('total-exact', exactBytes(history.rawBytes));
@@ -711,10 +735,12 @@ async function refresh(force = false): Promise<void> {
   } catch (error) {
     if (!controller.signal.aborted && !expired) { fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '连接中断 · 自动重试'); }
   } finally {
+    updateFilterDisclosure();
     if (refreshController === controller) { refreshController = null; if (!expired) refreshTimer = setTimeout(() => { void refresh(); }, 5000); }
   }
 }
 function navigate(view: string): void {
+  motion.cancel();
   detailPopover.close();
   const wasProbe = probeView();
   activeView = view;
@@ -764,6 +790,10 @@ function chooseSource(source: string): void {
   select.value = bucket;
   nodeKey = ''; page = 0; latestHistory = null; latestProvider = null; latestComparison = null; statisticLabels();
   comparisonBucketPage = 0; comparisonBucketCount = 0;
+  comparisonNodePage = 0; comparisonNodeCount = 0;
+  put('comparison-node-page', '正在读取…');
+  el<HTMLButtonElement>('comparison-node-previous').disabled = true;
+  el<HTMLButtonElement>('comparison-node-next').disabled = true;
   put('comparison-bucket-page', '正在读取…');
   el<HTMLButtonElement>('comparison-bucket-previous').disabled = true;
   el<HTMLButtonElement>('comparison-bucket-next').disabled = true;
@@ -818,17 +848,43 @@ el('bucket').addEventListener('change', () => { bucket = el<HTMLSelectElement>('
 el('unit').addEventListener('change', () => { detailPopover.close(); unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
 el('previous-page').addEventListener('click', () => { if (page > 0) { page--; void refresh(true); } });
 el('next-page').addEventListener('click', () => { if ((page + 1) * pageSize < (latestProvider?.recordCount ?? latestHistory?.recordCount ?? 0)) { page++; void refresh(true); } });
+el('filter-disclosure').addEventListener('click', () => {
+  const control = el('filter-disclosure');
+  motion.disclose(el('filter-extra'), control, control.getAttribute('aria-expanded') !== 'true');
+});
+function updateFilterDisclosure(): void {
+  const option = (id: string): string => el<HTMLSelectElement>(id).selectedOptions[0]?.textContent ?? '';
+  put('filter-disclosure', `更多筛选 · ${option('node-filter')} · ${option('bucket')} · ${unit}`);
+}
+for (const id of ['node-filter', 'bucket', 'unit']) el(id).addEventListener('change', updateFilterDisclosure);
 el('comparison-node-sort').addEventListener('change', () => {
-  if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+  comparisonNodePage = 0;
+  detailPopover.close();
+  motion.reorder(el('comparison-nodes'), () => {
+    if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+  });
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-comparison-mode]')) {
   button.addEventListener('click', () => {
     const section = button.dataset.comparisonSection === 'nodes' ? 'nodes' : 'buckets';
     comparisonModes[section] = button.dataset.comparisonMode === 'share' ? 'share' : 'list';
     detailPopover.close();
-    if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+    const panel = el(`comparison-${section}-list`).closest<HTMLElement>('.comparison-panel')!;
+    motion.crossfade(panel, () => {
+      if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+    });
   });
 }
+function changeComparisonNodePage(offset: number): void {
+  const next = comparisonNodePage + offset;
+  if (!latestComparison || next < 0 || next * pageSize >= comparisonNodeCount) return;
+  comparisonNodePage = next;
+  detailPopover.close();
+  renderComparison(latestComparison.local, latestComparison.provider);
+  el('comparison-nodes-list').querySelector('.table-scroll')!.scrollTop = 0;
+}
+el('comparison-node-previous').addEventListener('click', () => changeComparisonNodePage(-1));
+el('comparison-node-next').addEventListener('click', () => changeComparisonNodePage(1));
 el('comparison-bucket-previous').addEventListener('click', () => {
   if (latestComparison && comparisonBucketPage > 0) { comparisonBucketPage--; renderComparison(latestComparison.local, latestComparison.provider); }
 });
@@ -845,6 +901,7 @@ el('probe-basis').addEventListener('change', () => {
 });
 el('provider-metric').addEventListener('change', () => {
   providerMetric = el<HTMLSelectElement>('provider-metric').value as 'raw' | 'billed';
+  comparisonNodePage = 0;
   if (latestProvider) renderProviderHistory(latestProvider);
   if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
 });
@@ -857,8 +914,10 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-ranking
       peer.classList.toggle('selected', selected);
       peer.setAttribute('aria-pressed', String(selected));
     }
-    if (latestHistory) renderHistory(latestHistory);
-    else if (latestProvider) renderProviderHistory(latestProvider);
+    motion.crossfade(el('ranking'), () => {
+      if (latestHistory) renderHistory(latestHistory);
+      else if (latestProvider) renderProviderHistory(latestProvider);
+    });
   });
 }
 el('compare-toggle').addEventListener('change', () => {

@@ -457,6 +457,8 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
     await page.selectOption('#theme', theme);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
+      for (const section of ['nodes', 'buckets']) await page.click(`[data-comparison-section="${section}"][data-comparison-mode="list"]`);
+      await page.screenshot({ path: `test-results/comparison-list-${theme}-${width}.png`, fullPage: true });
       for (const section of ['nodes', 'buckets']) {
         await page.click(`[data-comparison-section="${section}"][data-comparison-mode="share"]`);
         await expect(page.locator(`#comparison-${section}-shares svg`)).toHaveCount(2);
@@ -478,7 +480,9 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
     await expect(page.locator(`#comparison-${section}-list`)).toBeVisible();
     await expect(page.locator(`#comparison-${section}-shares`)).toBeHidden();
   }
-  partialOnly = true; await page.selectOption('#bucket', 'hour');
+  partialOnly = true;
+  if (await page.locator('#filter-disclosure').isVisible()) await page.locator('#filter-disclosure').click();
+  await page.selectOption('#bucket', 'hour');
   await expect(page.locator('#comparison-local')).toHaveText('—');
   await expect(page.locator('#comparison-local-exact')).toHaveText('所选范围无已知量');
   await expect(page.locator('#comparison-recovery')).toContainText('部分重叠恢复区间（未计入）：500 bytes');
@@ -700,3 +704,123 @@ test('local partial recovery is unknown and a known idle record remains zero', a
   await expect(page.locator('#total-exact')).toHaveText('0 bytes');
 });
 
+
+test('polished mobile disclosure and reduced motion remain accessible', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await mock(page);
+  const disclosure = page.locator('#filter-disclosure');
+  await expect(disclosure).toBeVisible();
+  await expect(page.locator('#node-filter')).toBeHidden();
+  await disclosure.focus(); await page.keyboard.press('Enter');
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+  await page.selectOption('#bucket', 'hour');
+  await expect(disclosure).toContainText('按小时');
+  await page.selectOption('#unit', 'GiB');
+  await expect(disclosure).toContainText('GiB');
+  await page.locator('#node-filter').evaluate(n => { n.options[1].textContent = '很长的合成节点名称 '.repeat(8) + 'ContinuousSyntheticName'.repeat(8); });
+  await page.selectOption('#node-filter', 'a');
+  await expect(disclosure).toContainText('ContinuousSyntheticName');
+  await disclosure.click();
+  await expect(page.locator('#node-filter')).toBeHidden();
+  await expect(page.locator('#demo-notice')).toBeVisible();
+  await page.click('#ranking-share');
+  expect(await page.locator('#ranking').evaluate(n => getComputedStyle(n).animationName)).toBe('none');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await expect(page.locator('#node-filter')).toBeVisible();
+  await expect(disclosure).toBeHidden();
+});
+
+test('collector polling preserves filter focus and never replays user motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mock(page);
+  await page.click('#ranking-share');
+  await expect(page.locator('#ranking')).not.toHaveClass(/user-view-change/);
+  await page.click('#filter-disclosure');
+  await page.locator('#bucket').focus();
+  await page.evaluate(() => { window.previewAnimationStarts = 0; document.addEventListener('animationstart', () => window.previewAnimationStarts++); });
+  await page.waitForResponse(r => new URL(r.url()).pathname === '/api/history', { timeout: 8000 });
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('#bucket')).toBeFocused();
+  await expect(page.locator('#filter-disclosure')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#ranking')).not.toHaveClass(/user-view-change/);
+  expect(await page.evaluate(() => window.previewAnimationStarts)).toBe(0);
+});
+
+test('production theme paints html body and shell, including narrow screens', async ({ page }) => {
+  await mock(page);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const [theme, background, panel] of [
+      ['dark', 'rgb(23, 27, 27)', 'rgb(32, 37, 37)'],
+      ['light', 'rgb(245, 245, 242)', 'rgb(254, 254, 253)'],
+      ['dark', 'rgb(23, 27, 27)', 'rgb(32, 37, 37)']
+    ]) {
+      await page.selectOption('#theme', theme);
+      for (const selector of ['html', 'body', '.app-shell']) {
+        await expect(page.locator(selector)).toHaveCSS('background-color', background);
+      }
+      await expect(page.locator('.filter-panel')).toHaveCSS('background-color', panel);
+      await expect(page.locator('html')).toHaveCSS('color-scheme', theme);
+      await page.screenshot({ path: `test-results/polished-overview-${theme}-${width}.png`, fullPage: true });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+  }
+});
+
+test('v2 motion keeps both surfaces then cancels immediately on navigation', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await mock(page);
+  const state = await page.evaluate(() => {
+    document.querySelector('#ranking').scrollTop=30;
+    document.querySelector('#ranking-share').click();
+    const old=document.querySelector('.motion-snapshot');
+    const result={old:!!old,inert:old?.inert,ids:old?.querySelectorAll('[id]').length,
+      oldBars:old?.querySelectorAll('.rank-track').length,ring:document.querySelectorAll('#ranking .share-chart').length,
+      animations:document.querySelector('#ranking').getAnimations().length};
+    document.querySelector('.nav-item[data-view=settings]').click();
+    return {...result,afterNavigate:document.querySelectorAll('.motion-snapshot').length};
+  });
+  expect(state).toMatchObject({old:true,inert:true,ids:0,ring:1,animations:1,afterNavigate:0});
+  expect(state.oldBars).toBeGreaterThan(0);
+  await page.click('.nav-item[data-view=overview]');
+  await page.evaluate(()=>{for(let i=0;i<6;i++)document.querySelector(`[data-ranking-mode="${i%2?'share':'ranking'}"]`).click();});
+  await expect(page.locator('.motion-snapshot')).toHaveCount(0);
+  await expect(page.locator('#ranking .share-chart')).toHaveCount(1);
+  await page.setViewportSize({width:390,height:844});
+  expect(await page.evaluate(()=>{document.querySelector('#filter-disclosure').click();return document.querySelector('#filter-extra').getAnimations().length;})).toBe(1);
+  await page.evaluate(()=>{document.querySelector('#filter-disclosure').click();document.querySelector('#filter-disclosure').click();});
+  await expect.poll(()=>page.locator('#filter-extra').evaluate(n=>n.getAnimations().length)).toBe(0);
+  await expect(page.locator('#filter-disclosure')).toHaveAttribute('aria-expanded','true');
+  await expect(page.locator('#bucket')).toBeVisible();
+});
+
+test('v2 paired sort moves source pairs together and preserves exact-name order', async ({ page }) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  const provider={source:'Synthetic motion',rawBytes:'6000',billedBytes:'6000.000123',recordCount:3,series:[],records:[],nodes:[
+    {name:'Synthetic · Singapore',rawBytes:'1000',billedBytes:'1000'},
+    {name:'Synthetic · Tokyo',rawBytes:'3000',billedBytes:'3000.000123'},
+    {name:'Synthetic · Frankfurt',rawBytes:'2000',billedBytes:'2000'}]};
+  await mock(page,{'/api/provider/sources':r=>r.fulfill(json([provider.source])),
+    '/api/provider/nodes':r=>r.fulfill(json(provider.nodes.map(n=>({key:n.name,name:n.name})))),
+    '/api/provider/history':r=>r.fulfill(json(provider))});
+  await page.selectOption('#statistics-source',provider.source);await page.check('#compare-toggle');
+  await expect(page.locator('#comparison-nodes tr')).toHaveCount(6);
+  // Unequal row counts must still place both pagination bars at the card bottom.
+  const nodeFooter = await page.locator('#comparison-nodes-list > .pagination').boundingBox();
+  const bucketFooter = await page.locator('#comparison-buckets-list > .pagination').boundingBox();
+  expect(Math.abs(nodeFooter.y + nodeFooter.height - bucketFooter.y - bucketFooter.height)).toBeLessThanOrEqual(1);
+  const sortBox = await page.locator('#comparison-node-sort').boundingBox();
+  const switchBox = await page.locator('[aria-label="同名节点对照显示方式"]').boundingBox();
+  expect(sortBox.x + sortBox.width).toBeLessThanOrEqual(switchBox.x);
+  expect(Math.abs(sortBox.y + sortBox.height / 2 - switchBox.y - switchBox.height / 2)).toBeLessThanOrEqual(2);
+  const moving=await page.evaluate(()=>{
+    const control=document.querySelector('#comparison-node-sort');control.value='provider';control.dispatchEvent(new Event('change'));
+    return [...document.querySelectorAll('#comparison-nodes tr')].map(r=>({key:JSON.parse(r.dataset.motionKey),frames:r.getAnimations()[0]?.effect.getKeyframes()}));
+  });
+  expect(moving.map(r=>r.key[0])).toEqual(['Synthetic · Tokyo','Synthetic · Tokyo','Synthetic · Frankfurt','Synthetic · Frankfurt','Synthetic · Singapore','Synthetic · Singapore']);
+  expect(moving[0].frames[0].transform).toBe(moving[1].frames[0].transform);
+  expect(moving[2].frames[0].transform).toBe(moving[3].frames[0].transform);
+  await expect.poll(()=>page.locator('#comparison-nodes').evaluate(n=>n.getAnimations({subtree:true}).length)).toBe(0);
+});
