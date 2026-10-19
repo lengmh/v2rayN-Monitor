@@ -32,6 +32,32 @@ test('production DOM exchanges fragment once, keeps integer bytes, separates mis
   assert.equal(get('live-upload').textContent, '↑ —'); assert.equal(get('live-download').textContent, '↓ 0 B/s');
   change('unit', 'GiB'); assert.equal(get('total-value').textContent, '15.000 GiB'); assert.equal(get('total-exact').textContent, '16,106,127,360 bytes'); assert.equal(errors.length, 0);
 });
+test('partial route coverage stays explicit in live status and historical records', async t => {
+  const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: '正在采集 sing-box proxy 原始字节。', currentNode: 'Synthetic A', lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false,
+      scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 37, uncollectedGroups: 4, description } }),
+    '/api/history': () => Response.json({ ...history, gapCount: 1,
+      records: history.records.map(record => ({ ...record, partialCoverage: true })),
+      gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'uncollected_outbounds', isOpen: false }] })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.ok(get('collector-message').textContent.includes(description));
+  assert.ok(get('settings-collector-status').textContent.includes(description));
+  assert.equal(get('status-dot').classList.contains('connected'), false);
+  assert.ok(get('quality-notice').textContent.includes('组和其他代理的流量未知'));
+  assert.ok(get('gap-list').textContent.includes('其他出站未采集，流量未知'));
+  assert.ok(get('records').textContent.includes('部分出站'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('historical scope warning survives pagination and the capped gap details', async t => {
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, partialCoverage: true, gapCount: 201,
+      gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'identity_change', isOpen: false }] })
+  });
+  assert.ok(get('quality-notice').textContent.includes('组和其他代理的流量未知'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
 test('backend node labels are inserted as text, not HTML', async t => {
   const name = '<img src=x onerror=alert(1)>';
   const { w, get } = await fixture(t, { '/api/history': () => Response.json({ ...history, nodes: [{ ...history.nodes[0], name }], records: [{ ...history.records[0], nodeName: name }] }) });

@@ -81,6 +81,233 @@ public sealed class ActiveConfigurationTests : IDisposable
         return result;
     }
 
+    private const string AnyTlsConfiguration = """
+        {"inbounds":[{"type":"mixed","tag":"mixed","listen":"127.0.0.1","listen_port":12344}],
+         "outbounds":[{"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","server_port":443,
+         "password":"Synthetic-AnyTLS-Only","tls":{"enabled":true,"server_name":"front.synthetic.invalid","alpn":["h2"]}},
+         {"tag":"direct","type":"direct"}],"route":{"final":"proxy"}}
+        """;
+    private static byte[] StatisticsEndpoint => Bytes("""{"listen":"127.0.0.1:12345"}""");
+    private static Dictionary<string, string?> AnyTlsProfile(string id = "A")
+    {
+        var profile = Profile(id);
+        profile["ConfigType"] = "11"; profile["Password"] = "Synthetic-AnyTLS-Only";
+        profile["Network"] = "raw"; profile["ProtoExtra"] = "{}";
+        profile["TransportExtra"] = """{"Host":"front.synthetic.invalid"}""";
+        return profile;
+    }
+    private string ReadAnyTls(string id = "A", string configuration = AnyTlsConfiguration)
+        => WindowsDiscovery.ReadProfile(Profiles, id, Bytes(Gui), Bytes(configuration), out _, StatisticsEndpoint);
+    private static bool MatchesAnyTls(Dictionary<string, string?> profile, string configuration = AnyTlsConfiguration, string gui = Gui)
+        => SingboxParser.MatchesSelectedConnection(profile, Bytes(gui), Bytes(configuration), out _);
+
+    [Fact]
+    public void AnyTlsUsesSelectedIndexIdAndIgnoresXrayCorePreferenceInThisFork()
+    {
+        CreateProfiles(AnyTlsProfile(), AnyTlsProfile("B"));
+        Assert.Equal("Same synthetic name", ReadAnyTls("A"));
+        Assert.Equal("Same synthetic name", ReadAnyTls("B"));
+        Assert.True(SingboxParser.TryReadConfiguration(Bytes(AnyTlsConfiguration), StatisticsEndpoint, out var parsed, out _));
+        Assert.Equal("sing-box", parsed!.CoreName);
+        Assert.Equal("anytls", parsed.Protocol);
+        Assert.False(parsed.Scope!.IsPartial);
+    }
+
+    [Theory]
+    [InlineData("Password", "Synthetic-Changed")]
+    [InlineData("Sni", "changed.synthetic.invalid")]
+    [InlineData("Alpn", "http/1.1")]
+    [InlineData("AllowInsecure", "true")]
+    [InlineData("Fingerprint", "firefox")]
+    public void AnyTlsRejectsStaleAuthenticationOrTls(string field, string value)
+    {
+        var changed = AnyTlsProfile("B"); changed[field] = value;
+        CreateProfiles(AnyTlsProfile(), changed);
+        Assert.Equal("mapping_changed", Assert.Throws<WindowsDiscovery.DiscoveryException>(() => ReadAnyTls("B")).State);
+    }
+
+    [Fact]
+    public void AnyTlsUsesExactClientTlsDefaultsAndCertificatePinNormalization()
+    {
+        Assert.True(MatchesAnyTls(AnyTlsProfile())); // DefFingerprint is not emitted in this branch.
+        var explicitFingerprint = AnyTlsProfile(); explicitFingerprint["Fingerprint"] = "chrome";
+        var withFingerprint = Change(AnyTlsConfiguration, root => Proxy(root)["tls"]!["utls"] =
+            JsonNode.Parse("""{"enabled":true,"fingerprint":"chrome"}"""));
+        Assert.True(MatchesAnyTls(explicitFingerprint, withFingerprint));
+        Assert.False(MatchesAnyTls(AnyTlsProfile(), withFingerprint));
+        var hexPin = AnyTlsProfile(); hexPin["CertSha"] = new string('a', 64);
+        Assert.True(MatchesAnyTls(hexPin)); // Hex pins are ignored by the fixed sing-box generator.
+        var pin = Convert.ToBase64String(Enumerable.Repeat((byte)42, 32).ToArray());
+        var pinned = AnyTlsProfile(); pinned["CertSha"] = pin; pinned["AllowInsecure"] = "true";
+        var pinConfiguration = Change(AnyTlsConfiguration, root =>
+            Proxy(root)["tls"]!["certificate_public_key_sha256"] = new JsonArray(pin));
+        Assert.True(MatchesAnyTls(pinned, pinConfiguration));
+        Assert.False(MatchesAnyTls(pinned, AnyTlsConfiguration));
+        var fragmented = Change(Gui, root => root["CoreBasicItem"]!["EnableFragment"] = true);
+        Assert.False(MatchesAnyTls(AnyTlsProfile(), gui: fragmented));
+        var fragmentConfiguration = Change(AnyTlsConfiguration, root =>
+        { Proxy(root)["tls"]!["fragment"] = true; Proxy(root)["tls"]!["record_fragment"] = true; });
+        Assert.True(MatchesAnyTls(AnyTlsProfile(), fragmentConfiguration, fragmented));
+    }
+
+    [Theory]
+    [InlineData("Cert", "Synthetic unsupported certificate")]
+    [InlineData("EchConfigList", "Synthetic unsupported ECH")]
+    public void AnyTlsUnsupportedAdvancedFieldsRemainUnknown(string field, string value)
+    {
+        var profile = AnyTlsProfile(); profile[field] = value; CreateProfiles(profile);
+        Assert.Equal("unsupported_connection", Assert.Throws<WindowsDiscovery.DiscoveryException>(() => ReadAnyTls()).State);
+    }
+
+    [Theory]
+    [InlineData("""{"listen":"0.0.0.0:12345"}""")]
+    [InlineData("""{"listen":"localhost:12345"}""")]
+    [InlineData("""{"listen":"127.0.0.1:0"}""")]
+    [InlineData("""{"listen":"127.0.0.1:12345","outbounds":["direct"]}""")]
+    [InlineData("""{"listen":"127.0.0.1:12345","listen":"127.0.0.1:23456"}""")]
+    public void AnyTlsStatisticsFileCannotOverrideConfigurationOrBindPublicly(string file)
+    {
+        Assert.False(SingboxParser.TryReadConfiguration(Bytes(AnyTlsConfiguration), Bytes(file), out _, out _));
+    }
+
+    [Fact]
+    public void AnyTlsAdditionalOutboundsDoNotBlockTheVerifiedProxy()
+    {
+        var extra = Change(AnyTlsConfiguration, root => root["outbounds"]!.AsArray().Add(JsonNode.Parse(
+            """{"type":"anytls","tag":"another-proxy","server":"other.synthetic.invalid","server_port":443,"password":"Synthetic"}""")));
+        CreateProfiles(AnyTlsProfile());
+        Assert.True(SingboxParser.TryReadConfiguration(Bytes(extra), StatisticsEndpoint, out _, out _));
+        Assert.Equal("Same synthetic name", ReadAnyTls(configuration: extra));
+    }
+
+    [Fact]
+    public void AnyTlsGeneratedMultiOutboundShapeReportsOnlyRoutedProxyCoverage()
+    {
+        // Counts mirror the observed shape; all tags, endpoints and authentication are invented.
+        var configuration = Change(AnyTlsConfiguration, root =>
+        {
+            var outbounds = root["outbounds"]!.AsArray();
+            for (var i = 0; i < 30; i++) outbounds.Add(JsonNode.Parse($$"""
+                {"type":"anytls","tag":"synthetic-anytls-{{i}}","server":"extra.synthetic.invalid",
+                 "server_port":443,"password":"Synthetic"}
+                """));
+            for (var i = 0; i < 3; i++) outbounds.Add(JsonNode.Parse($$"""
+                {"type":"vmess","tag":"synthetic-vmess-{{i}}","server":"extra.synthetic.invalid",
+                 "server_port":443,"uuid":"00000000-0000-0000-0000-000000000002"}
+                """));
+            foreach (var type in new[] { "selector", "urltest" })
+                for (var i = 0; i < 2; i++) outbounds.Add(JsonNode.Parse($$"""
+                    {"type":"{{type}}","tag":"synthetic-{{type}}-{{i}}","outbounds":["proxy","direct"]}
+                    """));
+            root["route"]!["rules"] = JsonNode.Parse("""
+                [{"domain_suffix":["group.synthetic.invalid"],"outbound":"synthetic-selector-0"},
+                 {"domain_suffix":["test.synthetic.invalid"],"outbound":"synthetic-urltest-0"}]
+                """);
+        });
+        CreateProfiles(AnyTlsProfile());
+        Assert.Equal("Same synthetic name", ReadAnyTls(configuration: configuration));
+        Assert.True(SingboxParser.TryReadConfiguration(Bytes(configuration), StatisticsEndpoint, out var parsed, out _));
+        Assert.Equal(new ProxyCollectionScope(37, 4), parsed!.Scope);
+        Assert.Equal("routed_proxy", parsed.Scope!.Basis);
+        Assert.True(parsed.Scope.IsPartial);
+    }
+
+    [Fact]
+    public void AnyTlsUncollectedChainDoesNotChangeTheVerifiedProxyIdentity()
+    {
+        var configuration = Change(AnyTlsConfiguration, root => root["outbounds"]!.AsArray().Add(JsonNode.Parse(
+            """
+            {"type":"anytls","tag":"synthetic-chain","server":"other.synthetic.invalid","server_port":443,
+             "password":"Synthetic","detour":"proxy"}
+            """)));
+        CreateProfiles(AnyTlsProfile());
+        Assert.Equal("Same synthetic name", ReadAnyTls(configuration: configuration));
+        Assert.True(SingboxParser.TryReadConfiguration(Bytes(configuration), StatisticsEndpoint, out var parsed, out _));
+        Assert.Equal(new ProxyCollectionScope(1, 0), parsed!.Scope);
+    }
+
+    [Theory]
+    [InlineData("""{"tag":"proxy","type":"direct"}""")]
+    [InlineData("""{"tag":"","type":"anytls"}""")]
+    [InlineData("""{"tag":"another-proxy"}""")]
+    public void AnyTlsCannotVerifyMissingOrConflictingOutboundIdentity(string outbound)
+    {
+        var configuration = Change(AnyTlsConfiguration, root => root["outbounds"]!.AsArray().Add(JsonNode.Parse(outbound)));
+        Assert.False(SingboxParser.TryReadConfiguration(Bytes(configuration), StatisticsEndpoint, out _, out _));
+    }
+
+    [Fact]
+    public void AnyTlsTargetChainAndUnverifiedSessionOptionsAreRejected()
+    {
+        var detour = Change(AnyTlsConfiguration, root => Proxy(root)["detour"] = "direct");
+        Assert.False(SingboxParser.TryReadConfiguration(Bytes(detour), StatisticsEndpoint, out _, out _));
+        var sessionOption = Change(AnyTlsConfiguration, root => Proxy(root)["idle_session_timeout"] = "1s");
+        Assert.False(MatchesAnyTls(AnyTlsProfile(), sessionOption));
+        var existingApi = Change(AnyTlsConfiguration, root => root["experimental"] =
+            JsonNode.Parse("""{"v2ray_api":{"listen":"127.0.0.1:23456"}}"""));
+        Assert.False(SingboxParser.TryReadConfiguration(Bytes(existingApi), StatisticsEndpoint, out _, out _));
+        var duplicateTls = AnyTlsConfiguration.Replace("\"enabled\":true", "\"enabled\":false,\"enabled\":true");
+        Assert.False(SingboxParser.TryReadConfiguration(Bytes(duplicateTls), StatisticsEndpoint, out _, out _));
+        Assert.False(MatchesAnyTls(AnyTlsProfile(), duplicateTls));
+        var invalidNetwork = AnyTlsProfile(); invalidNetwork["Network"] = "unknown";
+        Assert.True(MatchesAnyTls(invalidNetwork)); // Fixed client normalizes unsupported networks to raw.
+    }
+
+    [Fact]
+    public void CrossCoreSwitchAndReturnCreateBaselinesWithoutRecoveringOldNode()
+    {
+        Directory.CreateDirectory(directory);
+        using var ledger = new Ledger(History);
+        var guard = new XrayGenerationGuard();
+        var anytls = Snapshot() with { CoreName = "sing-box", ProcessIdentity = "anytls-1" };
+        Assert.Equal("baseline", Accept(ledger, guard, anytls, 0, 1000));
+        Assert.Equal("recorded", Accept(ledger, guard, anytls, 1, 1020));
+        var xray = Snapshot("B", "xray-1");
+        Assert.Equal("baseline", Accept(ledger, guard, xray, 2, 5000));
+        Assert.Equal("recorded", Accept(ledger, guard, xray, 3, 5030));
+        var returned = anytls with { ProcessIdentity = "anytls-2" };
+        Assert.Equal("baseline", Accept(ledger, guard, returned, 4, 10000));
+        Assert.Equal("recorded", Accept(ledger, guard, returned, 5, 10040));
+        Assert.Equal("90", ledger.Query(All).Upload);
+    }
+
+    [Fact]
+    public void V2RayResponseRequiresBothCountersAndPreservesInt64Precision()
+    {
+        static byte[] Varint(ulong value)
+        {
+            var bytes = new List<byte>();
+            while (value >= 128) { bytes.Add((byte)((value & 127) | 128)); value >>= 7; }
+            bytes.Add((byte)value); return bytes.ToArray();
+        }
+        static byte[] Stat(string name, ulong? value)
+        {
+            var text = Encoding.UTF8.GetBytes(name);
+            var stat = new List<byte> { 0x0a }; stat.AddRange(Varint((ulong)text.Length)); stat.AddRange(text);
+            if (value.HasValue) { stat.Add(0x10); stat.AddRange(Varint(value.Value)); }
+            var encoded = new List<byte> { 0x0a }; encoded.AddRange(Varint((ulong)stat.Count)); encoded.AddRange(stat);
+            return encoded.ToArray();
+        }
+        static byte[] Frame(params byte[][] stats)
+        {
+            var message = stats.SelectMany(x => x).ToArray(); var result = new byte[message.Length + 5];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(1), (uint)message.Length);
+            message.CopyTo(result, 5); return result;
+        }
+        var up = Stat("outbound>>>proxy>>>traffic>>>uplink", long.MaxValue);
+        var down = Stat("outbound>>>proxy>>>traffic>>>downlink", null); // Actual zero is omitted in proto3.
+        var direct = Stat("outbound>>>direct>>>traffic>>>uplink", 999);
+        Assert.True(V2RayStatistics.TryReadResponse(Frame(up, down, direct), out var counters));
+        Assert.Equal(new XrayCounters(long.MaxValue, 0), counters);
+        Assert.False(V2RayStatistics.TryReadResponse(Frame(up), out _));
+        Assert.False(V2RayStatistics.TryReadResponse(Frame(), out _));
+        Assert.False(V2RayStatistics.TryReadResponse(Frame(up, up, down), out _));
+        Assert.False(V2RayStatistics.TryReadResponse(Frame(Stat("outbound>>>proxy>>>traffic>>>uplink", ulong.MaxValue), down), out _));
+        var compressed = Frame(up, down); compressed[0] = 1;
+        Assert.False(V2RayStatistics.TryReadResponse(compressed, out _));
+        Assert.False(V2RayStatistics.TryReadResponse(Frame(up, down).AsSpan(0, 10), out _));
+    }
+
     [Theory]
     [InlineData("one")]
     [InlineData("another-subscription")]

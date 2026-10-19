@@ -33,6 +33,90 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal(0, result.GapCount);
     }
 
+    [Fact]
+    public void PartialCoveragePersistsWithoutInterruptingTheVerifiedCounter()
+    {
+        using (var ledger = new Ledger(Database))
+        {
+            Assert.Equal("baseline", ledger.Accept(Sample(0, 100, 200) with { PartialCoverage = true }));
+            Assert.Equal("recorded", ledger.Accept(Sample(1, 110, 230) with { PartialCoverage = true }));
+            Assert.Equal("recorded", ledger.Accept(Sample(2, 120, 240) with { PartialCoverage = true }));
+            Assert.Equal("duplicate", ledger.Accept(Sample(2, 120, 240) with { PartialCoverage = true }));
+        }
+        using var reopened = new Ledger(Database);
+        Assert.Equal("recorded", reopened.Accept(Sample(3, 130, 250) with { PartialCoverage = true }));
+        var result = reopened.Query(All());
+        Assert.Equal("30", result.Upload);
+        Assert.Equal("50", result.Download);
+        Assert.Equal("0", result.UnallocatedUpload);
+        Assert.True(result.PartialCoverage);
+        var coverage = Assert.Single(result.Gaps);
+        Assert.Equal("uncollected_outbounds", coverage.Reason);
+        Assert.False(coverage.IsOpen);
+        Assert.Equal(Epoch, DateTimeOffset.Parse(coverage.Start, CultureInfo.InvariantCulture));
+        Assert.Equal(Epoch.AddSeconds(3), DateTimeOffset.Parse(coverage.End, CultureInfo.InvariantCulture));
+        Assert.All(result.Records, row => Assert.True(row.PartialCoverage));
+        Assert.All(reopened.Export(All()), row => Assert.True(row.PartialCoverage));
+        Assert.Empty(reopened.Query(All(node: "instance/other")).Gaps);
+        Assert.False(reopened.Query(All(node: "instance/other")).PartialCoverage);
+    }
+
+    [Fact]
+    public void PartialCoverageFailureRollsBackBytesAndCursorTogether()
+    {
+        using var ledger = new Ledger(Database);
+        ledger.Accept(Sample(0, 100) with { PartialCoverage = true });
+        using var db = new SqliteConnection($"Data Source={Database};Pooling=False"); db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = """
+            CREATE TRIGGER fail_coverage BEFORE UPDATE ON gaps
+            WHEN OLD.reason='uncollected_outbounds' BEGIN SELECT RAISE(ABORT,'Synthetic failure'); END;
+            """;
+        command.ExecuteNonQuery();
+        Assert.Throws<SqliteException>(() => ledger.Accept(Sample(1, 150) with { PartialCoverage = true }));
+        Assert.Equal("0", ledger.Query(All()).Upload);
+        command.CommandText = "SELECT upload FROM cursors"; Assert.Equal(100L, command.ExecuteScalar());
+        command.CommandText = "DROP TRIGGER fail_coverage"; command.ExecuteNonQuery();
+        Assert.Equal("recorded", ledger.Accept(Sample(2, 170) with { PartialCoverage = true }));
+        Assert.Equal("70", ledger.Query(All()).Upload);
+        Assert.Single(ledger.Query(All()).Gaps);
+    }
+
+    [Fact]
+    public void PartialCoverageRecoveryRetainsItsOwnUnknownScopeAndThenEndsAtANewGeneration()
+    {
+        using var ledger = new Ledger(Database);
+        ledger.Accept(Sample(0, 100) with { PartialCoverage = true });
+        ledger.Accept(Sample(1, 110) with { PartialCoverage = true });
+        ledger.RecordGap(Epoch.AddSeconds(2), "interface_unavailable");
+        Assert.Equal("unallocated", ledger.Accept(Sample(20, 200) with { PartialCoverage = true }));
+        Assert.True(Assert.Single(ledger.Query(All()).Records, row => row.Quality == "recovered-contained").PartialCoverage);
+        Assert.Equal("baseline", ledger.Accept(Sample(61, 1000, generation: "config-2")));
+        Assert.Equal("recorded", ledger.Accept(Sample(62, 1020, generation: "config-2")));
+        var result = ledger.Query(All());
+        Assert.Equal("120", result.Upload);
+        Assert.Contains(result.Records, row => !row.PartialCoverage);
+        var coverage = Assert.Single(result.Gaps, gap => gap.Reason == "uncollected_outbounds");
+        Assert.Equal(Epoch.AddSeconds(20), DateTimeOffset.Parse(coverage.End, CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
+    public void PartialCoverageSummarySurvivesTheHistoricalGapDisplayLimit()
+    {
+        using var ledger = new Ledger(Database);
+        ledger.Accept(Sample(0, 100) with { PartialCoverage = true });
+        ledger.Accept(Sample(1, 110) with { PartialCoverage = true });
+        for (var i = 1; i <= 201; i++)
+        {
+            ledger.Accept(Sample(i * 60 + 1, 1000, session: $"synthetic-process-{i}"));
+            ledger.Accept(Sample(i * 60 + 2, 1001, session: $"synthetic-process-{i}"));
+        }
+        var result = ledger.Query(All(page: 0, size: 1));
+        Assert.DoesNotContain(result.Gaps, gap => gap.Reason == "uncollected_outbounds");
+        Assert.False(Assert.Single(result.Records).PartialCoverage);
+        Assert.True(result.PartialCoverage);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

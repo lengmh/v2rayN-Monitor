@@ -98,7 +98,7 @@
       "depends_on": [
         "S0.1"
       ],
-      "status": "planned",
+      "status": "blocked",
       "work": "先核对当前实装的 v2rayN、sing-box 精确版本及 AnyTLS 普通单节点生成配置，再验证可用统计接口、原始单位、累计/速率语义、进程代次和代理流量范围。累计计数优先，不把速率冒充累计字节，不推断已消失短连接的流量；不擅自改写配置或重启核心。",
       "outputs": [
         "sing-box 能力探测结果",
@@ -106,7 +106,7 @@
       ],
       "acceptance": "明确输出能力等级：逐出站累计、活动配置累计、速度估算或不可用。不能用连接轮询推断已消失的短连接流量；速度乘时间的结果必须标为估算。",
       "stop_rule": "本轮只验证路径，不承诺所有构建与模式。用户未安装或不使用该内核时可 deferred，待 S5 再验证，不阻塞已证明的主内核，也不改以 CSV 作为主来源。",
-      "implementation_note": "2026-10-13 纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S0.4",
@@ -443,7 +443,7 @@
         "S4.4",
         "S0.3"
       ],
-      "status": "planned",
+      "status": "blocked",
       "work": "依据 S0.3 的实测结果增加 sing-box 适配器，覆盖 v2rayN 的 AnyTLS 普通单节点。保留现有 Xray 路径，复用原账本与页面。需要启用可选 API 时先说明具体设置及影响，经用户确认后操作；不把速率当累计量，不为补短连接抓包。",
       "outputs": [
         "sing-box / AnyTLS 适配器",
@@ -451,7 +451,7 @@
       ],
       "acceptance": "可靠模式下原始累计差与数据库总量一致；若仅能估算，页面及导出全程标明估算，不能将其纳入“精确节点计量已通过”。",
       "stop_rule": "不存在可用可靠路径时公开保留限制；不伪造完成，不重写 v2rayN。",
-      "implementation_note": "2026-10-13 纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S5.2",
@@ -460,7 +460,7 @@
       "depends_on": [
         "S5.1"
       ],
-      "status": "planned",
+      "status": "blocked",
       "work": "核对 v2rayN 活动 AnyTLS 配置、实际 sing-box 出站、进程代次与统计监听的关联，并验证累计范围是否包含 direct。仅对已证明的普通单节点提供归属；未知出口或无法排除其他流量时明确提示，不把全局量无条件记到当前节点。",
       "outputs": [
         "第二内核归属规则",
@@ -468,7 +468,7 @@
       ],
       "acceptance": "受控 direct 与 proxy 混合流量不会冒充单节点使用量；未知最终出口时显示活动配置或不支持，而不是全归当前选中节点。",
       "stop_rule": "本版不扩展 TUN、任意策略组、多跳链或多实例；无法核实的范围继续明确不支持。",
-      "implementation_note": "2026-10-13 纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S5.3",
@@ -477,7 +477,7 @@
       "depends_on": [
         "S5.2"
       ],
-      "status": "planned",
+      "status": "blocked",
       "work": "测试 Xray/sing-box 切换、计数代次和来源语义转换。复用账本、API 与图表，不维护第二套统计数据库；适配器误差状态只影响对应来源。",
       "outputs": [
         "跨内核回归",
@@ -485,7 +485,7 @@
       ],
       "acceptance": "跨内核切换不重复入账、不沿用错误单位，不损害既有第一内核历史；所有异常状态在同一页面可解释。",
       "stop_rule": "只修复当前两内核交接问题，不扩为其他客户端通用监控器。",
-      "implementation_note": "2026-10-13 纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+      "implementation_note": "2026-10-14 Issue #15：test.2 已加载，c8ea870 的 preview.2 / PR #17 已修复独立 routed-proxy 部分采集并实际启用。原独立验证库首接无回填、持续持久化与被动守恒通过；参考 reset=false RPC 仅作前后范围核对，未取得同刻精确对照。受控 proxy/direct、切换、重开与页面验收仍待完成，保持 blocked。证据见 docs/STATUS.md、docs/singbox-capability.md；下一轮扩展部署、重载、切节点与真实迁移需具体授权。"
     },
     {
       "id": "S5.4",
@@ -503,6 +503,46 @@
       "acceptance": "sing-box / AnyTLS 普通单节点至少有一条已实测支持路径，原有 Xray 回归通过；否则本项保留 BLOCKED。整版发布还需核对 S6.4，不单为版本号发布。",
       "stop_rule": "不会为等待第二内核而移除已稳定的第一内核版本。",
       "implementation_note": "2026-10-13 纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+    },
+    {
+      "id": "S5.5",
+      "phase": "S5",
+      "title": "复杂配置中的独立 proxy 与部分覆盖",
+      "depends_on": ["S5.1"],
+      "status": "in_progress",
+      "work": "#15 / PR #17 保留唯一、独立且可核实的 AnyTLS routed-proxy 采集，不因其他代理或组整体拒绝。现有 test.2 按路由匹配 tag 计数，组即使选 proxy 仍不计入；不放宽目标链、身份、代次及未核实连接字段限制。",
+      "outputs": ["routed_proxy 范围元数据及持久覆盖缺口", "API、历史、CSV、页面的部分覆盖披露", "合成多出站及真实核心副本回归"],
+      "acceptance": "额外出站不阻断已核实 proxy，其他代理/组/direct 不混入；未知范围与字节/游标同事务保存，不填零；Xray、旧历史和 CSV 回归保留。合成证据和真实客户端记账分别记录。",
+      "stop_rule": "交付预览及精确提交 CI；真实预览替换须授权，不宣称完整复杂配置计量已通过。",
+      "issue": 15,
+      "pull_request": 17,
+      "implementation_note": "2026-10-14 c8ea870 的双平台 CI 与隔离回归通过；旧预览退出后已启动真实 preview.2，沿用独立验证目录。首接无回填、持续字节/游标守恒及4轮 reset=false 参考 RPC 范围核对通过；未取得同刻 RPC 精确匹配。真实受控 proxy/direct、切换与页面目视验收未补齐，仍 in_progress。见 docs/STATUS.md。"
+    },
+    {
+      "id": "S5.6",
+      "phase": "S5",
+      "title": "多出站与策略组实际成员计量",
+      "depends_on": ["S5.5"],
+      "status": "planned",
+      "work": "#18 的独立 PR 扩展核心连接路径归属与累计、独立身份和批量原子采样。多出站按可靠的 instance + IndexId 或独立 outbound 分账；组、实际成员和业务总量不相加，旧长连接跨切换仍保留旧成员，组选 direct 排除。",
+      "outputs": ["核心成员归属与累计扩展", "批量原子采样及独立历史身份", "切换、并发、短/长连接、重开及代次证据"],
+      "acceptance": "未知出站不阻断独立已核实范围；不依赖可丢事件、活动连接轮询、速率积分或 group.Now() 补精确累计。增量/游标同批原子提交；必要 Schema 先隔离验证，真实迁移另行授权。",
+      "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
+      "issue": 18,
+      "implementation_note": "2026-10-14 用户扩大范围，已登记独立增强 Issue；当前 test.2 不能证明实际成员累计，本项尚未实现。"
+    },
+    {
+      "id": "S5.7",
+      "phase": "S5",
+      "title": "代理链与自定义配置身份",
+      "depends_on": ["S5.6"],
+      "status": "planned",
+      "work": "#19 的独立 PR 验证单次业务总量、链/各跳独立维度及真实生效配置文件、目录和参数。按配置/outbound 身份保存历史，只在可靠证据下关联 IndexId；不猜任意自定义配置的订阅身份。",
+      "outputs": ["配置来源与代次核验", "独立身份和单次业务计量", "链中组变化回归及必要的隔离迁移方案"],
+      "acceptance": "各跳不相加为总量，不等同加密传输量或服务商计费量。首接基线、回退、重开、失败回滚及未知缺口保持；脚本/插件/动态注入未验证时明确限定。保留 Xray、旧历史及独立 CSV。",
+      "stop_rule": "独立 PR、CI、有界实机验收；真实配置改动、扩展替换、重载、节点切换及账本迁移需具体授权，CSV 与插件不在本项范围。",
+      "issue": 19,
+      "implementation_note": "2026-10-14 用户扩大范围，已登记独立增强 Issue；尚未修改自定义配置发现、扩展核心或 Schema。"
     },
     {
       "id": "S6.1",
@@ -572,7 +612,7 @@
       ],
       "acceptance": "撤销前能确认影响范围；撤销某批次不误删其他批次共享记录或本机历史，失败不半撤销。原文件归档由用户选择且只保存在本地；不使用 CSV 时本机功能不受影响。三天导出限制不产生强制任务。",
       "stop_rule": "功能到此为止，除非有真实需求再增加服务商扩展。",
-      "implementation_note": "2026-10-13 纳入 v0.2.0 计划；尚未开始本项实现或实机核验，后续按独立 Issue/PR 推进。"
+      "implementation_note": "2026-10-13 已登记独立 Issue #16，纳入 v0.2.0；当前仅登记需求，尚未开始本项实现或真实数据库迁移。"
     },
     {
       "id": "S7.1",

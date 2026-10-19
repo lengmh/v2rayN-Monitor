@@ -57,8 +57,10 @@ internal static class ProcessBinding
         reason = "process_commandline_unverified";
         if (!Present(core.CommandLine) || arguments is null) return false;
         reason = "process_binding_mismatch";
-        if (arguments.Count != 4 || !SamePath(arguments[0], core.ExecutablePath)
-            || arguments[1] != "run" || arguments[2] != "-c" || arguments[3] != "config.json") return false;
+        var singbox = core.Name.Equals("sing-box-client.exe", StringComparison.OrdinalIgnoreCase);
+        if (arguments.Count != (singbox ? 5 : 4) || !SamePath(arguments[0], core.ExecutablePath)
+            || arguments[1] != "run" || arguments[2] != "-c" || arguments[3] != "config.json"
+            || (singbox && arguments[4] != "--disable-color")) return false;
         reason = "ready";
         return true;
     }
