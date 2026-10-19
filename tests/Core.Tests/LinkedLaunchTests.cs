@@ -87,6 +87,73 @@ public class LinkedLaunchTests
     }
 
     [Fact]
+    public void WaitsForOwnerReadinessAndAllowsRepeatedRequests()
+    {
+        using var owner = new SyntheticMonitorOwner();
+        using var waiting = new ManualResetEventSlim();
+        var result = false;
+        Exception? failure = null;
+        var waiter = new Thread(() =>
+        {
+            waiting.Set();
+            try { result = LinkedLaunch.WaitForMonitorReady(owner.Mutex, owner.Ready, TestTimeout); }
+            catch (Exception ex) { failure = ex; }
+        }) { IsBackground = true };
+        waiter.Start();
+        try
+        {
+            Assert.True(waiting.Wait(TestTimeout), "Readiness waiter did not start.");
+            Assert.False(waiter.Join(TimeSpan.FromMilliseconds(100)),
+                "A live owner must finish initialization before a linked launch can continue.");
+            owner.Ready.Set();
+            Assert.True(waiter.Join(TestTimeout), "Readiness waiter did not complete.");
+            if (failure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            Assert.True(result);
+            // Manual-reset readiness remains available to later shortcut invocations.
+            Assert.True(LinkedLaunch.WaitForMonitorReady(owner.Mutex, owner.Ready, TimeSpan.Zero));
+            Assert.True(LinkedLaunch.WaitForMonitorReady(owner.Mutex, owner.Ready, TimeSpan.Zero));
+        }
+        finally
+        {
+            owner.Ready.Set();
+            Assert.True(waiter.Join(TestTimeout), "Readiness waiter did not stop during cleanup.");
+        }
+    }
+
+    [Fact]
+    public void TimesOutWhileOwnerHasNotFinishedInitialization()
+    {
+        using var owner = new SyntheticMonitorOwner();
+        Assert.False(LinkedLaunch.WaitForMonitorReady(owner.Mutex, owner.Ready,
+            TimeSpan.FromMilliseconds(100)));
+        Assert.False(owner.Ready.WaitOne(TimeSpan.Zero));
+        owner.Ready.Set();
+        Assert.True(LinkedLaunch.WaitForMonitorReady(owner.Mutex, owner.Ready, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void RejectsReadinessWithoutAnOwnerAndReleasesAcquiredMutex()
+    {
+        using var ownerMutex = new Mutex();
+        using var ready = new EventWaitHandle(true, EventResetMode.ManualReset);
+        Assert.False(LinkedLaunch.WaitForMonitorReady(ownerMutex, ready, TimeSpan.Zero));
+        Assert.Throws<ApplicationException>(() => ownerMutex.ReleaseMutex());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OwnerExitOverridesStaleReadinessAndReleasesAcquiredMutex(bool abandon)
+    {
+        using var owner = new SyntheticMonitorOwner();
+        owner.Stop(abandon);
+        owner.Ready.Set();
+        Assert.False(LinkedLaunch.WaitForMonitorReady(owner.Mutex, owner.Ready, TimeSpan.Zero));
+        Assert.Throws<ApplicationException>(() => owner.Mutex.ReleaseMutex());
+    }
+
+    [Fact]
     public void WritesActualWindowsShortcutWithoutReplacingExistingFile()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -122,5 +189,73 @@ public class LinkedLaunchTests
             Assert.True(new FileInfo(shortcut).Length > 0);
         }
         finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
+
+    private sealed class SyntheticMonitorOwner : IDisposable
+    {
+        internal Mutex Mutex { get; } = new();
+        internal EventWaitHandle Ready { get; } = new(false, EventResetMode.ManualReset);
+        private readonly ManualResetEventSlim started = new();
+        private readonly ManualResetEventSlim stop = new();
+        private readonly Thread thread;
+        private Exception? failure;
+        private bool abandon;
+
+        internal SyntheticMonitorOwner()
+        {
+            thread = new Thread(() =>
+            {
+                var owned = false;
+                try
+                {
+                    owned = Mutex.WaitOne(TestTimeout);
+                    Assert.True(owned, "Synthetic Monitor could not acquire its owner mutex.");
+                    started.Set();
+                    Assert.True(stop.Wait(TimeSpan.FromSeconds(30)), "Synthetic Monitor was not stopped.");
+                }
+                catch (Exception ex) { failure = ex; }
+                finally
+                {
+                    if (owned && !abandon) Mutex.ReleaseMutex();
+                    started.Set();
+                }
+            }) { IsBackground = true };
+            thread.Start();
+            try
+            {
+                Assert.True(started.Wait(TestTimeout), "Synthetic Monitor did not start.");
+                ThrowIfFailed();
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        internal void Stop(bool abandonMutex = false)
+        {
+            abandon = abandonMutex;
+            stop.Set();
+            Assert.True(thread.Join(TestTimeout), "Synthetic Monitor did not stop.");
+            ThrowIfFailed();
+        }
+
+        private void ThrowIfFailed()
+        {
+            if (failure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        public void Dispose()
+        {
+            Stop();
+            Ready.Dispose();
+            Mutex.Dispose();
+            started.Dispose();
+            stop.Dispose();
+        }
     }
 }
