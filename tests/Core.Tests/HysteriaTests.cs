@@ -77,10 +77,11 @@ public sealed class HysteriaTests
     }
 
     [Fact]
-    public void HysteriaStillRejectsChainingAndMultipleOutbounds()
+    public void HysteriaStillRejectsChainingButAllowsRenamedDirectOutbound()
     {
         Assert.False(Parse(Configuration.Replace("\"security\":\"tls\"", "\"security\":\"tls\",\"sockopt\":{\"dialerProxy\":\"other\"}"), out _));
-        Assert.False(Parse(Configuration.Replace("\"tag\":\"direct\"", "\"tag\":\"proxy-2\""), out _));
+        Assert.True(Parse(Configuration.Replace("\"tag\":\"direct\"", "\"tag\":\"proxy-2\""), out var parsed));
+        Assert.False(parsed!.Scope!.IsPartial);
     }
 
     [Theory]

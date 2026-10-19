@@ -41,7 +41,7 @@
 .chart-column:first-child .chart-label { left: 0; transform: none; }
 .chart-column:last-child .chart-label { left: auto; right: 0; transform: none; }
 .ranking { padding-bottom: 16px; }
-.rank-node { color: #244c5b; font-size: 13px; max-width: 190px; }
+.rank-node { color: #244c5b; font-size: 13px; }
 .rank-value { font-size: 12px; color: #244c5b; }
 .rank-index { color: #617580; }
 .rank-recovery { display: block; margin: 7px 0 0 21px; color: #536e64; font-size: 11px; }
@@ -74,6 +74,7 @@ summary:focus-visible { outline: 3px solid #38b7ac; outline-offset: 3px; }
   .metric-card { padding: 18px; }
 }
 @media (max-width: 640px) {
+  .sidebar nav { flex-wrap: wrap; justify-content: flex-end; }
   .content { padding: 22px 14px; }
   .page-heading { align-items: flex-start; gap: 12px; }
   .page-heading > .button { white-space: nowrap; }
@@ -100,13 +101,17 @@ summary:focus-visible { outline: 3px solid #38b7ac; outline-offset: 3px; }
 .local-records th:first-child { width: 148px; }
 .local-records th:nth-child(3), .local-records th:nth-child(4) { width: 152px; }
 .local-records th:last-child { width: 172px; }
-.local-records .node-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-records .node-cell { overflow-wrap: anywhere; white-space: normal; }
 .local-records .numeric { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .local-records .traffic-amount { display: grid; grid-template-columns: minmax(0, 1fr) 3.5ch; gap: 6px; align-items: baseline; }
 .local-records .traffic-value { overflow: hidden; text-overflow: ellipsis; font-weight: 500; text-align: right; }
 .local-records .traffic-unit { color: #607080; font-size: 11px; text-align: left; }
 .local-records .traffic-cell.zero, .local-records .zero .traffic-unit { color: #6b7785; }
 .local-records .zero .traffic-value { font-weight: 400; }
+
+/* Keep the group/member label readable at every breakpoint, including narrow rankings. */
+.rank-heading { align-items: flex-start; }
+.rank-heading .rank-node { flex: 1; min-width: 0; max-width: none; white-space: normal; overflow-wrap: anywhere; }
 .local-records .quality-pill.approximate { color: #4c637d; background: #edf2f8; }
 .local-records tbody tr:hover { background: #f3f7fa; }
 .local-records .panel-heading { padding-bottom: 14px; }
