@@ -19,6 +19,19 @@ public sealed class ProcessBindingTests
     private static NativeProcessInfo Native => new(Core.Pid, Core.StartedAt, Core.ExecutablePath, Core.CommandLine, true);
 
     [Fact]
+    public void SingboxExtensionRequiresItsExactStandardCommandAndParent()
+    {
+        var path = Path.Combine(Root, "bin", "sing_box", "sing-box-client.exe");
+        var core = Core with { Name = "sing-box-client.exe", ExecutablePath = path, CommandLine = $"\"{path}\" run -c config.json --disable-color" };
+        string[] args = [path, "run", "-c", "config.json", "--disable-color"];
+        Assert.True(ProcessBinding.TryBindCore(Parent, core, path, args, out _));
+        Assert.False(ProcessBinding.TryBindCore(Parent, core, path, args[..4], out _));
+        Assert.False(ProcessBinding.TryBindCore(Parent, core, path, [path, "run", "-c", "other.json", "--disable-color"], out _));
+        Assert.False(ProcessBinding.TryBindCore(Parent, core with { ParentPid = 999 }, path, args, out _));
+        Assert.False(ProcessBinding.TryBindCore(Parent, Core, CorePath, [CorePath, "run", "-c", "config.json", "--disable-color"], out _));
+    }
+
+    [Fact]
     public void MissingWmiFieldsCanBeFilledOnlyWithSameProcessNativeEvidence()
     {
         var enrichedParent = ProcessBinding.Reconcile(Parent with { ExecutablePath = "" },

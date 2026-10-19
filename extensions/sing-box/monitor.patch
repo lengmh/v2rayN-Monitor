@@ -1,0 +1,179 @@
+--- a/cmd/sing-box/cmd_run.go
++++ b/cmd/sing-box/cmd_run.go
+@@ -95,0 +96,7 @@
++	}
++	statsEntry, err := readMonitorStats(optionsList)
++	if err != nil {
++		return nil, err
++	}
++	if statsEntry != nil {
++		optionsList = append(optionsList, statsEntry)
+--- /dev/null
++++ b/cmd/sing-box/cmd_monitor_stats.go
+@@ -0,0 +1,85 @@
++package main
++
++import (
++	"bytes"
++	stdjson "encoding/json"
++	"fmt"
++	"io"
++	"net/netip"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json"
++)
++
++// This experimental build reads only a statistics endpoint, never node or routing overrides.
++func readMonitorStats(entries []*OptionsEntry) (*OptionsEntry, error) {
++	if len(configPaths) != 1 || len(configDirectories) != 0 || !strings.EqualFold(filepath.Base(configPaths[0]), "config.json") {
++		return nil, nil
++	}
++	executable, err := os.Executable()
++	if err != nil {
++		return nil, err
++	}
++	name := strings.TrimSuffix(strings.ToLower(filepath.Base(executable)), ".exe")
++	if name != "sing-box-client" {
++		return nil, nil
++	}
++	return readMonitorStatsAt(filepath.Join(filepath.Dir(executable), "monitor-stats.json"), entries)
++}
++
++func readMonitorStatsAt(path string, entries []*OptionsEntry) (*OptionsEntry, error) {
++	content, err := os.ReadFile(path)
++	if os.IsNotExist(err) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, fmt.Errorf("read Monitor statistics endpoint: %w", err)
++	}
++	if len(content) > 4096 {
++		return nil, fmt.Errorf("Monitor statistics file exceeds 4096 bytes")
++	}
++	var endpoint struct {
++		Listen string `json:"listen"`
++	}
++	decoder := stdjson.NewDecoder(bytes.NewReader(content))
++	decoder.DisallowUnknownFields()
++	if err = decoder.Decode(&endpoint); err != nil {
++		return nil, fmt.Errorf("invalid Monitor statistics file: %w", err)
++	}
++	if err = decoder.Decode(new(any)); err != io.EOF {
++		return nil, fmt.Errorf("Monitor statistics file must contain one JSON object")
++	}
++	address, err := netip.ParseAddrPort(endpoint.Listen)
++	if err != nil || !address.Addr().IsLoopback() || address.Port() == 0 {
++		return nil, fmt.Errorf("Monitor statistics endpoint must be a numeric loopback address with a nonzero port")
++	}
++	proxies := 0
++	for _, entry := range entries {
++		if entry.options.Experimental != nil && entry.options.Experimental.V2RayAPI != nil {
++			return nil, fmt.Errorf("generated configuration already specifies V2Ray API")
++		}
++		for _, outbound := range entry.options.Outbounds {
++			if outbound.Tag == "proxy" {
++				proxies++
++			}
++		}
++	}
++	if proxies != 1 {
++		return nil, fmt.Errorf("Monitor statistics require one proxy outbound")
++	}
++	overlay := map[string]any{"experimental": map[string]any{"v2ray_api": map[string]any{
++		"listen": endpoint.Listen, "stats": map[string]any{"enabled": true, "outbounds": []string{"proxy"}},
++	}}}
++	encoded, err := stdjson.Marshal(overlay)
++	if err != nil {
++		return nil, err
++	}
++	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, encoded)
++	if err != nil {
++		return nil, err
++	}
++	return &OptionsEntry{content: encoded, path: path, options: options}, nil
++}
+--- /dev/null
++++ b/cmd/sing-box/cmd_monitor_stats_test.go
+@@ -0,0 +1,67 @@
++package main
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json"
++)
++
++func TestMonitorStatsEndpoint(t *testing.T) {
++	globalCtx = context.Background()
++	entries := []*OptionsEntry{{options: option.Options{Outbounds: []option.Outbound{{Type: "direct", Tag: "proxy"}}}}}
++	dir := t.TempDir()
++	path := filepath.Join(dir, "monitor-stats.json")
++	if got, err := readMonitorStatsAt(path, entries); err != nil || got != nil {
++		t.Fatal("missing optional file must not enable API", err)
++	}
++	cases := []struct {
++		name, content string
++		valid         bool
++	}{
++		{"loopback", `{"listen":"127.0.0.1:10814"}`, true},
++		{"ipv6_loopback", `{"listen":"[::1]:10814"}`, true},
++		{"public_bind", `{"listen":"0.0.0.0:10814"}`, false},
++		{"hostname", `{"listen":"localhost:10814"}`, false},
++		{"zero_port", `{"listen":"127.0.0.1:0"}`, false},
++		{"routing_override", `{"listen":"127.0.0.1:10814","route":{}}`, false},
++		{"trailing_json", `{"listen":"127.0.0.1:10814"}{}`, false},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if err := os.WriteFile(path, []byte(tc.content), 0600); err != nil {
++				t.Fatal(err)
++			}
++			got, err := readMonitorStatsAt(path, entries)
++			if (err == nil) != tc.valid {
++				t.Fatalf("valid=%v, err=%v", tc.valid, err)
++			}
++			if tc.valid {
++				stats := got.options.Experimental.V2RayAPI.Stats
++				if !stats.Enabled || len(stats.Outbounds) != 1 || stats.Outbounds[0] != "proxy" || len(stats.Inbounds) != 0 {
++					t.Fatal("statistics scope changed")
++				}
++				if len(got.options.Outbounds) != 0 || got.options.Route != nil || got.options.DNS != nil {
++					t.Fatal("overlay changes connection configuration")
++				}
++			}
++		})
++	}
++	if err := os.WriteFile(path, []byte(`{"listen":"127.0.0.1:10814"}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	conflicting := []*OptionsEntry{{options: option.Options{Experimental: &option.ExperimentalOptions{V2RayAPI: &option.V2RayAPIOptions{}}}}}
++	if _, err := readMonitorStatsAt(path, conflicting); err == nil {
++		t.Fatal("existing V2Ray settings overwritten")
++	}
++	if _, err := readMonitorStatsAt(path, nil); err == nil {
++		t.Fatal("missing proxy accepted")
++	}
++	_, err := json.UnmarshalExtendedContext[option.Options](globalCtx, []byte(`{}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++}
+--- a/experimental/v2rayapi/stats.go
++++ b/experimental/v2rayapi/stats.go
+@@ -54,0 +55,5 @@
++	counters := make(map[string]*atomic.Int64)
++	for outbound := range outbounds {
++		counters["outbound>>>"+outbound+">>>traffic>>>uplink"] = new(atomic.Int64)
++		counters["outbound>>>"+outbound+">>>traffic>>>downlink"] = new(atomic.Int64)
++	}
+@@ -60 +65 @@
+-		counters:  make(map[string]*atomic.Int64),
++		counters:  counters,
