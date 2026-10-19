@@ -30,6 +30,50 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('raw and billing comparisons switch both sources and disclose missing multiplier coverage', async ({ page }) => {
+  let reads = 0;
+  const display = { originalName: 'Synthetic known multiplier', groups: [], mergeKey: null, rate: null, rateStatus: 'partial',
+    estimatedBilledBytes: '1000000000.5', estimateCoveredBytes: '2000000001', estimateUnknownBytes: '999999999' };
+  const local = { ...history, upload: '1000000000', download: '3000000000',
+    display: { ...display, estimateUnknownBytes: '1999999999' },
+    nodes: [{ key: 'known', name: display.originalName, upload: '1000000000', download: '2000000000', display },
+      { key: 'unknown', name: 'Synthetic unknown multiplier', upload: '0', download: '1000000000' }],
+    series: [{ label: '2026-10-09', upload: '1000000000', download: '3000000000',
+      display: { ...display, estimateUnknownBytes: '1999999999' } }] };
+  const provider = { source: 'Synthetic billing source', rawBytes: '5000000000', billedBytes: '2500000000.000000000123', recordCount: 1,
+    nodes: [{ name: display.originalName, rawBytes: '5000000000', billedBytes: '2500000000.000000000123' }],
+    series: [{ label: '2026-10-09', rawBytes: '5000000000', billedBytes: '2500000000.000000000123' }], records: [] };
+  await mock(page, {
+    '/api/provider/sources': route => route.fulfill(json([provider.source])),
+    '/api/provider/nodes': route => route.fulfill(json(provider.nodes.map(n => ({ key: n.name, name: n.name })))),
+    '/api/provider/history': route => route.fulfill(json(provider)),
+    '/api/history': route => route.fulfill(json(reads++ ? local : history))
+  });
+  await page.selectOption('#statistics-source', provider.source);
+  await page.check('#compare-toggle');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('4,000,000,000 bytes');
+  await page.selectOption('#provider-metric', 'billed');
+  await expect(page.locator('#comparison-local-title')).toHaveText('本机估算计费量');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('1,000,000,000.5 bytes');
+  await expect(page.locator('#comparison-estimate-note')).toContainText('未估算原始量 1,999,999,999 bytes');
+  const unknown = page.locator('#comparison-nodes tr').filter({ has: page.locator('.comparison-name', { hasText: 'Synthetic unknown multiplier' }) });
+  await expect(unknown.locator('.paired-value')).toHaveText('—');
+  await expect(page.locator('#comparison-nodes .rank-upload, #comparison-nodes .rank-download')).toHaveCount(0);
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/billing-comparison-${suffix}.png`, fullPage: true });
+    await page.click('[data-comparison-section="nodes"][data-comparison-mode="share"]');
+    await expect(page.locator('#comparison-nodes-shares [data-source="local"] h3')).toHaveText('本机估算计费量');
+    await expect(page.locator('#comparison-nodes-shares [data-source="local"] circle')).toHaveCount(1);
+    await page.screenshot({ path: `test-results/billing-shares-${suffix}.png`, fullPage: true });
+    await page.click('[data-comparison-section="nodes"][data-comparison-mode="list"]');
+  }
+  await page.selectOption('#provider-metric', 'raw');
+  await expect(page.locator('#comparison-local-exact')).toHaveText('4,000,000,000 bytes');
+  await expect(page.locator('#comparison-nodes .rank-download')).toHaveCount(2);
+  await expect(page.locator('#comparison-estimate-note')).toBeHidden();
+});
 test('probe view separates dimensions and keeps a readable desktop and mobile layout', async ({ page }) => {
   const calls = await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic collector', demo: false,
@@ -292,6 +336,51 @@ test('issue23 captured rates, group names and exact copy work across business an
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/issue23-captured-mobile.png', fullPage: true });
 });
+test('historical and captured group members use the same labels without merging same-name identities', async ({ page }) => {
+  const nodes = history.nodes.map((node, index) => {
+    const name = index < 2 ? 'Synthetic historical member' : 'Synthetic current member';
+    const total = String(BigInt(node.upload) + BigInt(node.download));
+    return { ...node, name, display: { originalName: name, groups: ['Synthetic Route'], mergeKey: null,
+      rate: index < 2 ? null : '1', rateStatus: index < 2 ? 'unknown' : 'known',
+      estimatedBilledBytes: index < 2 ? null : total,
+      estimateCoveredBytes: index < 2 ? '0' : total, estimateUnknownBytes: index < 2 ? total : '0' } };
+  });
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray',
+      currentNode: 'Synthetic current member', demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'unsupported', message: 'Synthetic stock Xray; saved probe history remains visible' } })),
+    '/api/nodes': route => route.fulfill(json(nodes.map(node => ({ key: node.key, name: node.name })))),
+    '/api/history': route => route.fulfill(json({ ...history, nodes, records: nodes.map(node => ({
+      ...history.records[0], nodeKey: node.key, nodeName: node.name, upload: node.upload, download: node.download,
+      display: node.display
+    })) }))
+  });
+  await expect(page.locator('#ranking .rank-node.has-groups')).toHaveCount(3);
+  await expect(page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' })).toHaveCount(2);
+  await expect(page.locator('#node-filter option').filter({ hasText: 'Synthetic historical member' })).toHaveCount(2);
+  await expect(page.locator('#records .has-groups')).toHaveCount(3);
+  await expect(page.locator('#records tr').first().locator('td').nth(6)).toHaveText('—');
+  await page.locator('#ranking .has-groups').first().hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
+  await page.locator('#ranking .has-groups').first().press('Escape');
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/historical-groups-${suffix}.png`, fullPage: true, animations: 'disabled' });
+  }
+  await page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' }).first().click();
+  await expect(page.locator('#node-filter')).toHaveValue('a');
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#statistics-title')).toHaveText('探测流量');
+  await expect(page.locator('#probe-state')).toHaveText('当前核心未支持探测计量');
+  await expect(page.locator('#ranking .rank-node.has-groups')).toHaveCount(3);
+  await expect(page.locator('#ranking .rank-node').filter({ hasText: 'Synthetic historical member' })).toHaveCount(2);
+  await page.locator('#ranking .has-groups').first().hover();
+  await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
+  await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
+});
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray proxy',
@@ -311,7 +400,8 @@ test('cross-core history stays visible with Xray active and setup copy is curren
   }
   await page.click('.nav-item[data-view=settings]');
   await expect(page.locator('#settings-view')).not.toContainText('test.2');
-  await expect(page.locator('#settings-view')).toContainText('策略组实际成员');
+  await expect(page.locator('#settings-view')).toContainText('策略组实际出站');
+  await expect(page.locator('#settings-view')).toContainText('Xray Observatory 探测');
 });
 test('partial sing-box coverage is visible on desktop and mobile after collection resumes', async ({ page }) => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
@@ -418,7 +508,9 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(page.locator('#exact-value-text')).toContainText('3,500,000,000 bytes');
   await page.locator('#exact-value-dialog form button').click();
   await page.selectOption('#provider-metric', 'billed');
-  await expect(page.locator('#comparison-nodes .paired-value').nth(1)).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
+  await expect(page.locator('#comparison-nodes').getByRole('button', { name: /计费量 3,200,000,000.000123 bytes/ })).toHaveAttribute('title', /3,200,000,000.000123 bytes/);
+  await expect(localValue).toHaveText('—');
+  await page.selectOption('#provider-metric', 'raw');
   const only = page.locator('#comparison-nodes tr').filter({ hasText: 'CSV only' });
   await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
   await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);
@@ -831,4 +923,68 @@ test('v2 paired sort moves source pairs together and preserves exact-name order'
   const offset = row => Number(row.frames[0].transform.match(/translateY\(([-.\d]+)px\)/)[1]);
   for (let i = 0; i < moving.length; i += 2) expect(Math.abs(offset(moving[i]) - offset(moving[i + 1]))).toBeLessThanOrEqual(1);
   await expect.poll(()=>page.locator('#comparison-nodes').evaluate(n=>n.getAnimations({subtree:true}).length)).toBe(0);
+});
+
+test('paired node page two survives status polling with global sorting and bar scales', async ({ page }) => {
+  const nodes = Array.from({ length: 52 }, (_, i) => ({ key: `n${i}`,
+    name: `Synthetic paged ${String(i + 1).padStart(2, '0')}`, upload: String((i + 1) * 100), download: '0' }));
+  const providerNodes = [...nodes.map((node, i) => ({ name: node.name, rawBytes: String(100 - i),
+    billedBytes: `${100 - i}.000123` })), { name: 'Synthetic provider only', rawBytes: '999', billedBytes: '999.000123' }];
+  const local = { ...history, upload: '137800', download: '0', nodes, series: [], records: [], recordCount: 52 };
+  const provider = { source: 'Synthetic pagination', rawBytes: '4873', billedBytes: '4873.006519',
+    recordCount: 53, nodes: providerNodes, series: [], records: [] };
+  let statusReads = 0;
+  const calls = await mock(page, {
+    '/api/nodes': route => route.fulfill(json(nodes.map(node => ({ key: node.key, name: node.name })))),
+    '/api/history': (route, request, url) => route.fulfill(json(url.searchParams.has('nonZeroRecords') ? history : local)),
+    '/api/provider/sources': route => route.fulfill(json([provider.source])),
+    '/api/provider/nodes': route => route.fulfill(json(providerNodes.map(node => ({ key: node.name, name: node.name })))),
+    '/api/provider/history': route => route.fulfill(json(provider)),
+    '/api/status': route => route.fulfill(json({ state: 'demo', message: `Synthetic pagination status ${++statusReads}`,
+      currentNode: nodes[0].name, lastSample: null, uploadPerSecond: '0', downloadPerSecond: '0', demo: true }))
+  });
+  await page.selectOption('#statistics-source', provider.source);
+  await expect(page.locator('#total-exact')).toHaveText('4,873 bytes');
+  await page.check('#compare-toggle');
+  const rows = page.locator('#comparison-nodes tr');
+  const pairKeys = () => rows.evaluateAll(items => items.map(row => JSON.parse(row.dataset.motionKey)));
+  const expectPairs = async names => {
+    await expect(rows).toHaveCount(names.length * 2);
+    expect(await pairKeys()).toEqual(names.flatMap(name => [[name, 0], [name, 1]]));
+    await expect(page.locator('#comparison-nodes .comparison-name')).toHaveText(names);
+    expect(await page.locator('#comparison-nodes .comparison-name').evaluateAll(items => items.every(cell => cell.rowSpan === 2))).toBe(true);
+  };
+  const localOrder = [...nodes].reverse().map(node => node.name).concat('Synthetic provider only');
+  await expectPairs(localOrder.slice(0, 50));
+  await expect(page.locator('#comparison-node-page')).toContainText('共 53 个节点 · 第 1 / 2 页');
+  await expect(page.locator('#comparison-node-previous')).toBeDisabled();
+  await page.click('#comparison-node-next');
+  await expectPairs(localOrder.slice(50));
+  await expect(page.locator('#comparison-node-page')).toContainText('第 2 / 2 页');
+  await expect(page.locator('#comparison-node-next')).toBeDisabled();
+  // Page two's largest value is 999; the full-query maximum of 5,200 is on page one.
+  expect(await rows.first().locator('.paired-bar').evaluate(bar => parseFloat(bar.style.width))).toBeCloseTo(3.84, 2);
+  await expect(rows.nth(4)).toHaveClass(/missing/);
+  await expect(rows.nth(4).locator('.paired-value')).toHaveAttribute('aria-label', /没有记录/);
+
+  const historyReads = calls.filter(call => ['/api/history', '/api/provider/history'].includes(call.path)).length;
+  const response = await page.waitForResponse(result => new URL(result.url()).pathname === '/api/status', { timeout: 8000 });
+  const polled = await response.json();
+  await expect(page.locator('#collector-message')).toHaveText(polled.message);
+  expect(calls.filter(call => ['/api/history', '/api/provider/history'].includes(call.path))).toHaveLength(historyReads);
+  await expect(page.locator('#comparison-node-page')).toContainText('第 2 / 2 页');
+  await expectPairs(localOrder.slice(50));
+  expect(await rows.first().locator('.paired-bar').evaluate(bar => parseFloat(bar.style.width))).toBeCloseTo(3.84, 2);
+
+  // Sorting starts from all 53 nodes, including the provider-only node on the previous page two.
+  await page.selectOption('#comparison-node-sort', 'provider');
+  const providerOrder = ['Synthetic provider only', ...nodes.map(node => node.name)];
+  await expect(page.locator('#comparison-node-page')).toContainText('第 1 / 2 页');
+  await expectPairs(providerOrder.slice(0, 50));
+  // The full-query maximum still belongs to local node 52, now outside this page.
+  expect(await rows.nth(1).locator('.paired-bar').evaluate(bar => parseFloat(bar.style.width))).toBeCloseTo(19.21, 2);
+  await page.click('#comparison-node-next');
+  await expectPairs(providerOrder.slice(50));
+  await expect(page.locator('#comparison-node-page')).toContainText('第 2 / 2 页');
+  await expect(page.locator('#comparison-node-next')).toBeDisabled();
 });

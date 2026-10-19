@@ -31,6 +31,26 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     internal readonly record struct RecordKey(string Entity, int Kind, long Start, long End);
     internal static string MergeKey(string basis, string key) => basis + ":" + XrayParser.Hash(key);
 
+    // Older member records saved the friendly label and generated tag before display snapshots existed.
+    internal static CapturedNodeName? HistoricalMemberName(string basis, string name, string? tag)
+    {
+        if (basis is not ("actual_member" or "probe_urltest_member") || tag is null || !name.StartsWith('【')) return null;
+        var close = name.IndexOf("】 ", StringComparison.Ordinal);
+        var separator = tag.IndexOf("-proxy-", StringComparison.Ordinal);
+        if (close <= 1 || separator <= 0 || !tag[..separator].All(char.IsAsciiDigit)) return null;
+        var label = name[1..close];
+        var tagged = tag[(separator + 7)..];
+        if (!tagged.StartsWith(label + "-", StringComparison.Ordinal)) return null;
+        var member = tagged[(label.Length + 1)..];
+        var ordinal = member.IndexOf('-');
+        if (ordinal <= 0 || ordinal + 1 >= member.Length ||
+            !int.TryParse(member[..ordinal], NumberStyles.None, CultureInfo.InvariantCulture, out var number) ||
+            number <= 0 || member[..ordinal] != number.ToString(CultureInfo.InvariantCulture)) return null;
+        var original = member[(ordinal + 1)..];
+        var saved = name[(close + 2)..];
+        return saved == member || saved == original ? new(original, label) : null;
+    }
+
     internal CapturedNodeName? CurrentName(string entity)
     {
         using var command = Command(null, "SELECT snapshot FROM ui_display_cursors WHERE entity_key=$key;", ("$key", entity));
@@ -38,14 +58,16 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
             ? new(value.OriginalName, value.GroupLabel) : null;
     }
 
-    internal static TrafficDisplayStore? Open(SqliteConnection db)
+    internal static TrafficDisplayStore? Open(SqliteConnection db, SqliteTransaction? transaction = null)
     {
         using var count = db.CreateCommand();
+        count.Transaction = transaction;
         count.CommandText = "SELECT count(*) FROM sqlite_schema WHERE name IN ('ui_display_cursors','ui_display_records');";
         if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return null;
         foreach (Match m in Regex.Matches(Schema, @"CREATE TABLE (\w+)[\s\S]*?;"))
         {
             using var command = db.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name;";
             command.Parameters.AddWithValue("$name", m.Groups[1].Value);
             static string Normalize(string x) => Regex.Replace(x.Trim().TrimEnd(';'), @"\s+", " ");
@@ -58,11 +80,10 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     internal static Snapshot? Capture(string basis, string? nodeKey, CapturedNodeName? name)
     {
         if (name is null || basis is not ("actual_member" or "legacy_proxy" or "probe_urltest_member")) return null;
-        var rates = new[] { name.OriginalName, name.GroupLabel ?? "" }
-            .SelectMany(x => Regex.Matches(x, @"(?<![\p{L}\p{N}_.])([0-9]+(?:\.[0-9]+)?)\s*(?:[xX×]|倍)(?![\p{L}\p{N}])")
-                .Cast<Match>().Select(m => m.Groups[1].Value)).ToArray();
+        var rates = Regex.Matches(name.OriginalName, @"(?<![\p{L}\p{N}_.])([0-9]+(?:\.[0-9]+)?)\s*(?:[xX×]|倍)(?![\p{L}\p{N}])")
+            .Cast<Match>().Select(m => m.Groups[1].Value).ToArray();
         var parsed = rates.Select(x => ProviderDecimal.TryParse(x, out var value) ? value.ToString() : null).ToArray();
-        var rate = parsed.Length > 0 && parsed.All(x => x is not null) && parsed.Distinct().Count() == 1 ? parsed[0] : null;
+        var rate = parsed.Length == 0 ? "1" : parsed.All(x => x is not null) && parsed.Distinct().Count() == 1 ? parsed[0] : null;
         // Only a verified IndexId can combine outbounds; names and connection similarity cannot.
         return new(name.OriginalName, name.GroupLabel, nodeKey is null ? null : MergeKey(basis, nodeKey), rate);
     }

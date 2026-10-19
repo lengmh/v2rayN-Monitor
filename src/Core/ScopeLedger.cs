@@ -285,7 +285,9 @@ public sealed class ScopeLedger : IDisposable
                 .Select(group =>
                 {
                     var first = group.First();
-                    var name = display?.CurrentName("scope:" + first.Id)?.OriginalName ?? first.Scope.Name;
+                    var name = display?.CurrentName("scope:" + first.Id)?.OriginalName ??
+                        TrafficDisplayStore.HistoricalMemberName(first.Scope.Basis, first.Scope.Name, first.Scope.OutboundTag)?.OriginalName ??
+                        first.Scope.Name;
                     return new NodeInfo(group.Count() > 1 ? group.Key : "scope:" + first.Id, name);
                 }).ToArray();
         }
@@ -309,13 +311,13 @@ public sealed class ScopeLedger : IDisposable
             ThrowIfDisposed();
             using var transaction = connection.BeginTransaction();
             var total = new Bytes(); var recovered = new Bytes(); var partial = new Bytes(); var unbucketed = new Bytes();
-            var series = new Dictionary<string, (long At, Bytes Total, Bytes Recovered)>(StringComparer.Ordinal);
+            var series = new Dictionary<string, (long At, Bytes Total, Bytes Recovered, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var scopes = new Dictionary<long, (string Name, Bytes Total, Bytes Recovered)>();
             var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
             var estimate = new TrafficDisplayStore.Summary();
             var scopeDisplay = new Dictionary<long, TrafficDisplayStore.Summary>();
             var scopeMerge = new Dictionary<long, string?>();
-            var comparisons = new Dictionary<string, Bytes>(StringComparer.Ordinal);
+            var comparisons = new Dictionary<string, (Bytes Bytes, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var rows = new List<ScopeTrafficRow>();
             long count = 0;
             var matchingScopes = new HashSet<long>();
@@ -347,8 +349,9 @@ public sealed class ScopeLedger : IDisposable
                     estimate.Add(row.Display);
                     if (!scopeDisplay.TryGetValue(id, out var summary)) scopeDisplay.Add(id, summary = new());
                     summary.Add(row.Display); scopeMerge[id] = row.Display.MergeKey;
-                    if (!comparisons.TryGetValue(comparisonName, out var comparison)) comparisons.Add(comparisonName, comparison = new());
-                    comparison.Add(up, down);
+                    if (!comparisons.TryGetValue(comparisonName, out var comparison)) comparisons.Add(comparisonName, comparison = (new(), new()));
+                    comparison.Bytes.Add(up, down);
+                    comparison.Display.Add(row.Display);
                     if (recovery) recovered.Add(up, down);
                     if (!scopes.TryGetValue(id, out var scope))
                         scopes.Add(id, scope = (row.Name, new Bytes(), new Bytes()));
@@ -358,10 +361,11 @@ public sealed class ScopeLedger : IDisposable
                     if (recovery && label != Ledger.BucketLabel(new(end - 1, TimeSpan.Zero), zone, query.Bucket))
                     { unbucketed.Add(up, down); continue; }
                     if (!series.TryGetValue(label, out var bucket))
-                        series.Add(label, bucket = (start, new Bytes(), new Bytes()));
+                        series.Add(label, bucket = (start, new Bytes(), new Bytes(), new()));
                     bucket.Total.Add(up, down);
+                    bucket.Display.Add(row.Display);
                     if (recovery) bucket.Recovered.Add(up, down);
-                    if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered);
+                    if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered, bucket.Display);
                 }
             // Gaps are not paged with traffic. NULL legacy gaps remain disclosed as unassigned history.
             var gaps = new List<ScopeGap>();
@@ -409,13 +413,14 @@ public sealed class ScopeLedger : IDisposable
             return new(query.Basis, total.Up, total.Down, recovered.Up, recovered.Down, partial.Up, partial.Down,
                 unbucketed.Up, unbucketed.Down,
                 series.OrderBy(x => x.Value.At).Select(x => new SeriesPoint(x.Key, x.Value.Total.Up, x.Value.Total.Down,
-                    x.Value.Recovered.Up, x.Value.Recovered.Down)).ToArray(),
+                    x.Value.Recovered.Up, x.Value.Recovered.Down) { Display = x.Value.Display.Result() }).ToArray(),
                 scopes.OrderBy(x => x.Key).Select(x => new ScopeTotal(x.Key, x.Value.Name, x.Value.Total.Up,
                     x.Value.Total.Down, x.Value.Recovered.Up, x.Value.Recovered.Down)
                     { Display = scopeDisplay[x.Key].Result(scopeMerge[x.Key]) }).ToArray(), rows, count, gaps)
             {
                 EarliestRecord = earliest, Display = estimate.Result(), DisplayMetadataEnabled = SupportsDisplayMetadata,
-                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.Up, x.Value.Down)).ToArray()
+                ComparisonNodes = comparisons.Select(x => new NodeTotal(x.Key, x.Key, x.Value.Bytes.Up, x.Value.Bytes.Down)
+                    { Display = x.Value.Display.Result() }).ToArray()
             };
         }
     }
@@ -427,7 +432,7 @@ public sealed class ScopeLedger : IDisposable
             0 AS kind,0 AS row_id,
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=m.scope_id AND g.reason='uncollected_outbounds'
                 AND g.start_ticks < m.start_ticks+600000000 AND g.end_ticks > m.start_ticks) AS partial_coverage,
-            s.basis AS basis,s.node_key AS node_key
+            s.basis AS basis,s.node_key AS node_key,s.outbound_tag AS outbound_tag
         FROM scope_minutes m JOIN measurement_scopes s ON s.scope_id=m.scope_id
         WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
             AND m.start_ticks >= $start AND m.start_ticks < $end
@@ -436,7 +441,7 @@ public sealed class ScopeLedger : IDisposable
             CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
             1,u.id,
             EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=u.scope_id AND g.reason='uncollected_outbounds'
-                AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks), s.basis,s.node_key
+                AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks), s.basis,s.node_key,s.outbound_tag
         FROM scope_unallocated u JOIN measurement_scopes s ON s.scope_id=u.scope_id
         WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
             AND u.start_ticks < $end AND u.end_ticks > $start
@@ -476,9 +481,16 @@ public sealed class ScopeLedger : IDisposable
         var up = Text(reader.GetInt64(4)); var down = Text(reader.GetInt64(5)); var basis = reader.GetString(10);
         var parts = metadata?.GetValueOrDefault(new("scope:" + id, reader.GetInt32(7), start, end));
         var mergeKey = reader.IsDBNull(11) ? null : TrafficDisplayStore.MergeKey(basis, reader.GetString(11));
+        var historical = TrafficDisplayStore.HistoricalMemberName(basis, reader.GetString(3),
+            reader.IsDBNull(12) ? null : reader.GetString(12));
         foreach (var part in TrafficDisplayStore.Split(parts, up, down, mergeKey))
-            yield return new(basis, id, part.Name ?? reader.GetString(3), Iso(start), Iso(end), part.Upload, part.Download, reader.GetString(6), reader.GetInt64(9) != 0)
-                { Display = part.Display };
+            yield return new(basis, id, part.Name ?? historical?.OriginalName ?? reader.GetString(3), Iso(start), Iso(end),
+                part.Upload, part.Download, reader.GetString(6), reader.GetInt64(9) != 0)
+            {
+                Display = part.Name is null && historical is not null
+                    ? part.Display with { OriginalName = historical.OriginalName, Groups = [historical.GroupLabel!] }
+                    : part.Display
+            };
     }
 
     private long Register(SqliteTransaction transaction, string instance, MeasurementScope scope)

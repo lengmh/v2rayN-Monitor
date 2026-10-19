@@ -35,7 +35,10 @@ public sealed class WindowsDiscovery : IDisposable
     internal const string ApprovedMemberSingboxSha256 = "B1C6F3AA48F21AE070EF283D10AE946C189421F7C9F498CCAA5657D2B0E7E15E";
     // CI 38751295368, artifact 11980964000: outer digest, provenance and inner EXE verified.
     internal const string ApprovedProbeSingboxSha256 = "595B4B3FEDE70FC23CA645DCF7B5A4AB6F91E5E7938DB0CA77D50EB0F8376695";
+    internal const string ApprovedProbeXraySha256 = "FAFB97663A3D7F2831B86409D8BC949394103C987E0D36C889BC6A6E4F20FA8E";
     private string? verifiedExtension;
+    private string? verifiedXrayExtension;
+    private bool verifiedXrayProbes;
 
     // The single collection loop calls this only after Ledger.Accept/RecordGap commits.
     public void AcknowledgePersistence() => guard.AcknowledgePersistence();
@@ -114,18 +117,26 @@ public sealed class WindowsDiscovery : IDisposable
             {
                 // This delegate is invoked by a portable testable pipeline; keep its native boundary explicit.
                 if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-                var snapshot = Capture(dataRoot, true, out var catalog, out var enabled);
-                return new(snapshot, catalog, enabled);
+                var snapshot = Capture(dataRoot, true, out var catalog, out var enabled, out var xrayCatalog, includeProbes);
+                return new(snapshot, catalog, enabled) { XrayOutbounds = xrayCatalog };
             }
             return await ReadScopesBoundAsync(CaptureMembers, async (capture, token) =>
             {
                 try
                 {
                     if (capture.Snapshot.CoreName != "sing-box")
-                        return (null, await ReadXrayCounters(capture.Snapshot.MetricsEndpoint, token).ConfigureAwait(false), null);
+                    {
+                        var bytes = await ReadXrayMetrics(capture.Snapshot.MetricsEndpoint, token).ConfigureAwait(false);
+                        var outbounds = bytes is not null && XrayParser.TryReadOutboundsCounters(bytes,
+                            capture.XrayOutbounds!.Candidates.Keys.ToArray(), out var parsed) ? parsed : null;
+                        var probes = includeProbes && capture.Snapshot.XrayProbeExtensionVerified && bytes is not null &&
+                            XrayParser.TryReadProbeCounters(bytes, capture.XrayOutbounds!.Candidates.Keys.ToArray(), out var probePairs)
+                            ? probePairs : null;
+                        return (null, null, probes, outbounds);
+                    }
                     var statistics = await V2RayStatistics.ReadScopesAsync(client, capture.Snapshot.MetricsEndpoint,
                         capture.Catalog!.Candidates.Keys.ToArray(), token).ConfigureAwait(false);
-                    return (statistics?.Members, null, statistics?.Probes);
+                    return (statistics?.Members, null, statistics?.Probes, null);
                 }
                 catch (IOException) { throw new HttpRequestException("Statistics response interrupted."); }
             },
@@ -145,7 +156,7 @@ public sealed class WindowsDiscovery : IDisposable
 
     // The test seam supplies synthetic captures/counters; native process discovery is not bypassed in production.
     internal async Task<ScopeCollectorReading> ReadScopesBoundAsync(Func<ScopeCapture> capture,
-        Func<ScopeCapture, CancellationToken, Task<(V2RayMemberStatistics? Members, XrayCounters? Legacy, V2RayProbeStatistics? Probes)>> read,
+        Func<ScopeCapture, CancellationToken, Task<(V2RayMemberStatistics? Members, XrayCounters? Legacy, V2RayProbeStatistics? Probes, V2RayOutboundStatistics? Outbounds)>> read,
         CancellationToken cancellationToken, bool includeProbes = false)
     {
         var before = capture();
@@ -156,10 +167,17 @@ public sealed class WindowsDiscovery : IDisposable
         var counters = await read(before, timeout.Token).ConfigureAwait(false);
         var at = DateTimeOffset.UtcNow;
         var after = capture();
+        if (before.Snapshot.XrayProbeExtensionVerified != after.Snapshot.XrayProbeExtensionVerified)
+        {
+            guard.InvalidateContinuity();
+            return new(null, "snapshot_changed", "采样前后 Xray 扩展核验结果变化，本次保留缺口。", after.Snapshot.NodeName, true);
+        }
         if (!guard.Accept(before.Snapshot, after.Snapshot, out reason))
             return new(null, reason, "采样前后核心、配置或身份变化，本次保留缺口。", after.Snapshot.NodeName, true);
         ScopeBatch batch;
         ProbeCollectionStatus? probeStatus = null;
+        var scope = after.Snapshot.Scope;
+        var state = "connected";
         if (after.Snapshot.CoreName == "sing-box")
         {
             // An unusable whole RPC remains a complete directory of unavailable scopes.
@@ -171,11 +189,11 @@ public sealed class WindowsDiscovery : IDisposable
                     new Dictionary<string, string>(), new Dictionary<string, XrayCounters>(), new Dictionary<string, string>());
                 batch = ScopeCollector.ProjectWithProbes(after, stats, probes, at, guard.RequiresBaseline);
                 var readings = batch.Readings.Where(x => x.Scope.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal)).ToArray();
-                var state = counters.Probes is null ? "unavailable"
+                var probeState = counters.Probes is null ? "unavailable"
                     : probes.Members.Count == 0 && probes.Totals.Count == 0 &&
                         probes.UnavailableMembers.Values.Concat(probes.UnavailableTotals.Values).All(x => x == "missing_counter") ? "unsupported"
                     : readings.Any(x => x.UnavailableReason is not null || x.PartialCoverage) ? "partial" : "available";
-                probeStatus = new(true, state, state switch
+                probeStatus = new(true, probeState, probeState switch
                 {
                     "unsupported" => "当前核心未提供 URLTest 探测计数；业务采集继续，探测量保持未知。",
                     "unavailable" => "URLTest 探测响应不可用，保留缺口。",
@@ -185,19 +203,51 @@ public sealed class WindowsDiscovery : IDisposable
             }
             else batch = ScopeCollector.Project(after, stats, at, guard.RequiresBaseline);
         }
+        else if (after.XrayOutbounds is { } xrayCatalog)
+        {
+            var stats = counters.Outbounds ?? new V2RayOutboundStatistics(new Dictionary<string, XrayCounters>(),
+                new Dictionary<string, string>());
+            batch = ScopeCollector.ProjectXray(after, stats, at, guard.RequiresBaseline);
+            scope = ScopeCollector.XrayCoverage(xrayCatalog);
+            state = batch.Readings.Any(x => x.UnavailableReason is not null) || scope.IsPartial ? "partial" : "connected";
+            if (includeProbes && after.Snapshot.XrayProbeExtensionVerified)
+            {
+                var probes = counters.Probes ?? new V2RayProbeStatistics(new Dictionary<string, XrayCounters>(),
+                    new Dictionary<string, string>(), new Dictionary<string, XrayCounters>(), new Dictionary<string, string>());
+                batch = ScopeCollector.ProjectXrayWithProbes(after, stats, probes, at, guard.RequiresBaseline);
+                var readings = batch.Readings.Where(x => x.Scope.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal));
+                var probeState = counters.Probes is null ? "unavailable"
+                    : readings.Any(x => x.UnavailableReason is not null || x.PartialCoverage) ? "partial" : "available";
+                probeStatus = new(true, probeState, probeState switch
+                {
+                    "unavailable" => "Xray HTTP 探测计数不可用，保留缺口。",
+                    "partial" => "Xray HTTP 探测部分范围未知，未补零。",
+                    _ => "已读取 Xray Observatory／Burst Observatory 的探测流字节；首次基线不回填，不能与原出站累计相加或直接相减。"
+                });
+                scope = scope with { HasSeparateProbeCounters = true };
+            }
+            else if (includeProbes)
+                probeStatus = new(true, "unsupported", "当前 Xray 未加载已核实的探测计量扩展；原出站继续采集，独立探测量保持未知。");
+        }
         else if (counters.Legacy is { } legacy)
         {
             batch = ScopeCollector.ProjectLegacy(after.Snapshot, legacy, at, guard.RequiresBaseline);
             if (includeProbes) probeStatus = new(true, "unsupported", "当前 Xray 路径未接入内部探测计量；业务采集继续。");
         }
         else return new(null, "missing_counters", "proxy 计数不可用。", after.Snapshot.NodeName, guard.RequiresBaseline);
-        return new(batch, "connected", after.Snapshot.CoreName == "sing-box"
+        return new(batch, state, after.Snapshot.CoreName == "sing-box"
             ? "实际成员维度；business、excluded、unknown 单独保存，不相加。"
-            : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。", after.Snapshot.NodeName, guard.RequiresBaseline, probeStatus,
-            after.Snapshot.CoreName == "Xray" ? after.Snapshot.Scope : null);
+            : after.XrayOutbounds is not null ? "Xray 多出站联合采样；proxy 延续原历史，其他独立出站分别记账。" : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。",
+            after.Snapshot.NodeName, guard.RequiresBaseline, probeStatus, after.Snapshot.CoreName == "Xray" ? scope : null);
     }
 
     private async Task<XrayCounters?> ReadXrayCounters(Uri endpoint, CancellationToken cancellationToken)
+    {
+        var bytes = await ReadXrayMetrics(endpoint, cancellationToken).ConfigureAwait(false);
+        return bytes is not null && XrayParser.TryReadCounters(bytes, out var counters) ? counters : null;
+    }
+
+    private async Task<byte[]?> ReadXrayMetrics(Uri endpoint, CancellationToken cancellationToken)
     {
         using var response = await client.GetAsync(endpoint, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) throw new HttpRequestException("Statistics interface is unavailable.");
@@ -211,17 +261,17 @@ public sealed class WindowsDiscovery : IDisposable
             if (bytes.Length + count > MaxMetricsBytes) return null;
             bytes.Write(buffer, 0, count);
         }
-        return XrayParser.TryReadCounters(bytes.ToArray(), out var counters) ? counters : null;
+        return bytes.ToArray();
     }
 
     [SupportedOSPlatform("windows")]
-    private XraySnapshot Capture(string root) => Capture(root, false, out _, out _);
+    private XraySnapshot Capture(string root) => Capture(root, false, out _, out _, out _);
 
     [SupportedOSPlatform("windows")]
     private XraySnapshot Capture(string root, bool memberMode, out SingboxMemberCatalog? catalog,
-        out IReadOnlyList<string> enabledMembers)
+        out IReadOnlyList<string> enabledMembers, out XrayOutboundCatalog? xrayCatalog, bool includeProbes = false)
     {
-        catalog = null; enabledMembers = [];
+        catalog = null; enabledMembers = []; xrayCatalog = null;
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         if (!Path.IsPathFullyQualified(root)) throw Fail("needs_directory", "请选择 v2rayN 数据目录的完整路径。");
         var guiPath = Path.Combine(root, "guiConfigs", "guiNConfig.json");
@@ -259,6 +309,8 @@ public sealed class WindowsDiscovery : IDisposable
             throw Fail("unsupported_version", "当前发现路径仅针对 v2rayN 7.25.1 兼容构建；其他版本尚未核实。");
         if (singbox && version.ProductVersion != SingboxParser.ClientVersion)
             throw Fail("unsupported_version", "AnyTLS 配置核对仅针对已核实的定制 v2rayN 7.25.1 构建；当前客户端版本尚未核实。");
+        if (!singbox && memberMode && version.ProductVersion != SingboxParser.ClientVersion)
+            throw Fail("unsupported_version", "Xray 多出站目录仅针对已核实的定制 v2rayN 7.25.1 构建；当前客户端版本尚未核实。");
         var corePath = singbox ? Path.Combine(root, "bin", "sing_box", "sing-box-client.exe")
             : Path.Combine(root, "bin", "xray", "xray.exe");
         var cores = processes.Where(p => p.ParentPid == parent.Pid && IsCoreName(p.Name)).ToArray();
@@ -283,7 +335,8 @@ public sealed class WindowsDiscovery : IDisposable
         if (singbox) generation += ":" + XrayParser.Hash(statisticsBytes!) + ":" + statisticsStamp!.WrittenAt.UtcTicks;
         var writtenAt = singbox && statisticsStamp!.WrittenAt > configStamp.WrittenAt ? statisticsStamp.WrittenAt : configStamp.WrittenAt;
         var snapshot = new XraySnapshot(instanceId, selection.IndexId, node, processIdentity, generation, coreStartedAt,
-            writtenAt, listenerIdentity, configuration.MetricsEndpoint, configuration.CoreName, configuration.Scope);
+            writtenAt, listenerIdentity, configuration.MetricsEndpoint, configuration.CoreName, configuration.Scope)
+        { XrayProbeExtensionVerified = !singbox && includeProbes && IsVerifiedXrayProbeExtension(core) };
         if (singbox && memberMode)
         {
             if (!SingboxParser.TryReadMemberCatalog(snapshot, configBytes, out catalog, out _) ||
@@ -293,6 +346,8 @@ public sealed class WindowsDiscovery : IDisposable
             if (enabledMembers.Any(x => !candidates.ContainsKey(x)))
                 throw Fail("unsupported_member_configuration", "成员目录或 sidecar 范围无法核实；不猜测归属。");
         }
+        else if (memberMode && !XrayParser.TryReadOutboundCatalog(snapshot, configBytes, out xrayCatalog, out _))
+            throw Fail("unsupported_member_configuration", "Xray 出站目录或策略组无法核实；不猜测归属。");
         return snapshot;
     }
 
@@ -311,6 +366,25 @@ public sealed class WindowsDiscovery : IDisposable
     internal static bool IsApprovedExtension(string hash, bool memberMode) => memberMode
         ? hash is ApprovedMemberSingboxSha256 or ApprovedProbeSingboxSha256
         : hash == ApprovedSingboxSha256;
+
+    private bool IsVerifiedXrayProbeExtension(ProcessInfo core)
+    {
+        var stamp = Stamp(core.ExecutablePath);
+        var identity = string.Join('|', core.Pid, core.StartedAt!.Value.UtcTicks, core.ExecutablePath, stamp);
+        if (identity == verifiedXrayExtension) return verifiedXrayProbes;
+        string hash;
+        try
+        {
+            using var stream = new FileStream(core.ExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        { return false; } // Business counters remain usable without attesting the optional extension.
+        if (Stamp(core.ExecutablePath) != stamp)
+            throw Fail("snapshot_changed", "Xray 文件在核验时变化，本次保留缺口。");
+        verifiedXrayExtension = identity;
+        return verifiedXrayProbes = hash == ApprovedProbeXraySha256;
+    }
 
     private static bool IsCoreName(string name) => name.Equals("xray.exe", StringComparison.OrdinalIgnoreCase)
         || name.Equals("sing-box.exe", StringComparison.OrdinalIgnoreCase)
