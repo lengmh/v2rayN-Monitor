@@ -81,6 +81,24 @@ internal static class LinkedLaunch
                 "联动程序与 Monitor 配置的数据目录不对应或尚未设置。请核对统计设置，并重新创建联动快捷方式。");
     }
 
+    // Prefer an available/abandoned owner mutex over a stale ready signal.
+    // Waiting on it acquires it; always release that lease.
+    internal static bool WaitForMonitorReady(Mutex ownerMutex, WaitHandle ready, TimeSpan timeout)
+    {
+        try
+        {
+            var signaled = WaitHandle.WaitAny([ownerMutex, ready], timeout);
+            if (signaled == 1) return true;
+            if (signaled == 0) ownerMutex.ReleaseMutex();
+            return false;
+        }
+        catch (AbandonedMutexException)
+        {
+            ownerMutex.ReleaseMutex();
+            return false;
+        }
+    }
+
     internal static void StartV2rayNIfNeeded(string executable)
     {
         if (!IsV2rayNExecutable(executable) || !Path.IsPathFullyQualified(executable))

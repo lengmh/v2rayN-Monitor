@@ -32,16 +32,25 @@ internal static class Program
         // One writer per data directory, including launches with alternate command-line spellings.
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
         using var mutex = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created);
+        // Every participant keeps both handles alive. Readiness cannot outlive this owner
+        // and be mistaken for a later owner of the same data directory.
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset,
+            @"Local\V2rayNMonitor-Ready-" + identity);
         if (!created)
         {
             if (linkedExecutable is null)
                 MessageBox.Show("v2rayN Monitor 已在此数据目录运行，请从系统托盘打开。", "v2rayN Monitor");
-            else LaunchLinked(linkedExecutable, root);
+            else if (LinkedLaunch.WaitForMonitorReady(mutex, ready, TimeSpan.FromSeconds(30)))
+                LaunchLinked(linkedExecutable, root);
+            else
+                MessageBox.Show("Monitor 尚未完成启动或已退出，本次未启动 v2rayN。请检查 Monitor 后重新点击联动快捷方式。",
+                    "v2rayN Monitor · 联动启动未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        try { Application.Run(new TrayContext(root, demo, linkedExecutable)); }
+        ready.Reset();
+        try { Application.Run(new TrayContext(root, demo, linkedExecutable, ready)); }
         catch (Exception) { MessageBox.Show("启动失败。请确认数据目录可写、磁盘空间足够且应用文件完整。历史数据库不会被自动删除。", "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-        finally { mutex.ReleaseMutex(); }
+        finally { ready.Reset(); mutex.ReleaseMutex(); }
     }
 
     internal static void LaunchLinked(string executable, string monitorDirectory)
@@ -75,9 +84,11 @@ internal sealed class TrayContext : ApplicationContext
     private readonly CancellationTokenSource stop = new();
     private readonly Task collectTask;
     private readonly string directory;
-    public TrayContext(string dataDir, bool demo, string? linkedExecutable = null)
+    private readonly EventWaitHandle? readiness;
+    public TrayContext(string dataDir, bool demo, string? linkedExecutable = null, EventWaitHandle? readiness = null)
     {
         directory = dataDir;
+        this.readiness = readiness;
         server = MonitorServer.StartAsync(dataDir, Path.Combine(AppContext.BaseDirectory, "wwwroot"), demo).GetAwaiter().GetResult();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开统计页面", null, (_, _) => Open());
@@ -106,6 +117,7 @@ internal sealed class TrayContext : ApplicationContext
         tray = new NotifyIcon { Icon = trayIcon, Text = demo ? "v2rayN Monitor · 演示" : "v2rayN Monitor", ContextMenuStrip = menu, Visible = true };
         tray.DoubleClick += (_, _) => Open();
         collectTask = demo ? Task.CompletedTask : Task.Run(CollectAsync);
+        readiness?.Set();
         if (!demo && linkedExecutable is not null) Program.LaunchLinked(linkedExecutable, directory);
         if (!Environment.GetCommandLineArgs().Contains("--background")) Open();
     }
@@ -219,6 +231,7 @@ internal sealed class TrayContext : ApplicationContext
     }
     protected override void ExitThreadCore()
     {
+        readiness?.Reset();
         stop.Cancel(); collectTask.GetAwaiter().GetResult();
         server.DisposeAsync().AsTask().GetAwaiter().GetResult();
         tray.Visible = false; tray.Dispose(); trayIcon.Dispose(); stop.Dispose(); base.ExitThreadCore();
