@@ -1,0 +1,28 @@
+--- a/app/observatory/observer.go
++++ b/app/observatory/observer.go
+@@ -12,0 +13 @@
++	"github.com/xtls/xray-core/app/observatory/probestats"
+@@ -150 +151 @@
+-				connection = conn
++				connection = probestats.Wrap(trackedCtx, conn, outbound)
+--- a/app/observatory/burst/ping.go
++++ b/app/observatory/burst/ping.go
+@@ -8,0 +9 @@
++	"github.com/xtls/xray-core/app/observatory/probestats"
+@@ -42 +43,5 @@
+-			return tagged.Dialer(ctxv, dispatcher, dest, handler)
++			conn, err := tagged.Dialer(ctxv, dispatcher, dest, handler)
++			if err != nil {
++				return nil, err
++			}
++			return probestats.Wrap(ctxv, conn, handler), nil
+--- a/app/metrics/metrics.go
++++ b/app/metrics/metrics.go
+@@ -13,0 +14 @@
++	"github.com/xtls/xray-core/app/observatory/probestats"
+@@ -157,0 +159 @@
++	vars["monitor_probes"] = marshalJSON(probestats.Read(p.ctx))
+@@ -181,0 +184,3 @@
++		if strings.HasPrefix(name, probestats.Prefix) {
++			return true
++		}

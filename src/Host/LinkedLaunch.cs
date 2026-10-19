@@ -42,13 +42,15 @@ internal static class LinkedLaunch
         return "\"" + path + new string('\\', trailingSlashes) + "\"";
     }
 
-    internal static string BuildArguments(string v2rayNExecutable, string monitorDataDirectory)
+    internal static string BuildArguments(string v2rayNExecutable, string monitorDataDirectory,
+        bool scopeMode = false, bool probeMode = false)
     {
         if (!IsV2rayNExecutable(v2rayNExecutable) ||
             !Path.IsPathFullyQualified(v2rayNExecutable) ||
             !Path.IsPathFullyQualified(monitorDataDirectory))
             throw new ArgumentException("请选择有效的 v2rayN.exe 和 Monitor 数据目录。");
-        return "--background --data-dir " + QuoteWindowsArgument(monitorDataDirectory) +
+        return "--background" + (probeMode ? " --probe-ledger" : scopeMode ? " --scope-ledger" : "") +
+               " --data-dir " + QuoteWindowsArgument(monitorDataDirectory) +
                " " + Option + " " + QuoteWindowsArgument(v2rayNExecutable);
     }
 
@@ -150,7 +152,8 @@ internal static class LinkedLaunch
         finally { if (owned) launchMutex.ReleaseMutex(); }
     }
 
-    internal static string CreateDesktopShortcut(string v2rayNExecutable, string monitorDataDirectory)
+    internal static string CreateDesktopShortcut(string v2rayNExecutable, string monitorDataDirectory,
+        bool scopeMode = false, bool probeMode = false)
     {
         var monitorExecutable = Environment.ProcessPath;
         if (string.IsNullOrEmpty(monitorExecutable) ||
@@ -165,7 +168,7 @@ internal static class LinkedLaunch
             var name = i == 1 ? "v2rayN + Monitor.lnk" : $"v2rayN + Monitor ({i}).lnk";
             var shortcut = Path.Combine(desktop, name);
             if (File.Exists(shortcut)) continue;
-            try { CreateShortcut(shortcut, monitorExecutable, v2rayNExecutable, monitorDataDirectory); }
+            try { CreateShortcut(shortcut, monitorExecutable, v2rayNExecutable, monitorDataDirectory, scopeMode, probeMode); }
             catch (IOException) when (File.Exists(shortcut)) { continue; }
             return shortcut;
         }
@@ -173,13 +176,13 @@ internal static class LinkedLaunch
     }
 
     internal static void CreateShortcut(string shortcutPath, string monitorExecutable,
-        string v2rayNExecutable, string monitorDataDirectory)
+        string v2rayNExecutable, string monitorDataDirectory, bool scopeMode = false, bool probeMode = false)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         if (!File.Exists(v2rayNExecutable) || !File.Exists(monitorExecutable))
             throw new FileNotFoundException("启动程序已移动或不存在。");
         if (File.Exists(shortcutPath)) throw new IOException("快捷方式已存在，不会覆盖。");
-        var arguments = BuildArguments(v2rayNExecutable, monitorDataDirectory);
+        var arguments = BuildArguments(v2rayNExecutable, monitorDataDirectory, scopeMode, probeMode);
         var shortcutDirectory = Path.GetDirectoryName(Path.GetFullPath(shortcutPath))
             ?? throw new ArgumentException("快捷方式目标目录无效。");
         var temporary = Path.Combine(shortcutDirectory, ".v2rayn-monitor-" + Guid.NewGuid().ToString("N") + ".lnk");

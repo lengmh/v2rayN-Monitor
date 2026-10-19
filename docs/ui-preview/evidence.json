@@ -1,0 +1,154 @@
+{
+  "sourceVisuals": [
+    {
+      "file": "exec-e968d9d2-13e4-479a-a318-abfc2b4fba44.png",
+      "pixels": [
+        1487,
+        1058
+      ]
+    },
+    {
+      "file": "exec-6027478b-b2d9-4390-804c-665bce34b3fc.png",
+      "pixels": [
+        1487,
+        1058
+      ]
+    },
+    {
+      "file": "exec-4604e61b-9c9a-41e6-9c83-ab222a4bb3ad.png",
+      "pixels": [
+        1536,
+        1024
+      ]
+    },
+    {
+      "file": "exec-8369f86c-e4ad-4f6c-aee5-1398804d835f.png",
+      "pixels": [
+        1486,
+        1058
+      ]
+    },
+    {
+      "file": "exec-43732751-4fbd-4c6e-8244-a09a37f35d1e.png",
+      "pixels": [
+        1487,
+        1058
+      ]
+    },
+    {
+      "file": "exec-1ba61fa3-7c25-417a-ac8c-e686e967e3ab.png",
+      "pixels": [
+        1487,
+        1058
+      ]
+    },
+    {
+      "file": "exec-4bd37da1-069e-4015-9e8d-8be77a007f62.png",
+      "pixels": [
+        1487,
+        1058
+      ]
+    },
+    {
+      "file": "exec-eb6f4879-7809-416d-b18b-da8640fe5cb7.png",
+      "pixels": [
+        1487,
+        1058
+      ]
+    }
+  ],
+  "browserCaptures": [
+    {
+      "file": "comparison.jpg",
+      "pixels": [
+        1348,
+        1405
+      ]
+    },
+    {
+      "file": "imports.jpg",
+      "pixels": [
+        1348,
+        926
+      ]
+    },
+    {
+      "file": "mobile-ranking.jpg",
+      "pixels": [
+        390,
+        844
+      ]
+    },
+    {
+      "file": "mobile.jpg",
+      "pixels": [
+        390,
+        844
+      ]
+    },
+    {
+      "file": "node-groups.jpg",
+      "pixels": [
+        1348,
+        926
+      ]
+    },
+    {
+      "file": "probes.jpg",
+      "pixels": [
+        1348,
+        926
+      ]
+    },
+    {
+      "file": "provider.jpg",
+      "pixels": [
+        1348,
+        926
+      ]
+    },
+    {
+      "file": "recovery-popover.jpg",
+      "pixels": [
+        1487,
+        1058
+      ]
+    },
+    {
+      "file": "settings.jpg",
+      "pixels": [
+        1363,
+        936
+      ]
+    },
+    {
+      "file": "statistics-dark.jpg",
+      "pixels": [
+        1487,
+        1058
+      ]
+    },
+    {
+      "file": "statistics-light.jpg",
+      "pixels": [
+        1487,
+        1058
+      ]
+    }
+  ],
+  "desktopCssViewport": [
+    1487,
+    1058
+  ],
+  "otherDesktopCssViewport": [
+    1363,
+    936
+  ],
+  "mobileCssViewport": [
+    390,
+    844
+  ],
+  "deviceScaleFactor": 1,
+  "normalization": "Comparison boards preserve aspect ratio and normalize width. Original browser JPEG bytes are retained. Full-page captures may exclude native scrollbars. Import preview retains its observed scroll position; compare the form and preview region.",
+  "data": "Synthetic preview API only; no live core or ledger accessed."
+}

@@ -1,0 +1,257 @@
+--- a/adapter/monitor.go
++++ b/adapter/monitor.go
+@@ -19,0 +20,5 @@
++}
++
++// Called only by the shared URLTest path; probe and routed-business meters are separate.
++type MonitorURLTestTracker interface {
++	MonitorURLTest(Outbound) *MonitorMeter
+--- a/experimental/v2rayapi/stats.go
++++ b/experimental/v2rayapi/stats.go
+@@ -65,0 +66,2 @@
++		counters["monitor>>>probe>>>urltest>>>member>>>"+member+">>>traffic>>>uplink"] = new(atomic.Int64)
++		counters["monitor>>>probe>>>urltest>>>member>>>"+member+">>>traffic>>>downlink"] = new(atomic.Int64)
+@@ -70,0 +73,2 @@
++			counters["monitor>>>probe>>>urltest>>>"+dimension+">>>traffic>>>uplink"] = new(atomic.Int64)
++			counters["monitor>>>probe>>>urltest>>>"+dimension+">>>traffic>>>downlink"] = new(atomic.Int64)
+--- a/experimental/v2rayapi/monitor_members.go
++++ b/experimental/v2rayapi/monitor_members.go
+@@ -13 +13,2 @@
+-	if len(s.monitorMembers) == 0 {
++	meter := s.newMonitorMeter(matched, "monitor>>>")
++	if meter == nil {
+@@ -16 +17,12 @@
+-	meter := &monitorMemberMeter{service: s}
++	return adapter.WithMonitorMeter(ctx, meter)
++}
++
++func (s *StatsService) MonitorURLTest(matched adapter.Outbound) *adapter.MonitorMeter {
++	return s.newMonitorMeter(matched, "monitor>>>probe>>>urltest>>>")
++}
++
++func (s *StatsService) newMonitorMeter(matched adapter.Outbound, prefix string) *adapter.MonitorMeter {
++	if len(s.monitorMembers) == 0 {
++		return nil
++	}
++	meter := &monitorMemberMeter{service: s, prefix: prefix}
+@@ -20 +32 @@
+-	return adapter.WithMonitorMeter(ctx, &adapter.MonitorMeter{
++	return &adapter.MonitorMeter{
+@@ -24 +36 @@
+-	})
++	}
+@@ -31,0 +44 @@
++	prefix  string
+@@ -67 +80 @@
+-	m.total = pair("monitor>>>" + dimension)
++	m.total = pair(m.prefix + dimension)
+@@ -69 +82 @@
+-		m.member = pair("monitor>>>member>>>" + member)
++		m.member = pair(m.prefix + "member>>>" + member)
+--- a/common/urltest/urltest.go
++++ b/common/urltest/urltest.go
+@@ -14,0 +15 @@
++	"github.com/sagernet/sing/common/bufio"
+@@ -18,0 +20 @@
++	"github.com/sagernet/sing/service"
+@@ -110,0 +113,11 @@
++	var meter *adapter.MonitorMeter
++	if server := service.FromContext[adapter.V2RayServer](ctx); server != nil {
++		if tracker, ok := server.StatsService().(adapter.MonitorURLTestTracker); ok {
++			if outbound, ok := detour.(adapter.Outbound); ok {
++				meter = tracker.MonitorURLTest(outbound)
++			}
++		}
++	}
++	if meter != nil {
++		ctx = adapter.WithMonitorMeter(ctx, meter)
++	}
+@@ -118,0 +132,4 @@
++	}
++	if meter != nil {
++		adapter.BindMonitorConnection(ctx, instance)
++		instance = bufio.NewCounterConn(instance, []N.CountFunc{meter.Download}, []N.CountFunc{meter.Upload})
+--- a/experimental/clashapi/proxies.go
++++ b/experimental/clashapi/proxies.go
+@@ -18,0 +19 @@
++	"github.com/sagernet/sing/service"
+@@ -228,0 +230,4 @@
++		// Preserve the API's original test context; attach only the statistics service.
++		if stats := service.FromContext[adapter.V2RayServer](server.ctx); stats != nil {
++			ctx = service.ContextWith[adapter.V2RayServer](ctx, stats)
++		}
+--- a/cmd/sing-box/cmd_monitor_stats_test.go
++++ b/cmd/sing-box/cmd_monitor_stats_test.go
+@@ -7,0 +8 @@
++	"github.com/sagernet/sing-box/common/urltest"
+@@ -10,0 +12 @@
++	"github.com/sagernet/sing/service"
+@@ -11,0 +14,2 @@
++	"net/http"
++	"net/http/httptest"
+@@ -14,0 +19 @@
++	"sync/atomic"
+@@ -267,0 +273,163 @@
++
++// Pure loopback HEAD probes. Reference counters observe the stream independently.
++type monitorURLTestServer struct {
++	adapter.V2RayServer
++	tracker adapter.ConnectionTracker
++}
++
++func (s *monitorURLTestServer) StatsService() adapter.ConnectionTracker { return s.tracker }
++
++type monitorURLTestOutbound struct {
++	OA.Adapter
++	up, down  atomic.Int64
++	multiplex bool
++}
++
++func (o *monitorURLTestOutbound) MultiplexEnabled() bool { return o.multiplex }
++func (o *monitorURLTestOutbound) DialContext(ctx context.Context, network string, dst M.Socksaddr) (net.Conn, error) {
++	c, err := (&net.Dialer{}).DialContext(ctx, network, dst.String())
++	if err != nil {
++		return nil, err
++	}
++	return &monitorURLTestWire{Conn: c, up: &o.up, down: &o.down}, nil
++}
++func (o *monitorURLTestOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	panic("not a probe packet")
++}
++
++type monitorURLTestWire struct {
++	net.Conn
++	up, down *atomic.Int64
++}
++
++func (c *monitorURLTestWire) Read(b []byte) (int, error) {
++	n, e := c.Conn.Read(b)
++	c.down.Add(int64(n))
++	return n, e
++}
++func (c *monitorURLTestWire) Write(b []byte) (int, error) {
++	n, e := c.Conn.Write(b)
++	c.up.Add(int64(n))
++	return n, e
++}
++
++type monitorURLTestGroup struct {
++	*monitorURLTestOutbound
++	leaf adapter.Outbound
++}
++
++func (g *monitorURLTestGroup) Now() string   { panic("probe attribution cannot read current selection") }
++func (g *monitorURLTestGroup) All() []string { return []string{"a", "b"} }
++func (g *monitorURLTestGroup) DialContext(ctx context.Context, network string, dst M.Socksaddr) (net.Conn, error) {
++	c, e := g.monitorURLTestOutbound.DialContext(ctx, network, dst)
++	if e != nil {
++		return nil, e
++	}
++	return adapter.MonitorConnection(ctx, c, g.leaf), nil
++}
++func TestMonitorURLTestSeparateCounters(t *testing.T) {
++	cases := []struct {
++		name, kind, tag, dimension string
++		multiplex, group, failed   bool
++		dependencies               []string
++	}{
++		{name: "one_HEAD", kind: C.TypeSOCKS, tag: "a", dimension: "business"},
++		{name: "multiplex_warmup_and_formal", kind: C.TypeAnyTLS, tag: "a", dimension: "business", multiplex: true},
++		{name: "returned_group_member", kind: C.TypeSOCKS, tag: "b", dimension: "business", group: true},
++		{name: "direct_is_separate", kind: C.TypeDirect, tag: "direct", dimension: "excluded"},
++		{name: "chain_stays_unknown", kind: C.TypeSOCKS, tag: "a", dimension: "unknown", dependencies: []string{"other"}},
++		{name: "unregistered_stays_unknown", kind: C.TypeSOCKS, tag: "other", dimension: "unknown"},
++		{name: "failed_TLS_keeps_transferred_bytes", kind: C.TypeSOCKS, tag: "a", dimension: "business", failed: true},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			var heads atomic.Int64
++			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.Method != "HEAD" {
++					t.Error("unexpected method", r.Method)
++				}
++				heads.Add(1)
++				w.WriteHeader(http.StatusNoContent)
++			}))
++			defer target.Close()
++			s := monitorServiceForTest()
++			ctx := service.ContextWith[adapter.V2RayServer](context.Background(), &monitorURLTestServer{tracker: s})
++			leaf := &monitorURLTestOutbound{Adapter: OA.NewAdapter(tc.kind, tc.tag, []string{"tcp"}, tc.dependencies), multiplex: tc.multiplex}
++			var detour adapter.Outbound = leaf
++			if tc.group {
++				detour = &monitorURLTestGroup{monitorURLTestOutbound: leaf, leaf: monitorLeaf(tc.tag, C.TypeSOCKS)}
++			}
++			link := target.URL
++			if tc.failed {
++				link = "https" + link[4:]
++			}
++			_, err := urltest.URLTest(ctx, link, detour)
++			if (err != nil) != tc.failed {
++				t.Fatal("probe error", err)
++			}
++			want := int64(1)
++			if tc.multiplex {
++				want = 2
++			}
++			if tc.failed {
++				want = 0
++			}
++			if heads.Load() != want {
++				t.Fatal("HEAD count", heads.Load(), want)
++			}
++			counts := monitorCountsForTest(t, s)
++			prefix := "monitor>>>probe>>>urltest>>>"
++			if _, ok := counts[prefix+"business>>>traffic>>>uplink"]; !ok {
++				t.Fatal("probe counters unavailable")
++			}
++			if leaf.up.Load() == 0 {
++				t.Fatal("no reference upload")
++			}
++			monitorCheckPair(t, counts, prefix+tc.dimension, leaf.up.Load(), leaf.down.Load())
++			for _, tag := range []string{"a", "b"} {
++				var up, down int64
++				if tc.dimension == "business" && tc.tag == tag {
++					up = leaf.up.Load()
++					down = leaf.down.Load()
++				}
++				monitorCheckPair(t, counts, prefix+"member>>>"+tag, up, down)
++				monitorCheckPair(t, counts, "monitor>>>member>>>"+tag, 0, 0)
++			}
++			for _, dim := range []string{"business", "excluded", "unknown"} {
++				monitorCheckPair(t, counts, "monitor>>>"+dim, 0, 0)
++			}
++			monitorCheckPair(t, counts, "outbound>>>g", 0, 0)
++		})
++	}
++}
++func TestMonitorURLTestDisabledAndConcurrent(t *testing.T) {
++	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
++	defer target.Close()
++	leaf := &monitorURLTestOutbound{Adapter: OA.NewAdapter(C.TypeSOCKS, "a", []string{"tcp"}, nil)}
++	disabled := api.NewStatsService(option.V2RayStatsServiceOptions{Enabled: true, Outbounds: []string{"g"}})
++	ctx := service.ContextWith[adapter.V2RayServer](context.Background(), &monitorURLTestServer{tracker: disabled})
++	if _, e := urltest.URLTest(ctx, target.URL, leaf); e != nil {
++		t.Fatal(e)
++	}
++	if len(monitorCountsForTest(t, disabled)) != 2 {
++		t.Fatal("probe counters enabled without members opt-in")
++	}
++	s := monitorServiceForTest()
++	ctx = service.ContextWith[adapter.V2RayServer](context.Background(), &monitorURLTestServer{tracker: s})
++	beforeUp, beforeDown := leaf.up.Load(), leaf.down.Load()
++	var workers sync.WaitGroup
++	for i := 0; i < 12; i++ {
++		workers.Add(1)
++		go func() {
++			defer workers.Done()
++			if _, e := urltest.URLTest(ctx, target.URL, leaf); e != nil {
++				t.Error(e)
++			}
++		}()
++	}
++	workers.Wait()
++	counts := monitorCountsForTest(t, s)
++	monitorCheckPair(t, counts, "monitor>>>probe>>>urltest>>>member>>>a", leaf.up.Load()-beforeUp, leaf.down.Load()-beforeDown)
++	monitorCheckPair(t, counts, "monitor>>>probe>>>urltest>>>business", leaf.up.Load()-beforeUp, leaf.down.Load()-beforeDown)
++	monitorCheckPair(t, counts, "monitor>>>business", 0, 0)
++}
