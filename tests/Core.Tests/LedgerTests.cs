@@ -67,6 +67,9 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("5", old.Display!.EstimatedBilledBytes);
         Assert.Equal("0.5", Assert.Single(old.Records).Display!.Rate);
         Assert.Equal("Synthetic 0.5x", old.ComparisonNodes!.Single().Name);
+        Assert.Equal("5", Assert.Single(old.ComparisonNodes!).Display!.EstimatedBilledBytes);
+        Assert.Equal("25", Assert.Single(result.Series).Display!.EstimatedBilledBytes);
+        Assert.Equal("10", Assert.Single(result.Series).Display!.EstimateUnknownBytes);
         Assert.Equal("5", Assert.Single(ledger.Export(All() with { NodeName = "Synthetic 0.5x" })).Display!.EstimatedBilledBytes);
         Assert.Equal(BigInteger.Parse(result.Upload), result.Records.Aggregate(BigInteger.Zero, (sum, row) => sum + BigInteger.Parse(row.Upload)));
     }
@@ -87,6 +90,8 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("20", result.Display!.EstimatedBilledBytes);
         Assert.Equal("80", result.Display.EstimateUnknownBytes);
         Assert.Null(result.Records.Single(x => x.Quality == "recovered-contained").Display!.EstimatedBilledBytes);
+        Assert.Equal("20", Assert.Single(result.Series).Display!.EstimatedBilledBytes);
+        Assert.Equal("80", Assert.Single(result.Series).Display!.EstimateUnknownBytes);
     }
 
     [Fact]
@@ -108,18 +113,45 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Theory]
-    [InlineData("Synthetic VIP88a 09", null)]
-    [InlineData("Synthetic VIP88x", null)]
+    [InlineData("Synthetic VIP88a 09", "1")]
+    [InlineData("Synthetic VIP88x", "1")]
     [InlineData("Synthetic 0.5x 2倍", null)]
     [InlineData("Synthetic 0x", "0")]
+    [InlineData("Synthetic 1x", "1")]
+    [InlineData("Synthetic 1倍", "1")]
+    [InlineData("Synthetic 2x", "2")]
     [InlineData("Synthetic 0.5x", "0.5")]
+    [InlineData("Synthetic 0.5倍", "0.5")]
     [InlineData("Synthetic 2倍", "2")]
-    public void MultiplierRequiresAnExplicitUnambiguousMarker(string name, string? expected)
+    public void MultiplierUsesNodeMarkerOrDefaultsToOne(string name, string? expected)
     {
         using var ledger = new Ledger(Database, includeDisplayMetadata: true);
         ledger.Accept(Sample(0, 0, name: name));
         ledger.Accept(Sample(1, 1, name: name));
-        Assert.Equal(expected, ledger.Query(All()).Display!.Rate);
+        var display = ledger.Query(All()).Display!;
+        Assert.Equal(expected, display.Rate);
+        Assert.Equal(expected, display.EstimatedBilledBytes);
+        Assert.Equal(expected is null ? "0" : "1", display.EstimateCoveredBytes);
+    }
+
+    [Fact]
+    public void DefaultMultiplierDoesNotReinterpretPreviouslyUnknownSnapshots()
+    {
+        using var ledger = new Ledger(Database, includeDisplayMetadata: true);
+        ledger.Accept(Sample(0, 0));
+        ledger.Accept(Sample(1, 10));
+        RunSql("""
+            UPDATE ui_display_cursors SET snapshot=json_set(snapshot,'$.Rate',NULL);
+            UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.Rate',NULL);
+            """);
+        Assert.Null(ledger.Query(All()).Display!.EstimatedBilledBytes);
+        ledger.Accept(Sample(2, 20));
+        ledger.Accept(Sample(3, 30));
+        var result = ledger.Query(All());
+        Assert.Equal("30", result.Upload);
+        Assert.Equal("10", result.Display!.EstimatedBilledBytes);
+        Assert.Equal("10", result.Display.EstimateCoveredBytes);
+        Assert.Equal("20", result.Display.EstimateUnknownBytes);
     }
 
     [Fact]
@@ -128,7 +160,7 @@ public sealed class LedgerTests : IDisposable
         using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
         var member = new MeasurementScope("actual_member", "outbound",
             System.Text.Json.JsonSerializer.Serialize(new[] { new string('A', 64), "synthetic-out" }), "Legacy friendly label",
-            OutboundTag: "synthetic-out") { CapturedName = new("Synthetic raw VIP88a", "US-0.5x") };
+            OutboundTag: "synthetic-out") { CapturedName = new("Synthetic raw VIP88a 0.5x", "US-1x") };
         var probe = member with { Basis = "probe_urltest_member" };
         var aggregate = new MeasurementScope("business", "aggregate", "business", "Synthetic total 2x");
         var at = Epoch;
@@ -139,11 +171,13 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("4503599627370496.5", result.Display!.EstimatedBilledBytes);
         Assert.Equal(large.ToString(CultureInfo.InvariantCulture), result.Upload);
         Assert.Null(Assert.Single(result.Scopes).Display!.MergeKey);
-        Assert.Equal("Synthetic raw VIP88a", Assert.Single(result.ComparisonNodes).Name);
-        Assert.Equal("US-0.5x", Assert.Single(Assert.Single(result.Records).Display!.Groups));
+        Assert.Equal("Synthetic raw VIP88a 0.5x", Assert.Single(result.ComparisonNodes).Name);
+        Assert.Equal("4503599627370496.5", Assert.Single(result.ComparisonNodes).Display!.EstimatedBilledBytes);
+        Assert.Equal("4503599627370496.5", Assert.Single(result.Series).Display!.EstimatedBilledBytes);
+        Assert.Equal("US-1x", Assert.Single(Assert.Single(result.Records).Display!.Groups));
         Assert.Equal("1", ledger.Query(new("probe_urltest_member", at, at.AddMinutes(1), "UTC")).Display!.EstimatedBilledBytes);
         Assert.Null(ledger.Query(new("business", at, at.AddMinutes(1), "UTC")).Display!.EstimatedBilledBytes);
-        var filtered = ledger.Query(new("local_proxy", at, at.AddMinutes(1), "UTC") { ScopeName = "Synthetic raw VIP88a" });
+        var filtered = ledger.Query(new("local_proxy", at, at.AddMinutes(1), "UTC") { ScopeName = "Synthetic raw VIP88a 0.5x" });
         Assert.Equal(result.Upload, filtered.Upload);
     }
 
