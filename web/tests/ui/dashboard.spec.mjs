@@ -30,6 +30,12 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+async function settledScreenshot(page, path) {
+  await expect(page.locator('.motion-snapshot')).toHaveCount(0);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(() => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').length)).toBe(0);
+  await page.screenshot({ path, fullPage: true, animations: 'disabled' });
+}
 test('raw and billing comparisons switch both sources and disclose missing multiplier coverage', async ({ page }) => {
   let reads = 0;
   const display = { originalName: 'Synthetic known multiplier', groups: [], mergeKey: null, rate: null, rateStatus: 'partial',
@@ -62,11 +68,11 @@ test('raw and billing comparisons switch both sources and disclose missing multi
   for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
     await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await page.screenshot({ path: `test-results/billing-comparison-${suffix}.png`, fullPage: true });
+    await settledScreenshot(page, `test-results/billing-comparison-${suffix}.png`);
     await page.click('[data-comparison-section="nodes"][data-comparison-mode="share"]');
     await expect(page.locator('#comparison-nodes-shares [data-source="local"] h3')).toHaveText('本机估算计费量');
     await expect(page.locator('#comparison-nodes-shares [data-source="local"] circle')).toHaveCount(1);
-    await page.screenshot({ path: `test-results/billing-shares-${suffix}.png`, fullPage: true });
+    await settledScreenshot(page, `test-results/billing-shares-${suffix}.png`);
     await page.click('[data-comparison-section="nodes"][data-comparison-mode="list"]');
   }
   await page.selectOption('#provider-metric', 'raw');
@@ -552,7 +558,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
       for (const section of ['nodes', 'buckets']) await page.click(`[data-comparison-section="${section}"][data-comparison-mode="list"]`);
-      await page.screenshot({ path: `test-results/comparison-list-${theme}-${width}.png`, fullPage: true });
+      await settledScreenshot(page, `test-results/comparison-list-${theme}-${width}.png`);
       for (const section of ['nodes', 'buckets']) {
         await page.click(`[data-comparison-section="${section}"][data-comparison-mode="share"]`);
         await expect(page.locator(`#comparison-${section}-shares svg`)).toHaveCount(2);
@@ -566,7 +572,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
         expect(chart.x + chart.width).toBeLessThanOrEqual(legend.x + 1);
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-      await page.screenshot({ path: `test-results/comparison-shares-${theme}-${width}.png`, fullPage: true });
+      await settledScreenshot(page, `test-results/comparison-shares-${theme}-${width}.png`);
     }
   }
   for (const section of ['nodes', 'buckets']) {
@@ -863,7 +869,7 @@ test('production theme paints html body and shell, including narrow screens', as
       }
       await expect(page.locator('.filter-panel')).toHaveCSS('background-color', panel);
       await expect(page.locator('html')).toHaveCSS('color-scheme', theme);
-      await page.screenshot({ path: `test-results/polished-overview-${theme}-${width}.png`, fullPage: true });
+      await settledScreenshot(page, `test-results/polished-overview-${theme}-${width}.png`);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
   }
