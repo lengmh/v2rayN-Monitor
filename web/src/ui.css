@@ -309,3 +309,12 @@ tbody tr:hover { background: var(--hover); }
   .batch-source { gap: 6px; }
   .app-footer { padding-inline: 14px; gap: 14px; font-size: 9px; }
 }
+
+
+/* Comparison sources remain independent; reuse the overview donut and legend layout. */
+.comparison-share-source + .comparison-share-source { border-top: 1px solid var(--line); }
+.comparison-share-source h3 { margin: 14px 17px 4px; font-size: 12px; font-weight: 600; }
+.comparison-share-note { margin: 0 17px 12px; font-size: 10px; line-height: 1.6; color: var(--muted); }
+.comparison-sort { display: flex; align-items: center; gap: 8px; padding: 0 17px 12px; color: var(--muted); font-size: 11px; }
+.comparison-sort select { width: auto; min-width: 0; }
+.comparison-shares .empty-state { white-space: normal; }
