@@ -82,6 +82,38 @@ public static class ScopeCollector
                 PartialCoverage: snapshot.Scope?.IsPartial == true)], []);
     }
 
+    public static ProxyCollectionScope XrayCoverage(XrayOutboundCatalog catalog) =>
+        new(catalog.UnavailableOutbounds.Count, 0, "xray_outbound_members")
+        { CollectedOutbounds = catalog.Candidates.Count, CollectedGroups = catalog.GroupCount };
+
+    /// <summary>Preserves the legacy proxy cursor and adds independent actual outbound handlers exactly once.</summary>
+    public static ScopeBatch ProjectXray(ScopeCapture capture, V2RayOutboundStatistics statistics, DateTimeOffset at,
+        bool invalidateContinuity = false)
+    {
+        var snapshot = capture.Snapshot;
+        var catalog = capture.XrayOutbounds ?? throw new ArgumentException("A verified Xray outbound catalog is required.");
+        if (snapshot.CoreName != "Xray" || catalog.InstanceId != snapshot.InstanceId || catalog.Generation != snapshot.Generation ||
+            catalog.ProcessIdentity != snapshot.ProcessIdentity || snapshot.Generation.Length < 65 || snapshot.Generation[64] != ':' ||
+            !catalog.Candidates.ContainsKey("proxy")) throw new ArgumentException("Outbound catalog and capture identities conflict.");
+        var partial = XrayCoverage(catalog).IsPartial;
+        var key = Uri.EscapeDataString(snapshot.InstanceId) + "/" + Uri.EscapeDataString(snapshot.NodeId);
+        var readings = new List<ScopeReading>();
+        foreach (var member in catalog.Candidates.Values.OrderBy(x => x.OutboundTag, StringComparer.Ordinal))
+        {
+            var tag = member.OutboundTag;
+            var scope = tag == "proxy"
+                ? new MeasurementScope("legacy_proxy", "legacy_node", key, snapshot.NodeName, snapshot.NodeId)
+                : new MeasurementScope("actual_member", "outbound", JsonSerializer.Serialize(new[] { snapshot.Generation[..64], tag }),
+                    member.CapturedName is { } name ? $"【{name.GroupLabel}】 {name.OriginalName}" : tag, OutboundTag: tag);
+            scope = scope with { CapturedName = member.CapturedName };
+            var counter = statistics.Counters.GetValueOrDefault(tag);
+            readings.Add(new(scope, counter?.Upload, counter?.Download,
+                counter is null ? statistics.UnavailableOutbounds.GetValueOrDefault(tag, "missing_counter") : null,
+                invalidateContinuity, partial));
+        }
+        return new(snapshot.InstanceId, snapshot.ProcessIdentity, snapshot.Generation, at, readings, []);
+    }
+
     public static ScopeCommit Commit(ScopeLedger ledger, ScopeBatch completeDirectory)
     {
         var active = completeDirectory.Readings.Select(x => (x.Scope.Basis, x.Scope.IdentityKind, x.Scope.IdentityValue)).ToHashSet();

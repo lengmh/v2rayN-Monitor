@@ -319,7 +319,7 @@ function renderHistory(history: HistoryResult): void {
   attribution.textContent = probeView()
     ? '探测与业务分别记账。成员和总量分别查看，不重复相加。'
     : history.basis === 'local_proxy'
-    ? '包含当前账本中的 sing-box 成员和 Xray／旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。'
+    ? '包含当前账本中的 sing-box 成员、Xray 独立出站和旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。Xray 出站量尚未单独拆分内部探测。'
     : '按已核实的节点或出站身份分账，名称和策略组前缀仅用于展示。';
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   renderEstimate(history.display);

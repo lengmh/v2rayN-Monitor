@@ -39,7 +39,14 @@ public sealed record SingboxMemberCatalog(string InstanceId, string Generation, 
     IReadOnlyDictionary<string, SingboxMemberIdentity> Candidates,
     IReadOnlyDictionary<string, string> UnavailableOutbounds);
 public sealed record ScopeCapture(XraySnapshot Snapshot, SingboxMemberCatalog? Catalog,
-    IReadOnlyList<string> EnabledMembers);
+    IReadOnlyList<string> EnabledMembers)
+{
+    public XrayOutboundCatalog? XrayOutbounds { get; init; }
+}
+public sealed record XrayOutboundIdentity(string OutboundTag, string Protocol, CapturedNodeName? CapturedName);
+public sealed record XrayOutboundCatalog(string InstanceId, string Generation, string ProcessIdentity,
+    IReadOnlyDictionary<string, XrayOutboundIdentity> Candidates,
+    IReadOnlyDictionary<string, string> UnavailableOutbounds, int GroupCount);
 public sealed record ScopeCollectorReading(ScopeBatch? Batch, string State, string Message,
     string? CurrentNode = null, bool InvalidateContinuity = false, ProbeCollectionStatus? Probes = null,
     ProxyCollectionScope? Scope = null);
@@ -54,8 +61,14 @@ public sealed record XrayEffectiveConfiguration(Uri MetricsEndpoint, string Prot
 public sealed record ProxyCollectionScope(int UncollectedOutbounds, int UncollectedGroups,
     string Basis = "routed_proxy")
 {
+    public int CollectedOutbounds { get; init; }
+    public int CollectedGroups { get; init; }
     public bool IsPartial => UncollectedOutbounds > 0 || UncollectedGroups > 0;
-    public string Description => Basis == "xray_outbound_proxy"
+    public string Description => Basis == "xray_outbound_members"
+        ? $"采集 {CollectedOutbounds} 个 Xray 独立代理出站自身的累计字节，包含 {CollectedGroups} 个策略组选择实际出站后的连接；不叠加策略组，排除直连和阻断。"
+            + (IsPartial ? $" 另有 {UncollectedOutbounds} 个代理出站未覆盖，流量保持未知。" : "")
+            + " 内部探测尚未单独区分，不能仅凭出站计数判断流量用途。"
+        : Basis == "xray_outbound_proxy"
         ? IsPartial
             ? $"仅采集 Xray proxy 出站自身的累计字节，包含策略组选中该出站的连接；其他 {UncollectedOutbounds} 个代理出站未采集，配置含 {UncollectedGroups} 个策略组。当前合计不是全部代理流量，内部探测未单独区分。"
             : "采集 Xray proxy 出站自身的累计字节，排除其他出站；内部探测未单独区分。"

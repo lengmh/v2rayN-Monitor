@@ -8,13 +8,13 @@
   },
   "plan_date": "2026-10-09",
   "active_checkpoint": {
-    "issue": 23,
+    "issue": 18,
     "status": "in_progress",
-    "branch": "feat/issue23-billing-comparison",
-    "scope": "复用倍率快照，让同名节点和时间桶的本机／服务商一起切换原始量或计费量，列表、趋势、排序和占比一致；用户明确新采集时节点无倍率标记按1倍，其他按原名标记，组标签不覆盖，旧值不回填",
+    "branch": "feat/issue18-xray-multi-outbounds",
+    "scope": "补齐Xray标准配置多出站及策略组实际出站计数，proxy延续原游标，其他成员独立，不叠加组或直连；保留前轮未提交的#23计费对照与默认倍率策略",
     "implementation_status": "complete",
-    "remaining": "本地实现与相关验证已完成；用户已授权本批提交／推送／草稿PR与精确CI，结果另核。当前c877509仍运行，未启用本批；Xray多出站随后另批提交",
-    "resume_requirement": "UI 后恢复采集主线时，Xray 多出站及策略组实际成员覆盖属于收尾必需项，当前不实施"
+    "remaining": "Core366／Server41／前端71／浏览器25／Host Release、同二进制隔离核心轮换和真实只读6批次/35范围通过。用户已授权两批分别提交／推送／草稿PR及精确CI，结果另核；当前c877509仍运行，未启用本批",
+    "resume_requirement": "提交并核对精确CI后交付；启用新预览前提醒用户，保持v2rayN及核心运行。Xray内部探测和#15/#18剩余受控验收单列，不宣布全量收尾"
   },
   "remote_created_in_this_delivery": true,
   "milestones": [
