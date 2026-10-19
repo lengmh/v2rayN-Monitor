@@ -8,14 +8,37 @@
   },
   "plan_date": "2026-10-09",
   "active_checkpoint": {
-    "issue": 23,
+    "issue": 18,
     "status": "in_progress",
-    "branch": "feat/issue23-billing-comparison",
-    "scope": "复用倍率快照，让同名节点和时间桶的本机／服务商一起切换原始量或计费量，列表、趋势、排序和占比一致；用户明确新采集时节点无倍率标记按1倍，其他按原名标记，组标签不覆盖，旧值不回填",
+    "branch": "feat/issue18-xray-multi-outbounds",
+    "scope": "Release按basic/full/extended三档独立分包；复用普通统计既有实机通过结果，纠正笼统重复验收表述；S5.8继续作为可选扩展",
     "implementation_status": "complete",
-    "remaining": "本地实现与相关验证已完成；用户已授权本批提交／推送／草稿PR与精确CI，结果另核。当前c877509仍运行，未启用本批；Xray多出站随后另批提交",
-    "resume_requirement": "UI 后恢复采集主线时，Xray 多出站及策略组实际成员覆盖属于收尾必需项，当前不实施"
+    "remaining": "本批只更新发布约定及验收状态说明，文档检查与精确CI另核；普通采集/记账已有实机通过记录，不重开。尚未启用的名称修复与历史未覆盖的受控切换/重启分别保留；三档发布资产尚未构建或发布",
+    "resume_requirement": "复用sing-box成员统计/重开恢复和69ffdfa的Xray八批/35范围实机对账，不要求重做普通统计；后续只检查新改动及直接影响。三档发包按对应内容和摘要分别提供，实际发布另行授权；S5.8可选且不要求更换原生Xray，启用新预览前仍提醒"
   },
+  "capability_levels": [
+    {
+      "id": "basic",
+      "name": "基础版",
+      "release_asset_template": "v2rayn-monitor-<version>-basic-windows-x64.zip",
+      "scope": "v2rayN使用原生Xray的普通流量统计；具体模式以支持矩阵为准",
+      "core_requirement": "保留原生Xray，读取已启用的原生统计接口"
+    },
+    {
+      "id": "full",
+      "name": "完整版",
+      "release_asset_template": "v2rayn-monitor-<version>-full-windows-x64.zip",
+      "scope": "基础版加sing-box，覆盖当前支持的两个核心及其已支持模式；独立探测不是验收前置",
+      "core_requirement": "原生Xray保持；另装启用V2Ray API及相应统计能力的配套sing-box-client.exe，多出站及策略组需成员统计能力"
+    },
+    {
+      "id": "extended",
+      "name": "扩展版",
+      "release_asset_template": "v2rayn-monitor-<version>-extended-windows-x64.zip",
+      "scope": "两种核心的独立探测计量为可选能力，分别启用并保留字节口径和未知边界",
+      "core_requirement": "sing-box需对应探测能力，Xray需精确核验的探测实验核心；现有test.5已合并普通统计和探测，不因分级重新安装"
+    }
+  ],
   "remote_created_in_this_delivery": true,
   "milestones": [
     {
@@ -548,7 +571,7 @@
         "切换、并发、短/长连接、重开及代次证据"
       ],
       "acceptance": "未知出站不阻断独立已核实范围；不依赖可丢事件、活动连接轮询、速率积分或 group.Now() 补精确累计。增量/游标同批原子提交；必要 Schema 先隔离验证，真实迁移另行授权。",
-      "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。",
+      "stop_rule": "独立 PR、CI、有界实机验收；未取得成员证据前保留未知，正式版本和日期未排。S5.8独立探测为可选扩展，不作为本项普通统计收口前置。",
       "issue": 18,
       "pull_request": 20,
       "implementation_note": "2026-10-15 test.4及新模式预览已实机运行，独立v2目录的34成员/三汇总首接与持续持久化通过，旧v1历史未迁移。第九批经提醒和授权，仅更新Monitor为68b8a35 CI包并沿用同一v2数据；SQLite备份后，37个身份和旧历史保留、33个友好名、6个新批次逐范围被动守恒通过。同核心代次重开增量与账本一致，停机量保存为恢复未分时，long_interval缺口关闭。HTML先于分页隐藏零明细，合计/历史缺口/原始导出不变，零记录不删除。用户已确认实际UI符合预期。2026-10-16 test.5/v3新连续窗口10批次、9段、74范围逐项对账通过，全历史仍有缺口。GUI原样保存的时间戳误判已补最短回归并修复源码，Core340和Host Release通过。用户退出旧Monitor后，15:21:46已启用精确d2dcae4 CI包，锁下最新备份及11表历史/2表provider/设置独立比对通过，接回原v3目录；109范围保留，8个新批次含同代次停机恢复逐范围守恒，业务/直连/自然探测停机量全部记为未分时，当前缺口关闭。15:26:13自然GUI原样保存跨窗，实际运行包16批次/15段/74范围对账一致且无新缺口；test.5/核心代次/实际启动项不变。仍需独立AnyTLS proxy锚点，其他成员不猜IndexId；受控proxy/direct和组切换、完整维度页面/新模式速率未完成，保持in_progress。精确CI及证据分层见STATUS。跨核心历史查询已修复源码，默认local_proxy只读视图统一actual_member/legacy_proxy，保留身份及导出原basis，不加入汇总/直连/独立探测。HTML过时和重复说明已清理。Core344/Server39/前端57与Host Release通过，桌面/手机合成页面通过；本批尚未部署，原库无需迁移。"
@@ -576,18 +599,20 @@
       "id": "S5.8",
       "phase": "S5",
       "title": "核心内部探测与后台请求独立计量",
+      "capability_level": "extended",
+      "optional": true,
       "depends_on": [
         "S5.6"
       ],
       "status": "in_progress",
-      "work": "用户要求覆盖urltest等内部接口并单独统计。首两批实现test.5/Core、v3历史与受控迁移；第三批接入Windows同一响应联合采样及HTML四维页面。第四批经授权配套实机启用，旧值保留、首接基线及持续被动对账通过；后续已只读核对自然非零探测的逐范围累计与入账，新页目视和DNS/规则集逐条核实待后续。",
+      "work": "2026-10-19用户确定本项为两种核心的可选探测扩展，不作为基础版、完整版及#15/#18普通统计的必需项。sing-box test.5、v3历史、Windows联合采样及HTML四维页面已配套启用并核对自然非零探测，已有能力与历史保留。Xray Observatory/Burst Observatory实验核心与同响应记账已实现，原生回归、回环核心及隔离账本通过，真实启用另核；DNS/规则集等接口仍待后续。",
       "outputs": [
         "每成员及代理/排除/未知探测累计",
         "版本化账本扩展与单维查询",
         "独立探测页面及覆盖/缺口说明"
       ],
       "acceptance": "探测不污染业务/路由；预热与正式连接分别绑定实际成员，不读Now猜归属，失败前字节保留。首接不回填，增量/游标同事务，旧历史和独立provider保留。探测流字节不冒充服务商计费。",
-      "stop_rule": "隔离回归、核心副本、Windows实机与精确提交CI分层记录；扩展替换、重载、切换及真实数据操作按具体授权，启用新预览前提醒。已迁v3不直接用旧v2 Monitor打开，不自动还原备份丢弃新增历史。",
+      "stop_rule": "本项为扩展版可选能力，不阻断基础版、完整版及#15/#18普通统计收口；保留已有实现和历史。隔离回归、核心副本、Windows实机与精确提交CI分层记录；扩展替换、重载、切换及真实数据操作按具体授权，启用新预览前提醒。已迁v3不直接用旧v2 Monitor打开，不自动还原备份丢弃新增历史。",
       "issue": 18,
       "pull_request": 20,
       "implementation_note": "2026-10-16第四批经授权由用户离线安装固定test.5并重开v2rayN，3轮共74个业务/探测范围可读。Monitor停止及同目录mutex下最新备份并受控v2→v3，72个旧范围和11表旧值保留，独立provider/设置一致。启用前提醒后10:31:34启动6c280ca push CI包，--probe-ledger接回原目录；6批次首接不回填、后续5段逐范围被动守恒，业务/直连非零，本段探测为0。后续已只读核对自然非零URLTest：各成员累计差与各自账本增加一致，探测business独立核对一致，二者不相加；不冒充计费量。全历史周期缺口保留，新10批次连续窗口通过。用户退出旧Monitor后15:21:46已启用GUI原样保存修复d2dcae4 CI包，锁下最新备份及独立逐值比对通过，原v3目录/109范围保留；8个新批次含74范围停机到首批与后续差分守恒，自然探测停机量全部记为未分时，provider/设置不变。test.5核心未替换，15:26:13实际运行包自然GUI原样保存跨窗16批次/15段/74范围对账一致且无新缺口，见本轮STATUS；新页目视及其他内部请求待后续。正常启动不迁移、普通成员新库仍v2、实际启动项未改。源码/合成/CI与实机证据分层见STATUS，真实证据仅TempFiles。"
