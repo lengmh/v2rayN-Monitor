@@ -1,10 +1,46 @@
-![v2rayN Monitor](./docs/images/readme-header.svg)
+<p align="center">
+  <img src="./docs/images/readme-header.svg" alt="v2rayN Monitor" width="1200" />
+</p>
+
+<p align="center">
+  <strong>Your traffic history, organized by node.</strong><br />
+  Track local usage over time and explore daily, weekly, monthly, and yearly totals.
+</p>
+
+<p align="center">
+  <a href="https://github.com/lengmh/v2rayN-Monitor/releases"><img src="https://img.shields.io/github/v/release/lengmh/v2rayN-Monitor?style=flat-square" alt="Release" /></a>
+  <a href="https://github.com/lengmh/v2rayN-Monitor/stargazers"><img src="https://img.shields.io/github/stars/lengmh/v2rayN-Monitor?style=flat-square" alt="Stars" /></a>
+  <a href="https://github.com/lengmh/v2rayN-Monitor/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lengmh/v2rayN-Monitor?style=flat-square" alt="License" /></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/QUICKSTART.md">Quick Start</a> ·
+  <a href="#已实现的主流程">Features</a> ·
+  <a href="https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/architecture.md">Docs</a> ·
+  <a href="https://github.com/lengmh/v2rayN-Monitor/releases">Releases</a>
+</p>
 
 # v2rayN Monitor
 
 以 **v2rayN 本机流量**为主来源的 Windows 托盘统计工具。关闭浏览器后仍持续采集；历史独立保存在本机 SQLite，支持按节点查看日、周、月、年趋势。
 
 > **v0.1.1 修复版。** 在 `v0.1.0` 基础上整合日期默认分桶和重叠 CSV 增量导入，下载资产与实际发布状态以 GitHub Releases 为准。目标环境是 Windows x64、v2rayN **7.25.1 + Xray 普通单节点**。2026-10-13 相关修复已有基于此前预览使用的整体人工确认，不代表所有协议、设备与切换时序逐项经过实测。统一图标已有构建和资源检查，Windows 实机目视记录仍未补充。源码核对、合成测试和实机证据分开记录，不能当作计费凭证。
+
+## 能力分级
+
+正式 Release 按以下三档提供独立下载包，包名标明版本号与档位；当前尚未发布这组三档新包。开发预览及实机验收进度见 [支持矩阵](docs/compatibility.md) 和 [当前状态](docs/STATUS.md)。
+
+| 分级 | 普通流量统计 | 所需核心 | 独立探测计量 |
+|---|---|---|---|
+| 基础版 | v2rayN 使用原生 Xray 时的流量统计 | 保留原 Xray，读取已启用的原生统计接口 | 可选扩展，不要求启用 |
+| 完整版 | 在基础版上增加 sing-box，覆盖当前支持的 Xray、sing-box 及其已支持模式 | Xray 保持原生；另外下载并安装启用 V2Ray API 及相应统计能力的配套 `sing-box-client.exe`；多出站／策略组还需成员统计能力 | 可选扩展，不作为完整版验收前置 |
+| 扩展版 | 保留普通流量统计，按需增加内部探测的独立计量 | sing-box 使用带探测计数的配套核心；Xray 使用经过精确核验的探测实验核心 | 两种核心分别启用，字节口径和覆盖边界单独说明 |
+
+流量探测的独立计量属于 S5.8 可选扩展，不作为 #15 / #18 普通流量统计的收口条件。这里的「全部内核」指当前支持的 Xray 和 sing-box，不扩大到未支持的 TUN、代理链、任意配置来源或插件。
+
+当前 sing-box `test.5` 已将普通统计和探测扩展放在同一包中，能力分级不要求重新替换核心。完整版可以保留原生 Xray；只有需要 Xray 的独立探测字节时，才另行接入修改后的 Xray。已有探测能力和历史保留；分级不改变账本版本、启动模式或现有安装。
+
+三档共用 Monitor 源码和软件版本号，发布资产分别为 `v2rayn-monitor-<version>-basic-windows-x64.zip`、`v2rayn-monitor-<version>-full-windows-x64.zip`、`v2rayn-monitor-<version>-extended-windows-x64.zip`。基础包提供 Monitor；完整版另提供配套 sing-box 核心；扩展版再提供探测能力及配套 Xray 实验核心。每包分别列明内容、核心版本、SHA256、许可与源码／补丁依据；配套核心由用户按说明安装，不自动覆盖正在运行的核心。分级与发包约定不等于本轮已经构建或发布三档资产。
 
 ## 已实现的主流程
 
@@ -16,7 +52,7 @@
 - 可选六列服务商 CSV 预览与事务导入，独立账本、同文件防重；不影响本机采集
 - 完全合成的演示数据与针对性回归测试
 
-不支持 sing-box、TUN、策略组、多跳链、自定义核心配置或多个 v2rayN 实例的精确统计。复杂或不确定配置会显示原因并暂停归属，不猜测出口。没有签名、安装器或自动更新器。
+已发布的 v0.1.1 不支持 sing-box、TUN、策略组、多跳链、自定义核心配置或多个 v2rayN 实例的精确统计。开发预览的额外能力按上述分级及支持矩阵说明。复杂或不确定配置会显示原因并暂停归属，不猜测出口。没有签名、安装器或自动更新器。
 
 ## 使用
 

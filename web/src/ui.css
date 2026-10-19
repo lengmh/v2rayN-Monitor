@@ -84,6 +84,7 @@ main { min-width: 0; flex: 1; }
 .download-color, .bar-download, .rank-download { background: var(--blue); }
 .upload-color, .bar-upload, .rank-upload { background: var(--upload); }
 .provider-color, .bar-provider { background: var(--provider); }
+.local-estimate { background: var(--blue); }
 .chart { min-height: 222px; margin: 0 17px; display: flex; gap: 4px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); background: repeating-linear-gradient(to top, transparent 0, transparent 46px, var(--grid) 47px, transparent 48px); }
 .chart.empty { display: grid; place-items: center; background: none; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.8; white-space: pre-line; }
 .chart-column { display: flex; flex: 1 0 8px; min-width: 8px; max-width: 100px; flex-direction: column; justify-content: end; align-items: stretch; position: relative; height: 222px; padding-bottom: 26px; }
