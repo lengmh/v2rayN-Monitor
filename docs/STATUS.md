@@ -2,6 +2,352 @@
 
 本文证据路径使用通用占位符：`<evidence-root>` 为本机证据根目录，`<monitor-data>` 为正式 Monitor 数据目录。此处仅对历史路径脱敏，保留原测试结论与提交身份，不表示在这些占位路径重新执行过验证。
 
+## 2026-10-16：跨核心历史查询与 HTML 说明修正
+
+起点 `b904f615e126713a33a2d0234d1101688065aa8e`，工作树干净。用户报告切到 Xray 后看不到此前 sing-box/策略组记录。只读确认原历史仍在同一账本；根因是默认历史和节点查询跟随当前 `CollectionBasis`，切换核心即隐藏另一维度。用户要求先修复此问题，并清理 HTML 过时、冗余描述。
+
+默认本机查询改为只读 `local_proxy` 视图，统一读取 `actual_member` 和 `legacy_proxy` 历史。合计、趋势、节点列表、全局分页、非零明细、同名对照和导出使用相同范围，不依赖当前核心；仍按原 scope 身份分账，导出逐行保留原始 basis。业务汇总、直连、未知和独立探测不加入该合计。此视图不允许写入，不新增 Schema、不改计数采样，也不从其他旧目录导入数据。
+
+HTML 删除固定 test.2 和「策略组实际成员尚未支持」等旧说明，更新首次连接帮助，精简重复口径说明；保留首次基线、未知量、恢复区间和部分覆盖提示。修正无依据的「最多展示最近 200 段」提示。未实施 #23 的完整布局改版，#19 仍 planned。
+
+隔离验证：最短服务端红例先纠正合成身份及退休列表后，确认旧实现返回 legacy_proxy 而非统一历史；修复后 Server 39、Core 344、前端 57 项通过，Host Release 零警告零错误。新增服务端回归覆盖两种当前核心、超过 JS 安全整数的精确合计、同名不同身份、节点筛选、分页及逐行导出原始维度。浏览器首次 17 通过/1 失败，新增合成响应漏填空值字段，补齐后该项定向复验通过；桌面和手机截图已目视检查。失败与最终结果分别归档，不拼成一次全量通过。
+
+证据位于 `<evidence-root>/v2rayn-monitor-cross-core-20261016`。本批尚未替换运行包，精确提交 CI 与包核对另存同目录。仅需提醒用户退出 Monitor 后更新；v2rayN/Xray 保持运行，原 v3 无需迁移。S5.5/S5.6/S5.8 保持 in_progress，此前 sing-box 连通性异常仍待独立排查。
+
+## 2026-10-16：Xray 修复包启用 / 首接与持续记账验收
+
+起点 `9e51a8dc21c743ab66a7a47f189b71538e3b0dd2`，工作树干净。用户收到仅退出 Monitor、保持 v2rayN/Xray 运行的提醒后回复「已退出」。本批在原目录 mutex 下创建最新 SQLite backup，独立比较 history 11 表、provider 2 表及全部 DDL，设置逐字节一致；原 v3 直接使用，没有迁移。
+
+精确 `9e51a8d` 的 Monitor push / PR CI `38880714875` / `38880721929` 和扩展 PR CI `38880721964` 均成功；两个 Monitor CI 的 Linux/Windows Core 344、Server 38、前端 57 及 Linux 浏览器 17 通过。选用 push CI artifact `12037366911`，EXE SHA256 `079eca4b8333b7ce253b1e83743da4e037a39a041ec84ec1d247c451809c556c`，ProductVersion 与完整提交一致。没有部署扩展 CI 的核心产物。
+
+17:41:01（北京时间）启动该包，保留 `--probe-ledger` 和原 `live-scope-data`。唯一 Monitor 进程、路径/参数、回环监听核对通过，首页和实际引用 JS 返回 200，未认证状态/历史 API 返回 401。Xray 原进程、父进程及创建时间保持；没有替换 sing-box、切换节点、修改路由或实际启动项。
+
+启动前就绪的观察器保存 8 个持久批次：一个新增 `legacy_proxy` 范围首接只建基线，后续 7 段原始累计差与入账增量逐项一致，会话/代次保持且有非零流量。旧 109 个范围、78,586 条分钟记录和 999 条未分时记录逐值保留，总范围变为 110；provider 的 4 个批次/27,911 条记录及设置不变，SQLite 完整性和外键检查通过。当前范围无采集运行缺口，保留预期的 `uncollected_outbounds` 部分覆盖提示。
+
+临时验收脚本最初误把查询派生的 `partial_coverage` 当作物理列，完成批次保存后报错。按实际账本的覆盖缺口区间修正查询，再使用原 8 个批次复核通过；没有重启 Monitor、重建基线或修改真实账本来规避失败。部分覆盖以持久缺口和查询投影表达。
+
+证据位于 `<evidence-root>/v2rayn-monitor-xray-partial-20261016/activation-20261016-173843`：最新备份、独立比较、启动回执、原始批次、`activation-observation.json` 和 `runtime-http.json`。本批修复并验证的是 Xray 独立 proxy 的生产采集；其他出站和内部探测仍未覆盖，此前 sing-box 连通性异常仍未复现/归因。新包页面目视与受控切换尚未验收，S5.5/S5.6/S5.8 保持 in_progress；#19 planned，#23 独立安排。本次文档提交的精确 CI 单独归档。
+
+## 2026-10-16：#15 Xray 多出站配置恢复独立 proxy 部分采集
+
+起点 `6a3746eae347bd927a6b313dc90faef34b7e452c`，工作树干净。用户报告 sing-box 连通性异常，已自行切换 Xray，并要求先处理故障。只读确认当前为 Xray `26.7.28 ced1f55`；SOCKS/HTTP 入口的有界 HEAD 请求可用，单次超时复测成功。磁盘上的定制 sing-box 仍为固定 test.5 摘要，上一批只更新 Monitor，未替换核心。此前 sing-box 连接异常尚未复现或归因，本批不宣称解决该问题。
+
+当前确定的采集故障是：Xray 原始 metrics 可用，但旧解析器因非空 balancer 或额外出站整体拒绝配置。修复后允许这些配置与已核实的唯一独立 `proxy` 共存，仍仅读取 `stats.outbound.proxy`，不累加其他出站或 direct，不按组当前选择猜归属。链路检查、活动 IndexId/连接参数、核心进程/监听/配置代次及采样前后 guard 保持；任意链、重复 tag 和畸形 balancer 仍拒绝。
+
+Xray 使用独立 `xray_outbound_proxy` 覆盖说明，明确计数属于 proxy 出站自身、包含组选中该出站的连接，其他代理出站未知，内部探测未单独区分；不复用 sing-box 的「仅直接路由匹配」含义。历史仍为 `legacy_proxy`，部分覆盖标记随批次入账、查询及导出保留，状态传给原 HTML 展示。没有新增账本维度或 Schema，没有实现 Xray 全量成员/探测采集。切换后首接只建新基线，不追回此前无法确认的流量。
+
+本地隔离验证：旧解析器的两个最短红例均失败；最终 Core 344、Server 38、前端 57 项通过，Windows Host Release 零警告零错误。新增回归覆盖多出站/组部分范围、重复 tag/链/畸形组拒绝、真实发现调用链的合成输入、从 sing-box 成员到 Xray `legacy_proxy` 的首接及退休隔离、持久部分覆盖、页面状态和探测不可用说明。旧 Hysteria 测试中的重命名 direct 出站改为按协议排除；链仍拒绝。
+
+失败记录保留：首次全量运行的一项旧断言仍要求多出站拒绝；新增测试随后纠正了对 `ScopeHistory` 不存在字段的断言。红例还原源码保留旧时间戳，增量构建曾复用旧解析器 DLL；核对源码逐字节一致后强制重建，才取得上述最终通过结果。没有把失败或缓存构建当成修复验证。
+
+首个修复提交 `83cfe52` 的 Windows CI 通过，Linux 浏览器回归因一处遗漏的旧文案断言失败。仅将既有浏览器测试同步为「未覆盖范围的流量未知」，已有 Chromium 的对应桌面/手机定向回归 1 项通过；生产源码不变，后续提交的完整 CI 另核，不将首次失败记为通过。
+
+修复后的生产 Windows 发现对当前实际 Xray 连续 3 轮只读验证均 connected，同会话/代次，读取 1 个 `legacy_proxy` 范围；披露其他 34 个代理出站和 2 个策略组，探测状态 unsupported。该 helper 未写真实账本，也未更换运行 Monitor；当前 `d2dcae4` 仍在运行，需精确 CI 包核对并在提醒用户退出 Monitor 后接入。无需重开 Xray、覆盖 sing-box、改变路由或迁移 v3。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-xray-partial-20261016`：隔离源码、红例/失败/最终日志和 TRX、`live-discovery.json`。提交后精确 CI、包身份与后续实机启用分别记录，不借本地只读发现宣称已恢复生产记账。S5.5 / S5.6 / S5.8 保持 in_progress；Xray 其他出站和内部探测、受控切换、既有页面尾项继续保留，#19 planned，#23 独立安排。
+
+## 2026-10-16：#15 / #18 修复包实机启用 / 同代次恢复
+
+起点 `d2dcae4e7e5cd3c7ddb5d75ff02c30017e6c37ca`，工作树干净。用户在收到仅退出 Monitor、保持 v2rayN 运行的提醒后回复「已退出」。本批按同范围持续授权完成备份和配套 Monitor 更新，不替换 test.5、不切节点/组、不重开核心。
+
+重新核实旧 Monitor 已退出，v2rayN 与核心仍为原进程/代次，核心/config/sidecar 摘要不变。取得原数据目录的同名 mutex 后，用 SQLite backup 创建最新 history/provider 快照并复制设置；独立只读连接逐值比较 11 张历史表、2 张 provider 表及全部 DDL，设置逐字节一致。109 个既有范围及历史保留，74 个当前游标有效且匹配生产发现的身份/代次；原 v3 直接打开，没有 Schema 或数据迁移。退出会写 `collector_stopped` 并推进缺口水位，临时观察器改以有效游标/代次匹配停止前起点，不要求退出水位等于最后一次成功采样；首次工具断言失败保留，不改生产逻辑。
+
+源码提交 `d2dcae4` 的精确 Monitor push / PR CI `38860707412` / `38860712325` 和扩展 PR CI `38860711692` 均成功，完整日志已归档。两个 Monitor CI 各自的 Linux/Windows Core 340、Server 38、前端 56 与 Linux 浏览器 17 通过。实际选用 push CI 的 artifact `12029445041`，ZIP SHA256 为 `0356c71c402221c893ea56551b41d5d3d4d43d15b6bd01ed87b52f7bca5462c7`，EXE SHA256 为 `a48180d0f15ef1c3fbcd3af27e274187b5edfd00867210176ced1fb39981909f`；ProductVersion 与提交完全一致。扩展 CI 通过不表示部署了其新构建，实际仍是固定 test.5。
+
+15:21:46（北京时间）启动该 Monitor，显式 `--probe-ledger --data-dir <原 live-scope-data>`。唯一进程、EXE、参数和回环监听核对通过；首页及实际引用 JS 为 HTTP 200，未认证状态/探测 API 为 401，没有读取浏览器会话或令牌，不将 HTTP 检查当作页面目视确认。
+
+启动前就绪的只读观察器取得 8 个新持久批次，包含停机到首批及后续 7 段：全部 74 个当前范围的原始累计差与账本增加逐项一致，核心会话/配置代次保持。停机期间业务、直连和自然 URLTest 的增量全部存为恢复未分时，未摊入具体分钟；`collector_stopped` 缺口关闭，当前范围没有开放缺口。provider 的全部逻辑值及设置仍与最新备份一致；历史缺口保留，不据此宣称全历史守恒。
+
+15:26:13 自然 GUI 保存时，文件时间戳更新、全部字节一致，核心配置/sidecar 不变。实际运行的 `d2dcae4` 包跨窗取得 16 个持久批次、15 段逐范围对账；74 范围累计差与入账差全部一致，核心代次保持，本窗口没有新增缺口。业务/直连有非零增量，本窗口探测为零；没有主动触发测活或发送合成外部流量。此前只读 helper 跨窗旁证与本次实际运行包持久化证据分别保留。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-acceptance-20261016-140453/activation-20261016-151952`：`backup/`、锁下预检、独立逐值比较、停止/启用前账本快照、启动回执、8 个持久批次、恢复对账、HTTP/进程记录，以及 `natural-runtime-observation.json` / 16 个自然保存跨窗批次。当前包和真实库不是可清理垃圾；旧 `6c280ca` v3 包保留，必要时退出新 Monitor 后可接回同目录，不自动恢复旧备份丢弃新增历史。实际启动项未改。
+
+本批仅同步实机状态和验收依据，不改生产源码、依赖或 CI 配置；计划/差异检查与本次精确文档提交 CI 单独核对。S5.5 / S5.6 / S5.8 保持 in_progress，受控 proxy/direct、组/节点与跨内核切换、新模式速率/完整维度页面及探测新页目视仍待补；#19 planned，#23 保持独立批次。
+
+## 2026-10-16：#15 / #18 验收检查点 / GUI 原样保存与采样连续性
+
+起点 `8dcc5e63be5dedc5ef8dde1867abb0bc61bbc9f9`，工作树干净。用户授权持续推进至需要手动操作的位置。本批先处理计量验收中发现的周期性缺口，不实施 #19 / #23，也不切节点、组或核心。
+
+重新核实现场仍为固定 test.5 与 `6c280ca` Monitor、原 v3 目录。只读对比首次探测基线和当前游标/历史，已有自然产生的非零 URLTest：逐成员累计差与各自账本增加一致，探测 business 单独核对一致，二者不相加。业务及直连的全时段差分包含历史缺口，不能写成全历史守恒。另取 10 个新持久批次，9 段全部 74 个范围的累计差与入账差一致，本窗口没有缺口；没有主动发流量或触发测活。真实计数、逐范围记录仅留本机。
+
+历史 `snapshot_changed` / `identity_change` 窗口约每 20 分钟出现，与固定客户端 `95f68d9` 的 `TaskManager` 周期 `SaveConfig` 调用吻合；后者通过临时文件原子替换 GUI 文件。最短合成红例证实：同内容替换仅更新时间戳，也会被原发现器拒绝。本批仅为 GUI 文件增加有界稳定重读，全部原始字节相同时保留连续性；任何内容变化仍拒绝，核心配置/sidecar 时间戳、进程、监听、节点及代次 guard 保持原检查。不按选择字段或名称猜测等价，不回填已失效的历史缺口。
+
+隔离 SDK 10.0.401 和现有离线缓存：红例 1 失败 / 3 通过，修复后完整 Core 340 项通过，前端构建通过，Windows Host Release 零警告零错误。新增四项位于既有 `ActiveConfigurationTests.cs`，覆盖原样原子替换后的连续记账，以及节点、默认连接参数、统计设置变化仍拒绝。首次测试命令误用不支持的 `--source`，未执行测试；更正为独立 restore 后才取得上述红例，失败日志保留。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-acceptance-20261016-140453`：只读现场摘要、首次基线对账、历史缺口、10 批次窗口、固定公开客户端源码、隔离源码/日志/TRX。自然 GUI 保存的前后摘要与生产发现代码跨窗旁证、精确提交 CI 和配套包核对另存同目录。没有修改真实配置、账本、provider、启动项或当前运行包；本批修复尚未启用，启用前提醒用户，仅需更新 Monitor，test.5 核心不需替换。
+
+S5.5 / S5.6 / S5.8 保持 in_progress。剩余按现有计划完成受控 proxy/direct、组/节点与跨内核切换、新模式速率/完整维度页面及探测新页目视；#17 的旧 test.2 证据与 #20 的 test.5 成员模式继续分开，#19 planned。下一步取得本提交 CI 和自然保存旁证后，准备同目录备份与 Monitor 重开，再交接需要用户退出 Monitor 的操作。
+
+## 2026-10-16：任务范围澄清 / #19 planned 与 #23 UI 需求审阅
+
+起点 `a6b5435249441f2021c3b3c424f33b88bb6eef7f`，工作树干净。用户要求优化 #19 描述并保留 planned，当前聚焦 #15 / #18，同时审阅新增 #23。本批仅同步 Issue 说明与仓库计划，不实施 #19 或 #23，不操作运行程序、真实配置、账本或启动项。
+
+#19 名称明确为「代理链计量与整份核心配置来源适配」。代理链指同一连接串联多个代理出站；selector/urltest 的分层选择单独归入 #18。整份核心配置来源覆盖完整模板、其他文件/目录和启动参数的生效核验，保留可靠 IndexId / 独立 outbound 身份边界。用户在现有标准生效配置中定义组与路由属于 #18，不因「自定义」一词另列为不支持。#19 当前仅保留未来需求与验收约束，不创建实现 PR，不作为 #15 / #18 收口前置。
+
+#23 全文 14 项已读，对照当前 `web/src/main.ts`、前端数据类型及 Core 的成员目录/Provider Ledger 做静态审阅。排行分段、占比、恢复标记、统一卡片/明细与配对对照可共用展示逻辑；节点展示归并、原始成员名/组前缀和历史倍率需先明确数据契约。当前多数成员没有已证明的 IndexId 关联；目录名称会更新，历史也没有记录级倍率；现有服务商六列 CSV / API 不提供方向或访问设备。因此不能按相似名称合并身份、用现名回算历史、伪造 IP/方向，或借本轮审阅扩充 CSV 格式。#23 原 Issue 保持不变，尚未开始实现；将来的数据契约与共用 UI 两批可以独立安排，#19 不阻塞。
+
+本批验证为计划/链接/差异和远端 Issue 回读，精确文档提交 CI 单独核对；不复跑未改的应用本地测试，不借源码审阅宣称新 UI 已实现。实际采集和受控验收边界继续以各自检查点记录为准。
+
+## 2026-10-16：S5.8 第四批 / test.5、真实 v3 迁移与配套预览启用
+
+起点 `6c280ca62c646e64aa52522e2694175bf85ef439`，工作树干净，PR #20 仍 Open / Draft，base 为 `docs/issue15-singbox-capability`。上一源码提交的 Monitor push / PR CI `38789602471` / `38789609578` 与扩展 PR CI `38789609582` 均成功，完整清单在第三批本机证据。本批沿用用户对核心替换、备份、真实 v2→v3 迁移及配套 Monitor 启用的具体授权；通讯依赖代理，因此先准备离线脚本与回退步骤，由用户退出两个程序、执行替换并重开 v2rayN。
+
+替换前连续 3 轮生产只读发现稳定，37 个当前范围逐项匹配现有游标；账本另有 35 个已退休历史成员，不能以历史目录总数要求等于当前目录。旧定制核心、sidecar、设置已备份；一致 SQLite 初步快照在副本上迁到 v3，全部旧记录保留、探测范围为零。离线脚本仅覆盖定制 `sing-box-client.exe`，检查程序已退出、路径无重解析点、源/目标摘要及保留文件；安装、回退和运行中拒绝覆盖均用合成文件验证，真实安装回执另存。
+
+用户执行后核实 test.5 摘要为 `595B4B3FEDE70FC23CA645DCF7B5A4AB6F91E5E7938DB0CA77D50EB0F8376695`，客户端与核心已形成新代次，路径、父子、标准参数和生产发现通过。连续 3 轮 `ReadScopesAsync(includeProbes:true)` 均 connected，34 个业务成员及三种汇总、34 个探测成员及三种汇总共 74 个范围可读，探测能力 available。旧 Monitor 已退出；原始 `sing-box.exe`、sidecar 保留，代理由用户恢复，没有由代理工具停止核心或切换节点。
+
+确认无 Monitor 写入者并取得同数据目录 mutex 后，重新备份最新 provider、设置，并调用已验证 `ScopeLedgerMigration.MigrateProbes` 为真实 history 创建全新 v2 备份后迁至 v3；未使用初步快照覆盖实际历史。执行器逐值核对全部旧数据，保留 72 个既有范围，首次探测仍为空。另用独立只读 SQLite 连接比较备份和迁移后 11 张历史表的全部旧值/未改 DDL，以及独立 provider 两表的全部值与设置文件；完整性、外键和生产 v3 打开均通过。
+
+启用前已明确提醒用户。10:31:34（北京时间）启动 push CI `38789602471` / artifact `11998814861` 的 Monitor，ProductVersion 为 `0.2.0-preview.2+6c280ca62c646e64aa52522e2694175bf85ef439`，EXE SHA256 为 `5624C7B55C82E1A5D8F5269C6C9390B2D38ADE6B81C70B5DE491C5161E3AC4DA`。显式 `--probe-ledger --data-dir <原 live-scope-data>`，未改实际开机启动项。唯一进程、参数及回环监听核对通过：首页和实际引用的新探测 JS 资源 HTTP 200，未认证状态/探测历史 API 为 401，没有读取浏览器令牌或会话；新探测页的真实目视确认仍待用户。
+
+启动前就绪的只读观察器取得 6 个新持久批次：首批业务/探测均只建基线，没有回填此前累计；后续 5 段全部 74 个当前范围的累计差与分钟/未分时账本增量一致。业务和直连有非零增量，本段 URLTest 探测增量为零，没有主动触发测速或测活，不能写成非零探测事件已实测。当前范围无开放缺口；历史 35 条开放缺口保留，不推断全历史无缺口。provider 逻辑数据及设置继续一致，各 basis 分开比较，没有相加为总量。
+
+本机证据仅在 `<evidence-root>/v2rayn-monitor-probe-windows-20261016/activation-20261016-101506`：`verified-preparation/`、离线脚本及合成验证、真实 `core-install-*.json`、`post-core-readonly.json`、`final-backup/`、`migration-result.json`、`migration-independent.json`、`activation-start.json`、`observed-batch-*.json`、`activation-observation.json` 和 `activation-http-process.json`。真实库、sidecar、逐范围样本和运行包仅留本机，不提交或清理。临时工具的进程枚举、平台分析器、历史目录数量及 PowerShell 保留变量错误已修正并保留失败日志；生产源码、依赖和 CI 配置未改。
+
+S5.8 保持 in_progress：本批完成配套 Windows 启用、真实历史保留、首接基线及被动持久化对账；非零探测事件的被动核对、新探测页面目视、DNS/规则集等其他内部请求仍待后续。S5.6 受控 proxy/direct 与组切换验收、名称对照/覆盖说明及 S5.7 planned 保留。新的核心重载/切换和真实数据回退仍按具体授权处理；已迁 v3 不能直接用旧 v2 Monitor 打开，不自动恢复备份丢弃新增历史。本批仅更新文档，计划/差异检查及精确文档提交 CI 单独核对。
+
+## 2026-10-16：S5.8 第三批 / Windows 与 HTML 显式探测接入
+
+起点 `871b12b484eaf4dab6e46738b84f9d76e8f8cc77`，原工作树干净，PR #20 仍 Open / Draft，base 为 `docs/issue15-singbox-capability`。本批按用户「可以继续」接入 Windows 同代次探测采样及 HTML 入口；早先的 TempFiles 写入审批阻塞已在用户具体确认、恢复任务后的最小目录创建中解除，未丢弃未提交改动。
+
+源码新增一次有界、只读 `QueryStats(reset=false)` 响应的业务/URLTest 联合读取，沿用采样前后代次核验及原子提交。`--probe-ledger` 显式使用 v3，默认 v1 和 `--scope-ledger` 的 v2 路径保留；已有账本与模式不匹配时拒绝启动，不自动迁移。开机启动命令保留所选模式和目录，未操作实际启动项。探测能力单独报告；旧核心缺失探测计数时仍保留业务读数及探测缺口。
+
+成员模式源码额外固定接受 test.5 的 SHA256 `595B4B3FEDE70FC23CA645DCF7B5A4AB6F91E5E7938DB0CA77D50EB0F8376695`，既有 test.2/test.4 摘要保留。核对 CI `38751295368` artifact `11980964000`：外层摘要 `db33bf83202f629e64e594defb16b761618a5066a822866587d9e250bc7d8f61`、内层 EXE 与 provenance 一致，版本为 test.5，构建提交为 PR 合并测试提交 `92a789a4c2e035d22b49624ecf85b487e988b7dc`。经目录授权后再次核对并保存原始包/溯源，没有执行或部署；新提交产生的不同 EXE 摘要不自动获得接受。
+
+HTML 增加「探测流量」入口，复用日期、排行、趋势及非零明细；四个探测 basis 每次单独查询，显式导出保留零记录。认证 `/api/history`、`/api/nodes`、`/api/export` 支持显式单个探测 basis，未指定时仍为业务。页面区分探测账本未启用、计数不可用和部分覆盖。`earliestRecord` 是所选维度/节点最早保存区间，独立于查询日期；分钟行按分钟边界显示，不冒充精确首次基线。没有增加 Schema。
+
+本地隔离 SDK 10.0.401 与现有离线缓存、逐字节匹配 package-lock 的 Windows 前端依赖：完整 Release 构建零警告零错误，Core 336 / Server 38 / 前端 56 项通过，浏览器 17 项通过。新回归位于既有测试文件，覆盖单 RPC 的业务/探测大整数隔离、前后代次变化拒绝、v3 首接不回填与旧核心业务继续/探测缺口、旧白名单边界和启动命令；API 维度/导出/节点筛选、模式错配不迁移/不改 provider，以及页面维度/未知态/切回业务。
+
+失败与修正保留：最初工作区无 node_modules 的无产物类型检查缺 Vite CSS 声明，使用既有声明后通过，未放宽选项；正式前端首轮 55/56，新增合成状态遗漏 nullable 速率字段，补齐夹具。复验暴露最早保存区间使用短时间格式缺年份，生产显示改为完整日期/时间后 56 项通过。浏览器初次 17 项通过，目视发现新截图夹具的合计与图表/明细沿用了不同示例数据，仅统一夹具数值后重新验证并保留桌面/手机截图；不以合成截图证明真实流量守恒。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-probe-windows-20261016`：`source/`、构建/测试日志及 TRX、`source/web/test-results/probes-*.png`、已核对的 test.5 包及溯源、最终源码身份与精确提交 CI 清单。本批未改扩展补丁、依赖或 CI 配置，不重复本地 Go/真实核心实验；提交/push 后的 CI 单独核对。
+
+S5.8 保持 in_progress：源码接入与合成/浏览器回归已交付，尚无 test.5 的真实 Windows 配套接入证据。当前 test.4/Monitor 预览、真实 v2/provider、sidecar、路由和启动项均未操作。下一步按具体授权准备离线核心替换、备份/受控迁移和预览启用，再做有界被动守恒及界面验收；启用前提醒，通讯依赖代理时由用户执行离线替换。S5.6 原受控组切换验收与 S5.7 planned 继续保留。
+
+## 2026-10-15：S5.8 第二批 / v3 探测历史与受控迁移
+
+起点 `42bdedb46b90614736740d768d02eee20c5c1441`，工作树干净。首批该提交的 Monitor PR/push `38743941438` / `38743930366`、扩展 PR/push `38743941411` / `38743930176` 均成功，完整元数据和日志在首批本机 `checkpoint-final.json` 证据目录。本批按用户「可以，请继续」完成账本与隔离迁移检查点，不替换运行包或操作真实数据。
+
+新增嵌入 [v3 SQL](proposals/scope-ledger-v3.sql) 与四个探测 basis：probe_urltest_member / business / excluded / unknown（后面三项带同一 probe_urltest_ 前缀）。原业务 basis 和 v2 SQL 不变；ScopeLedger.CreateNew 默认仍创建 v2，仅 includeProbes:true 创建 v3。正常打开只核对版本和对应 DDL，不迁移。探测复用既有整数差分、分钟分片、未分时恢复、缺口和单维查询；成员与总量分别查，不相加。
+
+新增 ScopeCollector.ProjectWithProbes：从已核实目录复制成员身份，保留无可用计数的探测范围；业务/探测字节、游标、缺口及批次指纹在同一事务提交。Commit 按账本支持的维度明确退休范围，探测与业务分别恢复/退休。首次探测不回填，缺失不补零，同名不合并身份。
+
+独立 ScopeLedgerMigration.MigrateProbes 仅接受完整支持的 v2。只读预检、全新 SQLite backup 后，独占事务内再次比对；仅重建范围目录以扩展 CHECK，全部旧 scope ID、v1 五表、v2 六表的行、游标连续性、未分时、缺口和水位/指纹均逐表保留，未改 DDL 逐项核对。事务内检查完整性/外键后才提交版本3；SQL、数据比对或外键失败均回滚目录、版本及数据。迁移连接于事务前关闭外键执行，退出后恢复；新库和正常采样保持开启。真实调用仍要求先停止全部写入者并取得具体授权；provider.db 不参与迁移。
+
+本地隔离 .NET SDK 10.0.401 与既有离线缓存：新增 Core 15 项定向通过，随后完整 Core 332 / Server 36 通过。末次复核将新库初始化明确保留原外键开启行为后，最终 Core 相关30项复验通过。另在现有 Server 测试文件增加1项认证/探测大整数/维度隔离回归，最终单项通过，Server生产代码未改。通用认证 /api/scope-history 显式选择探测basis可查询v3；默认 /api/history、节点列表和导出仍只用业务维度。未把先后两次Server结果拼成一次本地37项全量运行。
+
+回归覆盖显式v3/不自动升级、2^53以上整数、业务/探测独立、缺失及跨代恢复、退休返回基线、任一范围溢出时全批回滚；v2备份与全部旧行/Schema（目录DDL除外）保留、原业务游标连续性、新探测首次基线、provider文件不变；空v2、已有备份/v1/provider/v3拒绝、部分Schema拒绝、SQL/数据/外键故障回滚以及backup后源变化拒绝。全部为合成SQLite，不访问真实库；当前核心补丁及依赖不变，本批不重复Go或真实核心实验。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-probe-ledger-20261015`：隔离源码、首次15项/完整Core与Server/末次30项和API单项日志及TRX。计划/链接/diff/源码身份检查后提交，精确提交CI单独核对，不沿用首批绿灯。
+
+S5.8 仍 in_progress：Core持久化、联合投影及通用单维历史查询已实现；Windows同代次批量读取/采样、探测能力说明和页面未接入，test.2/test.4白名单不变，test.5未部署。当前预览仍不会保存探测历史，真实v2、provider、核心/sidecar/Monitor和路由/启动项均未操作。下一批接Windows及页面，启用新预览前提醒；实库迁移、扩展替换和重载仍另经具体授权。S5.6原名称对照/覆盖说明及受控实机验收继续保留，S5.7 planned。
+
+## 2026-10-15：S5.8 首批 / URLTest 独立累计与 Core 读取
+
+起点 `38d787a521f09c83bb209b57e9c1bc797b4994ca`，工作树干净，PR #20 Open / Draft，base 仍为未合并的 PR #17 分支。用户确认计费诊断收口，并要求后续覆盖 `urltest` 等内部接口、单独统计。新增 S5.8 并同步计划、任务清单与支持矩阵；真实计费诊断数据只留本机，没有提交节点、账单或运行配置。
+
+第四层 `probe-stats.patch` 在固定公共 URLTest 的每次实际拨号计量，复用返回连接的叶成员证据。原生启动/周期、AnyTLS 预热/正式、公共延迟测试调用分别进入新命名空间 `monitor>>>probe>>>urltest>>>...`，成员及 business / excluded / unknown 与原业务/路由独立。Clash 延迟 API 只传入统计服务，原目标、TLS 信任及超时不变。未启用 monitor_members 保持旧行为；没有以 Now、活动连接轮询或速率积分补累计。
+
+构建脚本叠加四层补丁、要求七个顶级回归后构建 test.5；工作流配置、Go 1.26.8、固定归档/Windows 标签及依赖不变。Monitor Core 新增 `ReadProbesAsync` / `TryReadProbesResponse` 与独立结果类型，仍单次 reset=false、数值回环 HTTP/2、65,536 bytes 上限和严格整数解析；旧核心缺失为 unavailable，不填零。现有 test.2/test.4 白名单不变，Windows 生产采样、历史/API/页面尚未调用新接口。
+
+本地完整 Core 317 项通过；新三项覆盖探测/业务隔离、旧核心缺失、局部坏计数与只读 RPC。固定归档重建的 Go 七个顶级测试/29 个子用例通过，包含单 HEAD、预热双测、组实际返回成员、direct、链/未注册、失败前字节与并发。候选 SHA256 为 `D748E6D712C93D377B2EC1FC66D1DB58F729F766B178A024D5F5BF48FE2E7835`，由提交前工作树构建，provenance 的 monitorCommit 是起点，不冒充后续提交/CI EXE 身份。
+
+纯回环 test.5 客户端与未改 test.4 参考服务端验证三轮原生探测共189次HEAD；逐方向成员和、探测总量、参考服务端流计数完全一致，业务计数不变。另对叶成员及组各调用一次延迟 API，合成私有CA在原API信任上下文按预期被拒绝，两次503均保留已传输探测字节，业务增量为零；这不是实际节点成功延迟验收。独立 default/HK/US/direct 业务仍只进入其原业务范围，未向全组复制，全部自建子进程已退出。
+
+失败证据保留：首轮选错离线模块缓存而未编译，不作为红例；正确缓存中的最短红例为 probe counters unavailable。首版回归发现出站读写方向不能照抄入站，仅交换出站计数方向后复验通过。原生隔离首轮目标过早关闭，目标中继与客户端流存在关闭字节差；调整合成目标等待关闭后，仍观察到目标中继比已转交参考流多48/72/96B。最终只对同口径客户端/参考服务端流做精确断言，中继差异原样保留，不声称网络层逐字节相等。探测流含目标TLS/HEAD，不包含建连前、代理外层、填充和重传，也不等于服务商计费。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-urltest-20261015`：Core日志/TRX、红例/首次失败、candidate的归档/四补丁/Go日志/provenance、三次 native-loopback 与最终结果。方案见 [probe-accounting](proposals/probe-accounting.md)。提交与精确远端CI单独核对，不以本地构建替代CI。
+
+S5.8 保持 in_progress：下一批先设计并隔离验证版本化探测账本，再接 Windows 采样、历史/API/页面。当前 v2 Schema 未改，真实账本未迁移，运行核心/sidecar/Monitor、路由及启动项未操作；没有触发真实测速或发布。S5.6 仍 in_progress，S5.7 planned。名称对照与覆盖说明继续保留在主线；DNS/规则集等内部请求逐条验证后接入。新运行扩展替换、重载、实库迁移及预览启用仍需具体授权，启用前提醒用户。
+
+## 2026-10-15：S5.6 第九批 UI 用户确认
+
+起点 `b956b2f6659dca6f3caf65839fcca17abc7e66a8`，工作树干净。该提交的 Monitor PR `38687237559`、push `38687232257` 及独立扩展 PR `38687237569` 均成功，精确提交/job 元数据已保存在前一检查点的本机 activation 证据目录。查询期间曾遇 GitHub API EOF，恢复只读查询后确认成功，没有重跑 CI。
+
+用户在收到新版 Monitor 的友好成员名称、排行换行及非零采集明细检查说明后回复「UI目前符合预期」。据此将本次页面改动记为用户实际使用确认通过，不推断额外的逐项操作或计量场景。无需再次确认同一页面，也不因此更换运行包。
+
+本次仅同步状态、计划、支持矩阵与任务清单；没有操作 Monitor/v2rayN、核心、路由、设置或真实账本。S5.6 保持 in_progress：受控 proxy/direct、组成员切换、完整维度切换和新模式速率仍待完成，S5.7 / #19 仍 planned。本轮文档检查与提交 CI 单独核对。
+
+## 2026-10-15：S5.6 第九批续 / Monitor 更新与已有 v2 账本重开
+
+起点 `68b8a35a083edcbc9ce3f1d2a27eeac91e2b604c`，工作树干净。该提交的 Monitor PR `38683741202`、push `38683733806` 与独立扩展 PR `38683741103`（attempt 2）均成功；扩展首轮在下载固定 setup-go action 时失败，尚未检出或编译代码。最终成功元数据与首轮失败日志保留，末次扩展完整日志下载遇 EOF，未宣称原始日志齐全。Monitor 双平台 Core 314 / Server 36 / 前端 54、Linux 浏览器 16 项通过；这些是上一源码批次的远端结果，本次不重复作为新执行的测试。
+
+用户收到只更新 Monitor、保留当前 v2 数据且不动代理的具体方案后退出旧 Monitor。本次先实查旧进程不存在，核对候选 EXE 摘要、路径无重解析点及客户端/核心代次。通过只读 SQLite 源连接备份当前 history.db、独立 provider.db 并复制 settings.json，两个备份完整性检查均为 ok，没有覆盖已有备份或创建新空账本。
+
+13:24:58（北京时间）启动精确 `68b8a35` CI 候选，显式保留 `--scope-ledger --data-dir <第八批 live-scope-data>`。程序 ProductVersion 为 `0.2.0-preview.2+439f5053c08b6224b76766667b4f8aae0b038179`，后缀是 PR 合并测试提交；EXE SHA256 为 `EABFD84C536A9861389EDA2CD521D492A1A8E56F8075B8F89B9E3FD635B43566`。没有替换核心/sidecar、重载 v2rayN、切节点、修改启动项、迁移或清空历史。
+
+只读事务观察取得 6 个新持久批次，后续 5 段全部范围累计差与分钟/未分时账本增量一致。既有 37 个范围身份、分钟历史、未分时记录和缺口保留，33 个成员开始保存友好名。跨本次停机重开的全部范围累计差也与账本增量相等；37 条 `recovered-unallocated` 记录保留恢复未分时量，对应 37 条 `long_interval` 缺口已关闭。没有摊分停机期间流量、补算首接前累计或移除早先快照变化缺口。
+
+settings 摘要不变；provider 原库与 SQLite backup 的物理摘要不同，差异仅在 SQLite 文件头，逐项逻辑 Schema/数据一致且完整性为 ok，不能把备份摘要相等当作本轮证据。唯一新 Monitor 的路径/模式/数据目录与回环监听已核对：首页 HTTP 200，未认证状态 API 401。初次猜测的 `/app.js` 为 404，改按首页实际引用核实 `/assets/index-DMiwFH1i.js` 为 200 且含非零明细参数；没有读取浏览器令牌或会话。真实页面名称、换行和非零明细效果仍待用户目视确认。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-member-display-20261015/activation-132423`：`preflight.json`、`backup/`、`backup-result.json`、`start.json`、`verification-result.json`、`supplemental-verification.json`、`http-process-result.json`、`actual-page-assets.json` 及本机逐范围样本。运行包与真实账本均须保留，不因位于 TempFiles 而清理。需回退时先退出新版 Monitor；旧包可显式指向同一现有 v2 数据目录，不自动还原旧备份而丢弃新增历史。
+
+本次补齐同一核心代次下已有 v2 账本的 Monitor 重开恢复及持续被动守恒；受控 proxy/direct、组成员切换、完整维度切换/新模式速率及真实页面验收仍待完成。S5.6 保持 in_progress，S5.7 planned；没有修改生产源码、依赖或 CI 配置，不合并或发布。本次文档提交与对应 CI 单独核对，不需要因此再次更换运行包。
+
+## 2026-10-15：S5.6 第九批 / 成员友好名、非零明细与偏少诊断
+
+起点 `8db3ff20d84e0d031672ad6996b12334cb1ab68a`，工作树干净。用户反馈机器 tag 遮挡排行、流量偏少和零字节明细过多。本批不重载核心、不切换节点、不改配置或真实账本，也不自动替换正在运行的第八批预览。
+
+成员显示名由已核实配置中的直接组/成员引用生成：唯一 selector 优先于其 urltest；无 selector 时只接受唯一 urltest。只对显示文本去除数字机器前缀，并保留成员后缀，形成「【组名】成员」；多个 selector 共享成员时保留原 tag，不猜本次经哪个组路由。真实 scope/basis/IndexId/配置身份不变，也不按当前组选择重新归属。排行及本机明细允许换行。新源码对真实配置只读投影得到 33 个友好名，34 个成员与三种汇总的全部 37 个既有身份匹配；只有原 proxy 关联已核实 IndexId，没有写入实际库。
+
+HTML 本机历史显式请求 `nonZeroRecords=true`，只隐藏上下行均为零的明细，过滤先于计数和分页；v1/v2 的合计、排行、分桶、恢复量和缺口不变。原始导出不受此开关影响，仍保留零记录，数据库记录不删除。空态明确说明零记录隐藏，实际成员口径说明补充首接不回填和直连单列，移除该模式下不适用的旧 test.2 仅 proxy 提示。
+
+只读偏少诊断对比了首批基线、当前成员/三种汇总累计、持久游标及全历史分钟/未分时量。首接前累计未回填，直连属于 excluded；最新核心累计与游标基本同步，成员与 business 未出现持续取数落后。但全历史差分存在小额差异，历史确有 snapshot_changed / identity_change 的重新建基线窗口；没有开放缺口不等于没有历史缺口。本批不将这些不确定量补零或回填，也不据被动对照宣称所有真实流量已验收。实际计数与成员图谱只保留本机，不提交或上传。
+
+本地 Release 构建零警告零错误；Core 首轮 313 通过、1 个新增夹具断言失败，原断言错误地要求包含未支持出站的夹具没有覆盖缺口，仅改为断言改名不产生 identity_change，定向 1 项通过。Server 首轮 35 通过、1 个新增 v2 夹具因非规范身份被正确拒绝，仅修为合法合成关联，v1/v2 两项定向复验通过。生产校验未放宽，失败日志保留；本批提交的远端全量结果另记，不把拼接的本地结果当成一次全量绿灯。前端最终 54 项通过。浏览器复验曾在比较图节点出现后立即读取到高度 NaN，将原有「高度必须大于零」断言改为等待其成立，不跳过断言或增加重试；最终 16 项合成浏览器回归及桌面/手机截图结果见本机记录。
+
+证据在 `<evidence-root>/v2rayn-monitor-member-display-20261015`；只读偏少诊断在第八批目录的 `volume-diagnosis-115508`。源码/CI 候选待用户授权更新 Monitor 预览，当前运行包仍为第八批 `6393629`，核心仍 test.4；更新只涉及 Monitor，不需退出 v2rayN、切节点、重载核心或迁移账本。S5.6 保持 in_progress，S5.7 planned；完整维度切换、新模式速率及受控切换/重开验收仍未交付。
+
+## 2026-10-15：S5.6 第八批 / Windows 实机接入与 v2 新预览
+
+起点 `63936290975b008796fe95c72297bddaf6adbb4e`，工作树干净，PR #20 Open / Draft，基础仍为未合并的 PR #17 分支。该代码提交的 Monitor PR `38634576032`、push `38634567398` 和独立扩展 PR `38634576073` 均已成功。用户具体授权扩展安装和正常重载，并要求启用新预览前提醒。由于通讯依赖代理，先核实实际路径、配置和原核心，备份 test.2 与 sidecar、校验备份后，由用户离线替换两个文件并重新打开 v2rayN；用户报告代理恢复。
+
+只读生产发现核实新 test.4 的完整摘要与第七批候选一致、客户端/核心路径及父子关系和新代次、标准参数、监听归属与前后稳定边界。实际配置内容与替换前一致，sidecar 与准备文件一致；连续 3 轮 `ReadScopesAsync` 均为 connected，34 个 actual_member 及 business / excluded / unknown 三个独立总量全部可读。4 个组和 1 个 direct 不作为成员重复计数，其他成员仍只用配置摘要/tag，不猜 IndexId。
+
+启用前明确提醒用户，用户退出旧 Monitor 后核实已无旧进程。重新下载并核对精确 CI `38634576032` 的 artifact `11927882794`：外层摘要与 GitHub digest 一致，内层 ZIP 与随附 SHA256.txt 一致，解压后的 435 个文件逐项一致。实际程序 ProductVersion 为 `0.2.0-preview.2+33b79abf3611fef7348cf092790294ae41837151`，后缀为 PR 合并测试提交，不是 HEAD；EXE SHA256 为 `A04D239050E062E31900E0F43A4A8FA5939C37C69901701AD0CF9F6575CA38F5`。
+
+2026-10-15 11:04:41（北京时间）以 `--scope-ledger --data-dir <独立新目录>` 启动新预览，没有复制或迁移旧 history/provider 数据。实际 SQLite 只读事务观察取得 6 个完整持久批次：首批 37 个范围仅建立游标，历史为零；后续 5 段逐范围累计差均与分钟及未分时账本增量相等，期间有 1 个成员实际增长。34 个成员与三种汇总分别保存，未跨 basis 相加；无开放缺口，持久身份与真实发现一致。观察前后核心代次、配置及 sidecar 不变，旧独立验证目录的 3 个数据/设置文件摘要不变。
+
+预览保持运行，核实唯一 Monitor 的实际路径、显式新模式/数据目录参数和回环监听；页面 HTTP 200，未认证状态 API 401。没有读取浏览器会话或令牌，真实页面目视验收仍待用户确认。临时观察器编译零警告零错误；本批未改生产源码、依赖或 CI，文档一致性检查及本批提交 CI 单独记录，不把先前测试数当成本轮新运行结果。
+
+本机证据仅在 `<evidence-root>/v2rayn-monitor-windows-live-20261015-094133`：preflight.json、backup/、preview-package.json、post-install-readonly.json、activation-start.json、activation-result.json、activation-http-process.json 及本地逐范围样本。新预览数据为其中的 `live-scope-data`；旧验证数据保留。真实计数、sidecar、数据库、会话和节点身份不提交或上传。
+
+本批交付真实 Windows 发现/取数、首次无回填基线及持续持久化/被动守恒，不等于受控组切换或全量节点验收。S5.6 保持 in_progress，S5.7 planned；受控 proxy/direct、成员切换、Monitor 重开恢复、完整维度页面/新模式速率及真实页面验收仍待后续。S0.3/S5.1–S5.3 的既有 blocked 不变。未修改实际启动项、迁移真实旧库、合并或发布；不再要求重复授权已完成的本次安装/启用，新的切换、重载或真实迁移仍按具体范围授权。
+
+## 2026-10-15：S5.6 第七批 / Windows opt-in 源码接入
+
+起点 `1284f0c4afee9ddd81b3896cd1c9794e6dafdfad`；第六批提交的 Monitor PR/push `38624549751` / `38624536312` 及独立扩展 PR `38624548405` 全部通过。用户授权继续完成到 Windows 接入处，再确认实际部署/迁移。没有替换实际运行文件、修改真实 sidecar、重载核心、启动真实预览或迁移真实库。
+
+新增显式 `--scope-ledger`：同一数据目录仍受原 mutex 限制，默认启动保持原 v1/test.2 路径；新模式只创建全新 v2 或打开已验证 v2，已有 v1 拒绝且不打开 provider 初始化器。迁移执行器独立，不随正常启动调用。WindowsDiscovery 新模式复用原只读 ProfileItem/连接参数、客户端版本、WMI/原生进程代次、父子/标准命令、监听所属 PID、文件稳定性及采样前后 generation guard。仍要求可核实的独立 AnyTLS proxy 锚点，TUN/endpoints/proxy 链/自定义 API 不放宽；其他独立候选按配置摘要+tag 分账，不猜订阅 IndexId。
+
+ScopeCollector 将完整配置目录投影为成员及 business/excluded/unknown 独立范围，未启用/缺失的累计保持 unavailable。采集循环根据已核实完整目录明确退休旧范围，提交后才 acknowledge guard；整帧/RPC/发现失败保留缺口和连续性边界，首次无身份的缺口保持 NULL scope/collector origin，后续完整目录成功只关闭此类 collector 缺口，legacy 缺口不被关闭。正常 API 默认当前主 basis，另有显式单 basis `/api/scope-history`；CSV 带 basis，名称筛选不合并身份。页面展示成员口径和 partial 状态，不跨维度相加；完整维度切换器及新模式实时速率未交付。
+
+test.3 的文件式 sidecar 原来不能启用成员，本批新增第三层 member-sidecar.patch 及 test.4，仍固定公开源码/归档/Go 1.26.8/Windows 标签/依赖。只有明确的 monitor_members tag 数组启用成员；不允许节点/路由覆盖，原 listen-only 不开启新维度。默认 test.2 白名单不变；opt-in 只接受本地已验证 test.4 SHA256 `B1C6F3AA48F21AE070EF283D10AE946C189421F7C9F498CCAA5657D2B0E7E15E`。源码重构建、Go 5 顶级/22 子用例、依赖清单不变及真实核心副本 sidecar→HTTP/2 读取→合成绑定 v2 首接零基线通过，所有隔离子进程已退出；不升级为真实 v2rayN/Windows 身份验收，也不自动接受不同摘要的 CI EXE。
+
+本地整方案 Release build 最终零警告零错误，Core 309 / Server 34 / 前端 52 项全部通过，已包含末次备份父目录门禁、CSV basis/scope_key 及遗留缺口 origin 的全量复验。新增 6 项 Core 投影/sidecar/前后稳定边界/局部缺失/持久化/Xray 回归、2 项 API/启动门禁和1项成员 DOM 回归。源代码/计划/diff、候选与源码摘要在本轮清单核对，远端精确提交 CI 另行记录，不沿用旧绿灯。
+
+Windows 检查点首提交为 `276c6592eb1618fffc3fbb27b1d01eb9aa182bce`。提交后复核发现原开机启动命令会丢失 --scope-ledger，因此补充统一启动命令并按完整程序/模式/目录核对勾选状态，不在后台自动更新注册表。两项回归在原行为下先实测失败，恢复修正后整方案零警告零错误、Core 最终311项全部通过；Server34/前端52相关代码不变，保留先前通过结果。autostart-red.log、build-autostart-final.log 与 core-tests-autostart-final.log 保存红绿证据。此为同一 Windows checkpoint 的修正，未读写实际启动项；最终提交 CI 再核对。
+
+失败记录保留：编译先暴露 out 参数 lambda 捕获和跨平台 test seam 的 CA1416，修为本地变量及显式原生调用边界，未禁用警告；Server 合成夹具在活动 SQLite 文件上使用 File.ReadAllBytes 触发共享冲突，改为正常停止后核对并恢复测试生命周期；前端隔离副本缺三个源码夹具且新增状态夹具漏 null 速率，补齐夹具后52项全过。依赖 cache lock 的摘要不同只因根 preview.1/preview.2 版本，逐项核对全部依赖/直接版本完全相同后复用，不安装或升级依赖。子进程曾继承 NODE_TLS_REJECT_UNAUTHORIZED=0，末次前端验证仅在该子进程解除此值，并关闭 npm 更新提示，未修改全局环境。
+
+证据仅在 `<evidence-root>/v2rayn-monitor-windows-scope-20261015`：build*.log、Core/Server TRX、web-tests-final.log、core/artifacts/build-provenance.json、probe/result.json 与隔离核心日志、最终 checkpoint/CI；候选未部署。S5.6 in_progress，S5.7 planned。Windows 源码接入已交付，下一步为经具体授权的实机接入与受控验收；新库优先，真实历史迁移另行确认，不合并或发布。
+
+## 2026-10-15：S5.6 第六批 / 受控离线迁移执行器
+
+起点 `817b72c1b6c10f8aea650e4c88005a50f388f5bf`，工作树干净，PR #20 Open / Draft。用户授权继续完成到 Windows 源码接入，真实部署/迁移仍保留具体授权边界。本批新增 `ScopeLedgerMigration.Migrate(historyPath, backupPath)`，不由正常启动或现有 Server 调用。原 v1 Ledger 行为不改。
+
+迁移先只读预检支持的 v1 五表/列类型/主键、整数 bytes/ticks、标记、实例/历史关联、完整性和外键；其他表/视图/触发器、部分 v2、错误版本及路径链接拒绝。SQLite backup 写入全新文件，绝不覆盖已有备份。目标连接使用 exclusive locking，写事务内再次预检并逐原业务键核对目标与 backup 的全部字段和旧结构，防止 backup 后变化；同一事务执行 SQL、完整映射/批次水位/continuity_valid/legacy origin/完整性核对后提交。失败全部回滚，包括 DDL 与 user_version；备份/故障文件保留供恢复。调用方必须先停止全部写入者，不把锁策略当作授权或停程序的替代。
+
+合成回归新增 11 项：历史/大整数/标记/开放 legacy 缺口保留、迁移首接基线、独立 provider.db 的精确小数及文件不变、空 v1、已有备份和 v2 拒绝；REAL/非法标记/实例错配/孤立 gap/结构变化/provider 目标拒绝；DDL+user_version 后 SQL 或逐行核对失败回滚，以及 backup 后数据变化拒绝。仅合成 failure regression 通过反射调用同一内部事务方法并注入 SQL，不提供公共任意 SQL 输入或生产故障开关。
+
+使用隔离 SDK 10.0.401 和既有离线缓存，Release build 零警告零错误，v2/迁移定向 `LedgerTests.Scope*` 共 29 项通过。日志/合成产物在 `<evidence-root>/v2rayn-monitor-scope-migration-20261015`，未访问真实库。提交与精确 CI 单独核对；下一批继续 sidecar 成员开关、Windows 前后稳定发现及 opt-in 批量采集/API 接入，到真实部署/迁移边界再确认。S5.6 in_progress，S5.7 planned。
+
+## 2026-10-15：S5.6 / PR #20 独立 v2 账本
+
+起点为 `8845b2931e71471e138a460821b42e134bd2b834`；工作树干净、本地与远端一致，PR #20 Open / Draft，base 仍为未合并的 PR #17 分支。用户授权继续正式账本实现。本 checkpoint 只交付独立 Core 层与既有文件中的正式回归，不部署核心/预览，不修改依赖、CI 配置、生产入口或任何真实数据库。
+
+新增 `ScopeLedger` / `ScopeModels`。新库必须显式 `CreateNew`，拒绝每个已有文件；打开已有库必须为 v2，核对六张新表/索引的完整 DDL、完整性和外键，不自动建表或升级。复用 docs/proposals 的同一 SQL 作为 Core 嵌入资源，仅在全新空库初始化时执行。正式已有 v1 库的预检、backup、逐行映射核对及迁移执行器仍未实现；原 Ledger/WindowsDiscovery/Server 继续 v1。
+
+完整批次的 instance/session/generation、时间/规范化输入指纹、范围注册/名称、全部字节/游标、缺口及退休失效在单事务提交。完整目录必须明确退休每个遗漏范围，含从未获得计数和已退休范围；漏列、跨实例退休、重复/冲突/迟到输入或任何约束/溢出全批拒绝。缺失范围不补零，也不清空其他游标；缺失期间观察到代次变化同样持久失效连续性，A→B→A 不恢复不确定量。恢复量保持未分时，分片先算本片再 checked 累加，避免 SQLite REAL 提升及可表示分片的中间溢出。
+
+新增单 basis Core 查询，按 scope ID、时区及时间分桶，BigInteger 合计输出十进制字符串；成员、business、excluded、unknown、路由和 legacy 不能混合查询。明细分页不裁合计、分桶或缺口，部分重叠恢复不摊分，跨桶恢复单列。成员成功只关闭该范围 collector 缺口，不关闭 legacy/NULL 范围缺口。nodes 只为新核实关联插入行，不改旧行，范围新名称保存在新表。这个共享身份目录约定已同步提案，旧字节/游标/缺口表不写入 v2 记录。
+
+本地使用隔离 .NET SDK 10.0.401 与既有离线 NuGet 缓存，设置本轮 DOTNET_CLI_HOME/TEMP/NUGET_PACKAGES，显式禁止生成开发 HTTPS 证书。实际执行 `dotnet restore ... --source <既有缓存>`、Core / Server Release build、`dotnet test ... --no-build --no-restore --logger trx`：第一轮完整构建均零警告零错误，Core 291 / Server 32 通过。原 LedgerTests.cs 新增的长期回归全部使用合成身份/计数，覆盖新库门禁、维度分离/同名分账/规范化重放、局部缺失与持久恢复、不可用代次边界、完整目录/退休/返回基线、后项失败全回滚（含名称/节点关联/注册/缺口/批次）、整数余数/大整数/真溢出、查询恢复/跨午夜/分页/coverage、重启/回退/显式失效、关联校验/非法输入/Schema、并发重读、legacy 缺口保留和独立配置身份变更；末次复核补同 tag 双身份最短回归，共 18 项，最终复验结果另列。
+
+首次编译 Core 成功、测试编译失败：单个 params 实参中的 target-typed `new()` 被编译器当作数组目标，另有 xUnit2031 断言规则错误。仅显式写 ScopeReading 类型并使用 Assert.Single 的过滤参数，未放宽编译器警告或测试；失败 build.log 保留，后续构建及回归通过。SQL 注释/使用说明同步后再执行最终嵌入资源定向复验。前端未改，本地不重复前端/浏览器或真实核心联测。
+
+提交前复核发现同一成员 counter tag 可被两条不同范围身份重复绑定。最短合成回归先实测失败（没有抛出预期拒绝），随后在批次输入边界拒绝同 basis/tag 的双身份；跨 actual_member/routed_outbound 的同 tag 仍合法并分别查询。最终 Release build 零警告零错误，18 项 v2 定向复验全部通过，见 build-final18.log、scope-tests-final18.log、results-final18/ 与 verification-manifest-final18.json。红例在 duplicate-tag-red.log 保留，不扩大支持类型或修改核心；未受影响的旧 Core / Server 检查不重复运行，远端最终全量结果单独记录。
+
+本机产物位于 `<evidence-root>/v2rayn-monitor-scope-ledger-20261015`：build.log / build2.log / build3.log / server-build.log、scope-tests2.log / core-tests3.log / server-tests.log 与各 TRX；正式新库/回归的临时文件均在本轮 tmp 下，不提交数据库。提交、远端精确 HEAD 和对应 Monitor/扩展 CI 单独核对，结果见本轮 checkpoint 记录，不沿用上一提交绿灯。
+
+S5.6 保持 in_progress；独立持久化层与 Core 查询已实现，但尚不是生产自动多出站分账。下一节点先完成正式受控 v1 迁移执行器及合成 SQLite backup/逐行核对/失败回滚，再推进完整 Windows 身份、生产采样及 API/页面接入。test.3 未部署，生产仍只采 proxy，服务商库独立不变；真实迁移、运行文件替换、重载、节点切换、合并及发布不在本批范围。真实进程重开、断电恢复和全量实机验收未补齐，S5.7 / #19 仍 planned。
+
+## S5.6 / PR #20 多范围迁移提案与隔离验证
+
+接手起点为 `e8a6c22aa0c291a7d1365e421cfd0ce0c741145a`，工作树干净、本地/远端一致，PR #20 仍 Open / Draft。该提交的 Monitor PR / push CI `38588487034` / `38588478588` 双平台及独立核心 CI `38588487693` 已通过，分别为 Core 274 / Server 32 / 前端 51、Linux 浏览器 15，以及 Go 4 个顶级测试 / 15 个子用例。用户授权继续迁移方案和隔离账本验证。本轮不修改生产源码、依赖、CI、运行程序或真实 Schema。
+
+新增 [v2 迁移提案](proposals/scope-ledger-v2.md) 与完整 [提案 SQL](proposals/scope-ledger-v2.sql)，均不由应用加载。针对 v1 未保存 basis 的事实，旧记录映射为 legacy_proxy，不推断核心或实际成员；原 node_key、时间、整数 bytes、quality 和标记逐字段保留。旧 NULL-node 缺口维持 NULL scope / legacy origin，不分摊给成员，也不被单个成员成功采样全局关闭。旧累计游标保留审计值但连续性失效，新范围首接只建基线。scope_id 为本库范围标识，真实 instance_id 不改；独立 outbound 用配置内容身份与 tag 区分，已核实 IndexId 才关联原节点。
+
+提案新增范围表及独立游标、分钟、未分时、缺口和批次时间/指纹表，旧五表留作核对，新版本机读写只用新表。查询明确选一个 basis，不能把历史 proxy、成员、业务或路由组相加。单个事务保存字节、全部游标、缺口、范围元数据与批次标记；缺失某范围不清空其他游标，批次倒退/冲突或任何写入/溢出失败全回滚。实际启动的服务商库为独立 provider.db，迁移只针对 history.db，服务商量及精确 TEXT 十进制保持独立。本批修正了最初临时夹具把两类记录放同库的结构假设，最终证据只认真实双库布局。
+
+使用已核实便携 .NET SDK 10.0.401、既有离线 NuGet 缓存、生产 Ledger / ProviderImports 与项目 Microsoft.Data.Sqlite 创建全新合成双库，在 TempFiles 编译独立原型执行同一提案 SQL。最终构建零警告零错误，19 组场景通过：空 v1 / 历史逐行及大 int64 保留，独立服务商文件/精确小数不变，非法版本/结构/字节/实例/缺口/标记拒绝；DDL/INSERT 中途及 user_version 已设后的核对失败都回滚；同名成员首接不回填，局部缺失/重开恢复/范围缺口隔离，核心新累计更大仍基线，A→B→A 和范围退休不恢复不确定量，完整重复/倒退/冲突批次处理，前项成功后后项失败全回滚（含名称、注册、缺口、游标），跨分钟余数守恒、真实累加溢出拒绝、可表示分片不误报中间溢出、BigInteger 查询、部分恢复不摊分，迁移旧游标及已核实 IndexId 新维度独立基线，新 SQL 类型/外键/basis 约束，以及旧 Ledger 拒绝 v2 / 独立路径 backup 恢复 v1。
+
+初轮合成 CSV 使用 ISO 时间而非解析器要求的 `yyyy-MM-dd HH:mm:ss`，在初始化夹具时失败；第二轮验证器误按 rowid 比较重建的分钟记录，逐业务主键对照确认所有字段相同且失败事务已回滚。本批保留失败日志，只改临时夹具/验证器，未放宽生产解析或迁移 SQL。最终分别创建 history/provider 后在 `attempt5-final` 完整通过；中间单库结果不作为最终双库证据。
+
+本机证据位于 `<evidence-root>/v2rayn-monitor-scope-ledger-proposal-20261014`，最终为 `attempt5-final/result.json`、`attempt5-final.log`、`build5.log`，临时源码在 `harness/`；JSON 记录实测 SQL SHA256。新测试/运行产物不进入仓库。本地计划、链接、diff 与 SQL/结果摘要检查后再提交；远端 CI 仅证明本批文档/既有程序回归，不会执行临时迁移原型，不能替代本地 SQL 证据。
+
+S5.6 仍 in_progress，S5.7 planned。本批已给出完整 DDL、逐行映射、迁移前 SQLite backup、失败回滚和已提交后的恢复边界：写入 v2 新历史后不能宣称自动无损降级。下一批将方案实现为受控的 v2 Ledger 并补正式回归；生产版本门禁、完整目录退休核对、采集循环、API/页面、真实进程重开、断电恢复与实机仍待后续。真实数据库迁移、替换运行文件、重载核心或切换节点需具体授权，不自动执行。
+
+## 2026-10-14：S5.6 / PR #20 成员读取与配置绑定身份目录
+
+起点为 `e1f868bfe2c2aee4ab7fd2bc2a782015e0c25df4`，工作树干净、本地/远端一致，PR #20 保持 Open / Draft。用户授权继续成员读取与身份接口。本批不切换 WindowsDiscovery 生产入口，不改变核心补丁、test.2 白名单、运行文件、依赖、Schema 或真实数据库。
+
+新增 `V2RayStatistics.ReadMembersAsync` / `TryReadMembersResponse`，单次 `reset=false` RPC 读取 `monitor>>>member>>>{tag}` 和 business / excluded / unknown 三个独立维度；成员、各总量及其不可用原因分别返回，不拿路由 tag 补成员，不跨维度求和。与原路由读取复用相同 HTTP/2、数值回环、65,536 bytes 上限及严格 wire/int64 解析；缺失、重复、越界各自保持不可用，坏帧拒绝整个响应。空成员列表只读三种总量，原路由及单 proxy API 行为保留。
+
+新增 `SingboxParser.TryReadMemberCatalog`，只从已独立核实的 sing-box 快照及匹配配置代次投影候选身份。目录保存真实 instance、配置代次、核心代次和独立 tag / protocol；仅既有核实路径的 AnyTLS `proxy` 关联快照 IndexId，其他出站不靠名称、相同连接字段或组选择关联订阅。组、direct、detour、未支持类型和不能编码为统计名的 tag 单列不可用；TUN、endpoints、重复 tag / JSON 字段拒绝目录。候选目录不证明统计已启用，也不替代进程/监听、完整连接字段、采样前后稳定性或其他 ProfileItem 的身份核实；不会生成伪造 instance_id 或新账本键。
+
+实际本地命令与结果：复用已核实便携 .NET SDK 10.0.401，`dotnet restore ... --source <既有本地缓存>`、Release `dotnet build ... --no-restore`、Core / Server `dotnet test ... --no-build --no-restore` 全部通过；构建零警告零错误，Core 274 / Server 32。既有回归文件新增 9 项覆盖维度分离、同名成员/总量、int64/真实零值、局部不可用、test.2 不回退补零、坏帧、单次只读 RPC、身份绑定及保留未知。前端未改，本地不重跑前端或浏览器。
+
+另外使用本批生产 Core 读取器、新进程及已核对摘要的 test.3 / test.2 副本进行纯回环 SOCKS/echo 联测：test.3 空闲成员及三总量真实为零；旧 A 连接跨 selector 切换后仍计 A，A / B 每方向 114 / 97 bytes 与服务端 payload 相符，business 每方向 211、direct excluded 42，路由组每方向 253，不把组计数冒充成员或再次相加。两个并发新读取器重复 `reset=false` 结果稳定；核心重启改变目录核心代次，累计真实归零。test.2 的路由组每方向 17 bytes 可读，但成员及新总量全部 `missing_counter`。身份目录在此联测中来自合成快照，不升级为生产 WindowsDiscovery 或真实订阅多出站映射验收。
+
+首轮临时夹具将 `monitor_members` 写成 bool，核心解码明确要求 tag 数组，启动退出 1；保留日志，仅修正临时夹具为 `["fixture-a","fixture-b"]`，在新目录重跑通过。没有为失败修改生产代码或吞掉断言。全部隔离核心已退出，证据位于本机 `<evidence-root>/v2rayn-monitor-issue18-member-reader-20261014`，主要记录为 `build.log`、`core-tests.log`、`server-tests.log`、`integration2-result.json`。对应提交的远端 CI 独立核对，不沿用旧绿灯。
+
+S5.6 保持 in_progress：本批交付新读取接口及配置绑定身份目录，生产采样、完整多出站发现/身份、持久多范围及批量原子账本仍未接入，API/页面仍是原 routed-proxy 范围。下一批先完成可审阅的多范围迁移方案和隔离账本验证；真实迁移、运行文件替换、核心重载和节点切换仍需具体授权。S5.7 / #19 保持 planned。
+
+## 2026-10-14：S5.6 / PR #20 独立扩展 CI
+
+接手起点为 `80c33396396487e3717d4948edd13f78a3a12877`，工作树干净、本地/远端一致，PR #20 仍 Open / Draft，基础 PR #17 未合并。已恢复上一线程“同意，可以 CI”的具体授权，本轮只新增独立扩展工作流及可复用构建脚本，不改变现有 Monitor CI、依赖版本、核心补丁、生产白名单、Schema 或运行程序。
+
+工作流使用 Windows runner / Go 1.26.8，固定公开源码 `1ac1a339` 与归档 SHA256 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`，按序应用 `monitor.patch` / `member-stats.patch`。使用原 Windows 标签加 with_v2ray_api，显式禁止工具链自动切换，测试/构建使用 `-mod=readonly` 并核对依赖清单未变。`^TestMonitor` 必须实际通过四个指定顶级测试，不接受无测试绿灯。候选 artifact 附原始公开源码归档、补丁、GPLv3 LICENSE、说明、构建脚本及包含 checkout/CI/源码/补丁/工具链/二进制身份的 provenance。
+
+本地复用既有 Go 与模块缓存离线执行同一脚本，4 个顶级测试 / 15 个子用例通过，重新构建的 test.3 SHA256 与原隔离联测候选完全一致：`547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`。PowerShell 语法、错误归档摘要拒绝、已有证据目录拒绝、计划一致性与 diff 检查通过。证据位于本机 `<evidence-root>/v2rayn-monitor-extension-ci-20261014`。
+
+工作流提交为 `c2318858f719038d6717d362c4306ecb5909bafa`。首轮扩展 PR CI `38567534724` / push CI `38567526662` 在 `monitor.patch` 应用阶段失败，尚未执行 Go 回归；固定源码摘要与 Go 安装已通过。本地同一源码的 LF 补丁校验通过，CRLF 补丁复现远端完全相同的 `experimental/v2rayapi/stats.go:60` 错误。修正提交 `0f9c7989d5e33cedfc94d6995a78b7324e8b4260` 在 `.gitattributes` 增加 `*.patch text eol=lf`，避免 Windows checkout 转换补丁；工作流也覆盖属性文件改动，不修改两层补丁或采用忽略上下文的绕过。模拟 Windows checkout 的隔离副本重新检出补丁后，补丁字节与原文件一致，离线回归及构建通过，原候选摘要不变。失败记录保留。
+
+修正提交的扩展 PR CI `38568671399` 成功：实际执行 4 个顶级测试 / 15 个子用例，构建 test.3 并上传带源码/许可/provenance 的候选。独立 Monitor PR CI `38568671443` 双平台成功，Core 265 / Server 32 / 前端 51，Linux 浏览器 15；两条证据独立记录。同提交扩展 push CI `38568665588` 第一次在 Go 模块下载阶段遇到 proxy.golang.org HTTP/2 `INTERNAL_ERROR`，不是测试断言失败；已仅申请失败 job 重跑，不修改依赖版本、下载校验或测试设置。重跑及后续文档提交的检查以对应远端运行结果为准，不用成功 PR 运行隐去失败记录。
+
+已下载并核对扩展 PR CI 的 artifact `11896719141`：ZIP SHA256 为 `3fd200cbbbc9cce836a29579ce16d10f8c03da4a3a3cff888c2ca05864960449`，与 GitHub artifact digest 一致；原始源码归档及两层补丁摘要与固定来源一致。实际 checkout / GITHUB_SHA 为合并测试提交 `164048cde0c4d05abf13b3800d727b12bbe70166`，PR HEAD 则是 `0f9c798`，未混淆两者。CI EXE SHA256 为 `630dd18d4977435b7c05963ed21d2fbe16ca54def2dd3545279d73846ceb53b1`，与自身 provenance 一致，但不同于本地联测候选。两份 EXE 大小均为 81,980,928 bytes；Go 工具链/依赖/构建元数据相同，逐字节仅 Go build ID 内 40 bytes 不同，遮蔽该 ID 后其余字节完全一致。不宣称两份 EXE 的 SHA256 相同，也不替换原已联测候选或扩展 Monitor 白名单。详情见本轮 `core-ci-artifact-verification.json`、`build-id-comparison.json`、`fixed-extension-ci.log` 和 `fixed-monitor-ci.log`。
+
+本轮没有部署、替换运行文件、重载核心、切换真实节点或迁移真实账本。S5.6 继续 in_progress；新成员读取、多范围身份、完整迁移方案及批量原子账本尚待下一批，S5.7 / #19 保持 planned。
+
+## 2026-10-14：S5.6 / PR #20 核心实际成员原型
+
+起点为 `1782621a7bce2e9496bcfb60aa07e7c4b5581f8f`，实现提交为 `bfc1e404d73cf1ae7b6eed34030e614ef721c530`；开始时工作树干净、本地与远端一致，PR #20 Open / Draft，基础仍为未合并的 PR #17。用户授权继续下一检查点。本批不改变 Monitor 生产代码、Schema、依赖或运行程序。
+
+新增 `extensions/sing-box/member-stats.patch`，叠加既有 test.2 的 `monitor.patch`；候选为 `1.14.1-monitor-test.3`。保留固定上游 `1ac1a339`、Go 1.26.8、Windows 默认标签加 with_v2ray_api、原 go.mod/go.sum。只在隔离配置显式启用 `stats.monitor_members`，现有 sidecar 仍只允许 listen、默认仍仅启用 routed-proxy；Monitor 白名单没有添加候选摘要。
+
+成员绑定取自最终用于传输的返回 TCP/UDP 连接，或者 selector 实际转交的叶 handler；嵌套组保留叶证据，成功但未采用的并行拨号不提前绑定。首次绑定冻结，旧长连接不随后续选择重标。计数在原业务连接读写路径直接更新，无事件消费队列、连接历史轮询、速率积分或 `Now()` 归属推断。原 `outbound>>>` 路由维度不变；新 member / business / excluded / unknown 各自独立，不能相加当总量。叶有 outbound Dependencies 时留 unknown，链不是已支持成员。
+
+本地实际执行结果：
+
+- 离线 Go 定向回归通过：4 个顶级测试、15 个子用例。包含冻结归属、最终返回的赢家而非未采用拨号、嵌套/包连接证据、direct 排除、未注册/链/未绑定 unknown、过早字节不追溯重标、8 并发 800 个合成连接与未启用时的原统计兼容。
+- 候选真实副本完成 14 段纯回环 SOCKS/echo 联测：selector 旧 TCP/UDP 跨切换、nested、1,200 短连接（8 并发，每方向 73,200 bytes）、切换期间 200 请求（每方向 13,400 bytes 按实际服务端路径分账）、urltest 旧 TCP 与新成员、direct 排除、链留 unknown。两套合成代理服务分别记录实际处理 payload，不使用组当前选择分配字节。
+- 未改动、同摘要 test.2 服务端与候选客户端的 AnyTLS/TLS、VMess 5 段对照通过：旧 AnyTLS + 新 VMess 跨切换，组选 direct 不影响旧代理连接，8 并发 200 VMess 短连接每方向 8,600 bytes、1,200 AnyTLS 短连接每方向 56,400 bytes，成员量均与服务端原始路由计数及 echo payload 守恒。读取器进程每次新建，reset=false 重读稳定；候选核心重启新累计真实归零。TLS 为合成证书/insecure，不升级为实际节点 TLS 或服务商计费量验收。
+- 首轮 UDP 因临时 SOCKS 服务只接受 IPv4 地址形式而断开，核心收到 EOF；保留失败记录，仅补齐夹具合法地址解析，在新目录重跑通过，未改生产计量代码。
+- 下载同一固定公开源码归档，依次应用两层补丁；1,558 个重构源码文件与测试源码一致。再次离线测试/构建通过，候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48b8572892108823aa`，从原始源码重构建的二进制与联测候选摘要完全一致。
+
+证据位于本机 `<evidence-root>/v2rayn-monitor-issue18-members-20261014`：`integration2/result.json`、`anytls-vmess-integration/result.json`、`pristine-build-verification.json` 和 `verification-report.md`。所有隔离核心子进程均退出；普通权限生产发现核实实际客户端、核心、Monitor 的进程代次与原包前后不变，connected / routed_proxy、37 出站（含 4 组）未采集。没有新核心部署、实际节点切换/核心重载、运行库读取或迁移。
+
+S5.6 仍 in_progress，S5.7 / #19 planned。生产新成员维度读取、可靠多出站身份、完整迁移 DDL 与批量原子账本尚未实现，Monitor 重开/多范围账本与实机全量未验收。实现提交的既有 Monitor PR CI `38545023200` 双平台成功，Core 265 / Server 32 / 前端 51，Linux 合成浏览器 15；它不编译 Go 补丁，不能借其绿灯宣称核心 CI 已通过。已向用户提出专用扩展工作流的配置授权请求，确认前不修改 CI。后续文档提交的 Monitor CI 另行核对，不替换本地已经复现并测试的候选核心。
+
+## 2026-10-14：S5.6 / Issue #18 批量路由 tag RPC 接口
+
+起点为 `b832892b5da5e2d9eef1439d65880f6bbd05e6ec`；开始时本地与远端一致、工作树干净，#15 仍 Open、PR #17 仍 Open / Draft，未合并。用户确认 API 接入和独立 proxy 读取已通过，并授权开始后续范围；这些已通过项不因 #18/#19 尚未完成而撤销。新分支为 `feat/issue18-singbox-batch-stats`，代码提交 `235adff79570d77c137613414dd49893ff5a575c`，以 PR #17 分支为基础走独立 Draft PR #20，不把本批变更混入 #17。
+
+恢复现场和隔离验证前后，普通权限生产发现均核实实际客户端/核心的路径、父子关系和创建代次；实际 Monitor 仍为此前 CI 包的 preview.2，进程代次不变，采集状态为 connected、routed_proxy，37 个出站未采集，其中 4 个组。本轮不替换真实运行文件、不改生成配置/路由/节点、不重载核心、不访问真实凭据或迁移账本。
+
+新增 `ReadOutboundsAsync` / `TryReadOutboundsResponse`，一次数值回环 HTTP/2 `QueryStats`、reset=false，保持兼容服务名和 65,536 bytes 响应上限。每个请求 tag 的完整上下行累计独立保存；缺失、重复或超出非负 int64 范围的 tag 独立列为不可用，不补零、不丢弃其他完整 tag。不能可靠解析的 wire、压缩/截断/超限帧或 RPC 失败仍拒绝整个响应。原单 proxy API 复用解析并保持原采集范围。
+
+本地最终 Release 构建零警告零错误，Core 265 / Server 32 全部通过；新增 7 项回归覆盖多 tag 分离、组维度不推断成员、缺失/重复/无效的局部不可用、实际 proto3 零值、大小写、整数边界、坏帧、请求参数与只读 RPC。前端未修改，本地未重跑前端或浏览器。代码 `235adff` 的 PR CI `38534398732` 双平台成功：Core 265 / Server 32 / 前端 51，Linux 15 项合成浏览器通过；没有沿用 #17 绿灯。计划与 diff 检查通过。
+
+真实 test.2 同摘要副本使用显式原生 V2Ray API、纯回环 SOCKS / echo 和合成路由验证，生产批量读取器得到 4 个独立 tag 的零基线及未注册 tag 的 missing_counter。单次 proxy / other / group / direct 分别增加每方向 17 / 29 / 19 / 23 bytes，仅对应 tag 增长；8 并发的 64 次 proxy 和 100 次 other 短连接分别增加每方向 1,984 / 3,700 bytes。路由组选择 proxy 只增长组 tag；重复 reset=false 查询稳定，每次新建读取器进程仍保留核心累计。隔离核心均已退出。首轮合成服务因默认监听队列 5 小于并发 8 出现连接拒绝；依据核心日志与 Python 标准库修正临时队列，在新目录完成重跑，失败证据保留。
+
+已下载并核对上述精确 CI 的 Windows 预览包，ZIP SHA256 为 `9f544f2387ee2f861acce035bea233af47e2e9d388531dbf9b55e10dee529d0b`，与 CI 摘要一致；ProductVersion 为 `0.2.0-preview.2+94bd20e4194d16f8daefa205482f9c41d165f123`，后缀与 CI 日志中的合并测试 checkout 一致，不是 PR HEAD。包不含运行数据库、CSV、生成配置或扩展核心；解压至本轮 `preview/monitor-235adff`，未启动或部署，当前运行包不变。本次后续文档提交不替换这个已核实的代码产物，其 CI 另行核对。
+
+证据位于本机 `<evidence-root>/v2rayn-monitor-issue18-batch-20261014`，最终真实核心副本结果见 `attempt3-final/real-core-batch-result.json`。这只证明批量路由 tag 取数，不是组实际成员、Windows 自动全量接入、多范围账本或真实节点验收。现装 test.2 仍只为 proxy 启用文件式统计；生产 WindowsDiscovery、账本、API 和页面范围未扩大。
+
+S5.6 标为 in_progress，S5.7 / #19 保持 planned。已发现 v1 游标以 instance_id 唯一，不能直接保存同实例的多个独立游标；迁移前置方向见 [扩展范围](singbox-extension-scope.md)。本批没有 Schema、依赖或 CI 配置变更，也未将 group.Now()、事件队列或伪造实例键用作计量捷径。下一检查点先在核心实际处理路径验证成员归属，再实现隔离多范围 Schema 与批量原子记账。
+
 ## 2026-10-14：S5.5 真实预览启用与被动账本核验
 
 代码基线为 `c8ea8707a6029264fece5b4d2f95d239983b2547`，开始核对时工作树干净、本地与远端一致，PR #17 仍为 Draft。用户退出旧 preview.1 后，已核实没有残留 Monitor 进程、preview.2 EXE 摘要与 CI 包一致、原独立验证目录的设置正确。启动前用 SQLite 只读 backup 保存验证账本快照；未覆盖旧程序或修改正式 `<monitor-data>`。

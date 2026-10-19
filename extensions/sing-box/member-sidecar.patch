@@ -1,0 +1,96 @@
+--- a/cmd/sing-box/cmd_monitor_stats.go
++++ b/cmd/sing-box/cmd_monitor_stats.go
+@@ -45 +45,2 @@
+-		Listen string `json:"listen"`
++		Listen         string   `json:"listen"`
++		MonitorMembers []string `json:"monitor_members,omitempty"`
+@@ -59,0 +61 @@
++	available := make(map[string]string)
+@@ -64,0 +67,3 @@
++			if outbound.Tag != "" {
++				available[outbound.Tag] = outbound.Type
++			}
+@@ -72,0 +78,16 @@
++	members := make(map[string]bool)
++	for _, tag := range endpoint.MonitorMembers {
++		if tag == "" || strings.Contains(tag, ">>>") || members[tag] {
++			return nil, fmt.Errorf("Monitor member tags must be unique valid statistics tags")
++		}
++		switch available[tag] {
++		case "socks", "http", "shadowsocks", "vmess", "vless", "trojan", "anytls", "hysteria2", "tuic":
++		default:
++			return nil, fmt.Errorf("Monitor member tag does not identify a supported proxy outbound")
++		}
++		members[tag] = true
++	}
++	stats := map[string]any{"enabled": true, "outbounds": []string{"proxy"}}
++	if len(endpoint.MonitorMembers) > 0 {
++		stats["monitor_members"] = endpoint.MonitorMembers
++	}
+@@ -74 +95 @@
+-		"listen": endpoint.Listen, "stats": map[string]any{"enabled": true, "outbounds": []string{"proxy"}},
++		"listen": endpoint.Listen, "stats": stats,
+--- /dev/null
++++ b/cmd/sing-box/cmd_monitor_sidecar_test.go
+@@ -0,0 +1,61 @@
++package main
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"reflect"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++// Synthetic sidecar only. No client configuration or credentials are loaded.
++func TestMonitorMemberSidecar(t *testing.T) {
++	globalCtx = context.Background()
++	entries := []*OptionsEntry{{options: option.Options{Outbounds: []option.Outbound{
++		{Type: "anytls", Tag: "proxy"}, {Type: "vmess", Tag: "fixture-b"},
++		{Type: "direct", Tag: "direct"}, {Type: "selector", Tag: "group"},
++	}}}}
++	path := filepath.Join(t.TempDir(), "monitor-stats.json")
++	cases := []struct {
++		name, content string
++		valid         bool
++	}{
++		{"explicit_members", `{"listen":"127.0.0.1:10814","monitor_members":["proxy","fixture-b"]}`, true},
++		{"duplicate", `{"listen":"127.0.0.1:10814","monitor_members":["proxy","proxy"]}`, false},
++		{"unregistered", `{"listen":"127.0.0.1:10814","monitor_members":["absent"]}`, false},
++		{"direct", `{"listen":"127.0.0.1:10814","monitor_members":["direct"]}`, false},
++		{"group", `{"listen":"127.0.0.1:10814","monitor_members":["group"]}`, false},
++		{"separator", `{"listen":"127.0.0.1:10814","monitor_members":["bad>>>tag"]}`, false},
++		{"wrong_type", `{"listen":"127.0.0.1:10814","monitor_members":true}`, false},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if err := os.WriteFile(path, []byte(tc.content), 0600); err != nil {
++				t.Fatal(err)
++			}
++			got, err := readMonitorStatsAt(path, entries)
++			if (err == nil) != tc.valid {
++				t.Fatalf("valid=%v, err=%v", tc.valid, err)
++			}
++			if tc.valid {
++				stats := got.options.Experimental.V2RayAPI.Stats
++				if !reflect.DeepEqual(stats.MonitorMembers, []string{"proxy", "fixture-b"}) ||
++					!reflect.DeepEqual(stats.Outbounds, []string{"proxy"}) {
++					t.Fatal("member or original route scope changed")
++				}
++				if len(got.options.Outbounds) != 0 || got.options.Route != nil || got.options.DNS != nil {
++					t.Fatal("sidecar changed routing or node configuration")
++				}
++			}
++		})
++	}
++	if err := os.WriteFile(path, []byte(`{"listen":"127.0.0.1:10814"}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	got, err := readMonitorStatsAt(path, entries)
++	if err != nil || len(got.options.Experimental.V2RayAPI.Stats.MonitorMembers) != 0 {
++		t.Fatal("listen-only sidecar must not enable member collection", err)
++	}
++}

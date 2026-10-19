@@ -116,11 +116,28 @@ public sealed class XrayTests
         => Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(proxyExtra: proxyExtra)), out _, out _));
 
     [Fact]
-    public void MultipleProxiesOrBalancerAreRejected()
+    public void MultipleProxiesAndBalancersKeepOnlyVerifiedProxyWithPartialCoverage()
     {
-        Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(",{\"tag\":\"proxy-2\",\"protocol\":\"vless\"}")), out _, out _));
-        Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(routing: ",\"routing\":{\"balancers\":[{\"tag\":\"group\"}]}")), out _, out _));
+        var json = Configuration(",{\"tag\":\"proxy-2\",\"protocol\":\"vless\"}",
+            routing: ",\"routing\":{\"balancers\":[{\"tag\":\"group\",\"selector\":[\"proxy\"]}]}");
+        Assert.True(XrayParser.TryReadConfiguration(Bytes(json), out var config, out _));
+        Assert.Equal(new ProxyCollectionScope(1, 1, "xray_outbound_proxy"), config!.Scope);
+        Assert.True(config.Scope!.IsPartial);
+        Assert.Contains("其他 1 个代理出站未采集", config.Scope.Description);
+        var snapshot = Snapshot() with { Scope = config.Scope };
+        var reading = Assert.Single(ScopeCollector.ProjectLegacy(snapshot, new(101, 202), Now, false).Readings);
+        Assert.True(reading.PartialCoverage);
+        Assert.Equal(101L, reading.Upload);
+        Assert.Equal(202L, reading.Download);
+        Assert.Equal("legacy_proxy", reading.Scope.Basis);
     }
+
+    [Theory]
+    [InlineData(",{\"tag\":\"proxy\",\"protocol\":\"vless\"}", "")]
+    [InlineData(",{\"tag\":\"other\",\"protocol\":\"vless\",\"proxySettings\":{\"tag\":\"proxy\"}}", "")]
+    [InlineData("", ",\"routing\":{\"balancers\":{}}")]
+    public void AmbiguousOrChainedMultiOutboundConfigurationsRemainRejected(string outbound, string routing)
+        => Assert.False(XrayParser.TryReadConfiguration(Bytes(Configuration(outbound, routing: routing)), out _, out _));
 
     [Fact]
     public void MissingCounterEnablementIsNotAssumed()
