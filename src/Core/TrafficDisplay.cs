@@ -31,6 +31,26 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     internal readonly record struct RecordKey(string Entity, int Kind, long Start, long End);
     internal static string MergeKey(string basis, string key) => basis + ":" + XrayParser.Hash(key);
 
+    // Older member records saved the friendly label and generated tag before display snapshots existed.
+    internal static CapturedNodeName? HistoricalMemberName(string basis, string name, string? tag)
+    {
+        if (basis is not ("actual_member" or "probe_urltest_member") || tag is null || !name.StartsWith('【')) return null;
+        var close = name.IndexOf("】 ", StringComparison.Ordinal);
+        var separator = tag.IndexOf("-proxy-", StringComparison.Ordinal);
+        if (close <= 1 || separator <= 0 || !tag[..separator].All(char.IsAsciiDigit)) return null;
+        var label = name[1..close];
+        var tagged = tag[(separator + 7)..];
+        if (!tagged.StartsWith(label + "-", StringComparison.Ordinal)) return null;
+        var member = tagged[(label.Length + 1)..];
+        var ordinal = member.IndexOf('-');
+        if (ordinal <= 0 || ordinal + 1 >= member.Length ||
+            !int.TryParse(member[..ordinal], NumberStyles.None, CultureInfo.InvariantCulture, out var number) ||
+            number <= 0 || member[..ordinal] != number.ToString(CultureInfo.InvariantCulture)) return null;
+        var original = member[(ordinal + 1)..];
+        var saved = name[(close + 2)..];
+        return saved == member || saved == original ? new(original, label) : null;
+    }
+
     internal CapturedNodeName? CurrentName(string entity)
     {
         using var command = Command(null, "SELECT snapshot FROM ui_display_cursors WHERE entity_key=$key;", ("$key", entity));
