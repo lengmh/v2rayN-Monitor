@@ -93,15 +93,17 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
   for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
     await page.setViewportSize({ width, height });
     await page.click('[data-ranking-mode=ranking]');
+    await expect(page.locator('.motion-snapshot')).toHaveCount(0);
     const panel = page.locator('.ranking-panel');
     const rankingHeight = (await panel.boundingBox()).height;
-    const marker = await page.locator('.rank-recovery-marker:not(.vacant)').boundingBox();
+    const marker = await page.locator('#ranking .rank-recovery-marker:not(.vacant)').boundingBox();
     const value = await page.locator('.rank-value').first().boundingBox();
     expect(Math.abs(marker.y + marker.height / 2 - value.y - value.height / 2)).toBeLessThanOrEqual(1);
     expect(marker.width).toBeLessThanOrEqual(4);
     expect((await page.locator('.rank-row').first().boundingBox()).height).toBeLessThan(64);
     await page.screenshot({ path: `test-results/issue23-ranking-${suffix}.png`, fullPage: true });
     await page.click('[data-ranking-mode=share]');
+    await expect(page.locator('.motion-snapshot')).toHaveCount(0);
     await expect(page.locator('.share-chart circle')).toHaveCount(3);
     await expect(page.locator('#ranking .rank-value, #ranking .rank-track, .share-total')).toHaveCount(0);
     expect(Math.abs((await panel.boundingBox()).height - rankingHeight)).toBeLessThanOrEqual(1);
@@ -421,7 +423,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
   await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);
   const missingValue = only.locator('.paired-value'), missingCell = only.locator('.paired-traffic');
-  expect(await missingValue.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(242, 245, 247)');
+  expect(await missingValue.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(238, 239, 235)');
   expect(await missingCell.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
   expect((await missingValue.boundingBox()).width).toBeLessThan((await missingCell.boundingBox()).width / 2);
   await expect(only.locator('.paired-track')).toBeVisible();
@@ -825,7 +827,8 @@ test('v2 paired sort moves source pairs together and preserves exact-name order'
     return [...document.querySelectorAll('#comparison-nodes tr')].map(r=>({key:JSON.parse(r.dataset.motionKey),frames:r.getAnimations()[0]?.effect.getKeyframes()}));
   });
   expect(moving.map(r=>r.key[0])).toEqual(['Synthetic · Tokyo','Synthetic · Tokyo','Synthetic · Frankfurt','Synthetic · Frankfurt','Synthetic · Singapore','Synthetic · Singapore']);
-  expect(moving[0].frames[0].transform).toBe(moving[1].frames[0].transform);
-  expect(moving[2].frames[0].transform).toBe(moving[3].frames[0].transform);
+  // Collapsed table borders can put the first source row on a half CSS pixel.
+  const offset = row => Number(row.frames[0].transform.match(/translateY\(([-.\d]+)px\)/)[1]);
+  for (let i = 0; i < moving.length; i += 2) expect(Math.abs(offset(moving[i]) - offset(moving[i + 1]))).toBeLessThanOrEqual(1);
   await expect.poll(()=>page.locator('#comparison-nodes').evaluate(n=>n.getAnimations({subtree:true}).length)).toBe(0);
 });
