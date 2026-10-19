@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections.ObjectModel;
 using System.Text.Json;
 
 namespace V2rayNMonitor.Core;
@@ -21,7 +22,7 @@ public static class SingboxParser
     }
 
     public static bool TryReadConfiguration(ReadOnlyMemory<byte> json, ReadOnlyMemory<byte> statisticsJson,
-        out XrayEffectiveConfiguration? configuration, out string reason)
+        out XrayEffectiveConfiguration? configuration, out string reason, bool allowMemberStatistics = false)
     {
         configuration = null;
         reason = "unsupported_mode";
@@ -47,7 +48,12 @@ public static class SingboxParser
             if (address.Length == 0 || !port.TryGetInt32(out var number) || number is < 1 or > 65535
                 || Text(proxy, "password").Length == 0) return false;
             reason = "invalid_statistics_configuration";
-            if (!TryReadStatisticsEndpoint(statisticsJson, out var endpoint)) return false;
+            Uri? endpoint;
+            if (allowMemberStatistics)
+            {
+                if (!TryReadMemberStatisticsSettings(statisticsJson, out endpoint, out _)) return false;
+            }
+            else if (!TryReadStatisticsEndpoint(statisticsJson, out endpoint)) return false;
             // The approved core counts the route-matched tag. A group selecting proxy is
             // still outside this counter; extra outbounds cannot broaden its attribution.
             var uncollected = entries.Where(x => Text(x, "tag") != "proxy"
@@ -82,6 +88,98 @@ public static class SingboxParser
             return true;
         }
         catch (JsonException) { return false; }
+    }
+
+    public static bool TryReadMemberStatisticsSettings(ReadOnlyMemory<byte> json, out Uri? endpoint,
+        out IReadOnlyList<string> members)
+    {
+        endpoint = null; members = [];
+        if (json.Length is <= 0 or > 4096) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !UniqueKeys(root)) return false;
+            if (root.EnumerateObject().Any(x => x.Name is not ("listen" or "monitor_members"))) return false;
+            if (!TryReadStatisticsEndpoint(JsonSerializer.SerializeToUtf8Bytes(new { listen = Text(root, "listen") }), out endpoint)) return false;
+            var field = Read(root, "monitor_members");
+            if (field.ValueKind == JsonValueKind.Undefined) return true; // Explicit mode, disabled member counters stay missing.
+            if (field.ValueKind != JsonValueKind.Array || field.GetArrayLength() == 0) return false;
+            var values = field.EnumerateArray().Select(x => x.ValueKind == JsonValueKind.String ? x.GetString()! : "").ToArray();
+            if (values.Any(x => string.IsNullOrWhiteSpace(x) || x.Contains(">>>", StringComparison.Ordinal)) ||
+                values.Distinct(StringComparer.Ordinal).Count() != values.Length) return false;
+            members = values; return true;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    /// <summary>
+    /// Projects candidates from a configuration bound to an already verified routed-proxy snapshot.
+    /// This does not verify a running core, enable collection, or map other members to subscriptions.
+    /// </summary>
+    public static bool TryReadMemberCatalog(XraySnapshot snapshot, ReadOnlyMemory<byte> configurationJson,
+        out SingboxMemberCatalog? catalog, out string reason)
+    {
+        catalog = null;
+        reason = "snapshot_changed";
+        if (snapshot.CoreName != "sing-box" || string.IsNullOrEmpty(snapshot.InstanceId)
+            || !snapshot.Generation.StartsWith(XrayParser.Hash(configurationJson.Span) + ":", StringComparison.Ordinal)) return false;
+        reason = "unsupported_configuration";
+        try
+        {
+            using var doc = JsonDocument.Parse(configurationJson);
+            var root = doc.RootElement;
+            if (!UniqueKeys(root) || !Empty(Read(root, "endpoints"))) return false;
+            var inbounds = Read(root, "inbounds");
+            if (inbounds.ValueKind == JsonValueKind.Array && inbounds.EnumerateArray().Any(x => Text(x, "type") == "tun")) return false;
+            var outbounds = Read(root, "outbounds");
+            if (outbounds.ValueKind != JsonValueKind.Array) return false;
+            var entries = outbounds.EnumerateArray().ToArray();
+            if (entries.Any(x => Text(x, "tag").Length == 0 || Text(x, "type").Length == 0)
+                || entries.Select(x => Text(x, "tag")).Distinct(StringComparer.Ordinal).Count() != entries.Length) return false;
+            var candidates = new Dictionary<string, SingboxMemberIdentity>(StringComparer.Ordinal);
+            var unavailable = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var entry in entries)
+            {
+                var tag = Text(entry, "tag");
+                var type = Text(entry, "type");
+                var unavailableReason = tag.Contains(">>>", StringComparison.Ordinal) ? "invalid_statistics_tag"
+                    : !Empty(Read(entry, "detour")) ? "dependent_outbound"
+                    : type is "selector" or "urltest" ? "group_not_member"
+                    : type == "direct" ? "excluded_outbound"
+                    : type is not ("socks" or "http" or "shadowsocks" or "vmess" or "vless" or "trojan" or "anytls" or "hysteria2" or "tuic")
+                        ? "unsupported_member_type" : null;
+                if (unavailableReason is not null) unavailable.Add(tag, unavailableReason);
+                else
+                {
+                    var nodeId = tag == "proxy" && type == "anytls" && !string.IsNullOrEmpty(snapshot.NodeId)
+                        ? snapshot.NodeId : null;
+                    candidates.Add(tag, new(tag, type, nodeId)
+                    { DisplayName = nodeId is null ? MemberDisplayName(entries, tag) : null });
+                }
+            }
+            catalog = new(snapshot.InstanceId, snapshot.Generation, snapshot.ProcessIdentity,
+                new ReadOnlyDictionary<string, SingboxMemberIdentity>(candidates),
+                new ReadOnlyDictionary<string, string>(unavailable));
+            reason = "ready";
+            return true;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { return false; }
+    }
+
+    private static string? MemberDisplayName(JsonElement[] entries, string tag)
+    {
+        JsonElement[] Parents(string type) => entries.Where(x => Text(x, "type") == type
+            && Read(x, "outbounds") is { ValueKind: JsonValueKind.Array } members
+            && members.EnumerateArray().Any(y => y.ValueKind == JsonValueKind.String && y.GetString() == tag)).ToArray();
+        var parents = Parents("selector");
+        if (parents.Length == 0) parents = Parents("urltest");
+        if (parents.Length != 1) return null; // A shared member does not prove which group routed its traffic.
+        var group = Text(parents[0], "tag");
+        var separator = group.IndexOf("-proxy-", StringComparison.Ordinal);
+        var label = separator > 0 && group[..separator].All(char.IsAsciiDigit) ? group[(separator + 7)..] : group;
+        var member = tag.StartsWith(group + "-", StringComparison.Ordinal) ? tag[(group.Length + 1)..] : tag;
+        return $"【{label}】 {member}";
     }
 
     public static bool MatchesSelectedConnection(IReadOnlyDictionary<string, string?> profile,

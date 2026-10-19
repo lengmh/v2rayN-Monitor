@@ -30,6 +30,74 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('probe view separates dimensions and keeps a readable desktop and mobile layout', async ({ page }) => {
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic collector', demo: false,
+      currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'partial', message: 'Synthetic missing probe counter remains unknown' } })),
+    '/api/history': (route, request, url) => route.fulfill(json(url.searchParams.has('basis')
+      ? { ...history, basis: url.searchParams.get('basis'), earliestRecord: '2026-10-01T00:00:00Z',
+        upload: '1024', download: '3072', recordCount: 1,
+        nodes: [{ key: 'scope:7', name: 'Synthetic probe member', upload: '1024', download: '3072' }],
+        series: [{ label: '2026-10-01', upload: '1024', download: '3072' }],
+        records: [{ ...history.records[0], nodeKey: 'scope:7', nodeName: 'Synthetic probe member',
+          start: '2026-10-01T00:00:00Z', end: '2026-10-01T00:01:00Z', upload: '1024', download: '3072' }] } : history))
+  });
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#statistics-title')).toHaveText('探测流量');
+  await expect(page.locator('#total-exact')).toHaveText('4,096 bytes');
+  await expect(page.locator('#probe-state')).toHaveText('探测部分采集');
+  await expect(page.locator('#probe-coverage')).toContainText('不是精确的首次基线');
+  await expect(page.locator('#source-controls')).toBeHidden();
+  for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/probes-${suffix}.png`, fullPage: true });
+  }
+  await page.selectOption('#probe-basis', 'probe_urltest_excluded');
+  await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('basis')).toBe('probe_urltest_excluded');
+  await page.click('.nav-item[data-view=overview]');
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+  expect(calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.has('basis')).toBe(false);
+});
+test('member group labels wrap fully and local details request nonzero rows', async ({ page }) => {
+  const name = '【US-1x】 1-Synthetic member with a deliberately long readable name for the ranking';
+  const calls = await mock(page, {
+    '/api/history': route => route.fulfill(json({ ...history, basis: 'actual_member', recordCount: 1,
+      nodes: [{ ...history.nodes[0], name }], records: [{ ...history.records[0], nodeName: name }] }))
+  });
+  expect(calls.find(x => x.path === '/api/history').url.searchParams.get('nonZeroRecords')).toBe('true');
+  await expect(page.locator('#record-count')).toHaveText('1 条非零记录');
+  for (const [width, height, suffix] of [[1200, 1000, 'desktop'], [390, 844, 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    const label = page.locator('.rank-node').first();
+    await expect(label).toHaveText(name);
+    expect(await label.evaluate(el => el.scrollWidth <= el.clientWidth + 1 && getComputedStyle(el).whiteSpace === 'normal')).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/member-label-${suffix}.png`, fullPage: true });
+  }
+});
+test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray proxy',
+      currentNode: 'Synthetic Xray', collectionBasis: 'legacy_proxy', demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null })),
+    '/api/history': route => route.fulfill(json({ ...history, basis: 'local_proxy',
+      nodes: [{ ...history.nodes[0], name: 'Synthetic sing-box history' },
+        { ...history.nodes[1], name: 'Synthetic Xray history' }] }))
+  });
+  await expect(page.locator('#ranking')).toContainText('Synthetic sing-box history');
+  await expect(page.locator('#ranking')).toContainText('Synthetic Xray history');
+  await expect(page.locator('#attribution-note')).toContainText('切换核心不隐藏记录');
+  for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
+    await page.setViewportSize({ width, height });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/cross-core-${suffix}.png`, fullPage: true });
+  }
+  await page.click('.nav-item[data-view=settings]');
+  await expect(page.locator('#settings-view')).not.toContainText('test.2');
+  await expect(page.locator('#settings-view')).toContainText('策略组实际成员');
+});
 test('partial sing-box coverage is visible on desktop and mobile after collection resumes', async ({ page }) => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
   await mock(page, {
@@ -44,7 +112,7 @@ test('partial sing-box coverage is visible on desktop and mobile after collectio
   await expect(page.locator('#collector-message')).toContainText(description);
   await expect(page.locator('#records')).toContainText('部分出站');
   await page.locator('#quality-summary').click();
-  await expect(page.locator('#quality-notice')).toContainText('组和其他代理的流量未知');
+  await expect(page.locator('#quality-notice')).toContainText('未覆盖范围的流量未知');
   await page.locator('#gap-summary').click();
   await expect(page.locator('#gap-list')).toContainText('其他出站未采集，流量未知');
   await page.screenshot({ path: 'test-results/partial-singbox-desktop.png', fullPage: true });
@@ -108,7 +176,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await page.click('[data-period=day]');
   await expect(page.locator('#bucket')).toHaveValue('hour');
   await expect(page.locator('#comparison-chart .comparison-bar')).toHaveCount(2);
-  expect(await page.locator('#comparison-chart .comparison-bar').first().evaluate(node => parseFloat(getComputedStyle(node).height))).toBeGreaterThan(0);
+  await expect.poll(() => page.locator('#comparison-chart .comparison-bar').first().evaluate(node => parseFloat(getComputedStyle(node).height))).toBeGreaterThan(0);
   await page.screenshot({ path: 'test-results/comparison-desktop.png', fullPage: true });
   await page.selectOption('#node-filter', 'Synthetic shared node');
   await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('nodeName')).toBe('Synthetic shared node');

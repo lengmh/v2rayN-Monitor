@@ -45,23 +45,132 @@ test('partial route coverage stays explicit in live status and historical record
   assert.ok(get('collector-message').textContent.includes(description));
   assert.ok(get('settings-collector-status').textContent.includes(description));
   assert.equal(get('status-dot').classList.contains('connected'), false);
-  assert.ok(get('quality-notice').textContent.includes('组和其他代理的流量未知'));
+  assert.ok(get('quality-notice').textContent.includes('未覆盖范围的流量未知'));
   assert.ok(get('gap-list').textContent.includes('其他出站未采集，流量未知'));
   assert.ok(get('records').textContent.includes('部分出站'));
   assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('Xray partial scope keeps outbound semantics and probe limitation visible', async t => {
+  const description = '仅采集 Xray proxy 出站自身的累计字节，包含策略组选中该出站的连接；其他出站未采集，内部探测未单独区分。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Xray proxy', currentNode: 'Synthetic Xray', lastSample: null,
+      uploadPerSecond: null, downloadPerSecond: null, demo: false, collectionBasis: 'legacy_proxy',
+      scope: { basis: 'xray_outbound_proxy', isPartial: true, uncollectedOutbounds: 2, uncollectedGroups: 1, description },
+      probes: { historyEnabled: true, state: 'unsupported', message: '当前 Xray 路径未接入内部探测计量。' } })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.ok(get('collector-message').textContent.includes(description));
+  assert.ok(get('settings-collector-status').textContent.includes(description));
+  assert.equal(get('probe-state').textContent, '当前核心未支持探测计量');
 });
 test('historical scope warning survives pagination and the capped gap details', async t => {
   const { get } = await fixture(t, {
     '/api/history': () => Response.json({ ...history, partialCoverage: true, gapCount: 201,
       gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'identity_change', isOpen: false }] })
   });
-  assert.ok(get('quality-notice').textContent.includes('组和其他代理的流量未知'));
+  assert.ok(get('quality-notice').textContent.includes('未覆盖范围的流量未知'));
   assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('opt-in member basis stays explicit without adding aggregate dimensions', async t => {
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'partial', message: '实际成员维度，缺失不补零。', currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false, collectionBasis: 'actual_member' }),
+    '/api/history': () => Response.json({ ...history, basis: 'actual_member', gapCount: 1,
+      gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:00:00Z', reason: 'unsupported_mode', isOpen: true, origin: 'legacy' }] })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.ok(get('status-dot').classList.contains('partial'));
+  assert.ok(get('quality-notice').textContent.includes('实际成员维度'));
+  assert.ok(get('quality-notice').textContent.includes('直连和汇总分别保存'));
+  assert.ok(get('quality-notice').textContent.includes('历史遗留开放缺口'));
+  assert.ok(get('quality-notice').textContent.includes('接入前累计不回填'));
+  assert.ok(get('attribution-note').textContent.includes('按已核实的节点或出站身份分账'));
+  assert.ok(!get('attribution-note').textContent.includes('test.2'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('probe page keeps basis, filters, export and business navigation separate', async t => {
+  const { w, get, change, calls } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Synthetic collection', demo: false,
+      currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'available', message: 'Synthetic probes available' } }),
+    '/api/history': url => {
+      const basis = url.searchParams.get('basis');
+      return Response.json(basis ? { ...history, basis, upload: '100', download: '23',
+        earliestRecord: '2026-10-01T10:00:00Z',
+        nodes: [{ key: 'scope:99', name: 'Synthetic probe', upload: '100', download: '23' }],
+        records: [{ ...history.records[0], nodeKey: 'scope:99', nodeName: 'Synthetic probe', upload: '100', download: '23' }], recordCount: 1 } : history);
+    },
+    '/api/nodes': url => Response.json(url.searchParams.has('basis') ? [{ key: 'scope:99', name: 'Synthetic probe' }] : [{ key: 'a', name: 'Synthetic A' }])
+  });
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('total-exact').textContent === '123 bytes');
+  assert.equal(get('statistics-title').textContent, '探测流量');
+  assert.equal(get('source-controls').hidden, true);
+  assert.equal(get('probe-controls').hidden, false);
+  assert.ok(get('probe-coverage').textContent.includes('2026-10-01'));
+  assert.ok(get('probe-coverage').textContent.includes('不是精确的首次基线'));
+  assert.ok(get('probe-notice').textContent.includes('不能直接换算服务商计费'));
+  change('node-filter', 'scope:99');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === 'scope:99');
+  for (const basis of ['probe_urltest_business', 'probe_urltest_excluded', 'probe_urltest_unknown']) {
+    change('probe-basis', basis);
+    await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === basis);
+    assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('nodeKey'), false);
+    await until(() => get('total-exact').textContent === '123 bytes');
+  }
+  w.URL.createObjectURL = () => 'blob:synthetic-probes';
+  w.URL.revokeObjectURL = () => {};
+  w.HTMLAnchorElement.prototype.click = () => {};
+  get('export-button').click();
+  await until(() => calls.some(c => c.path === '/api/export'));
+  const exported = calls.find(c => c.path === '/api/export').query;
+  assert.equal(exported.get('basis'), 'probe_urltest_unknown');
+  assert.equal(exported.has('nonZeroRecords'), false);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '16.106 GB');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+  assert.equal(get('probe-notice').hidden, true);
+});
+test('disabled probe history remains unknown without querying or exporting business as probes', async t => {
+  const { w, get, calls } = await fixture(t);
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('total-exact').textContent === '探测量未知');
+  assert.equal(get('total-value').textContent, '—');
+  assert.equal(get('export-button').disabled, true);
+  assert.equal(get('probe-state').textContent, '探测历史未启用');
+  assert.equal(calls.some(c => c.path === '/api/history' && c.query.has('basis')), false);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '16.106 GB');
+  assert.equal(get('export-button').disabled, false);
 });
 test('backend node labels are inserted as text, not HTML', async t => {
   const name = '<img src=x onerror=alert(1)>';
   const { w, get } = await fixture(t, { '/api/history': () => Response.json({ ...history, nodes: [{ ...history.nodes[0], name }], records: [{ ...history.records[0], nodeName: name }] }) });
   assert.ok(get('ranking').textContent.includes(name)); assert.deepEqual([...w.document.querySelectorAll('img')], [w.document.querySelector('.brand > img.brand-symbol')]);
+});
+test('local details request nonzero rows while export retains its raw query', async t => {
+  const { w, calls, get } = await fixture(t, {
+    '/api/history': parsed => Response.json({ ...history, recordCount: 1,
+      records: parsed.searchParams.get('nonZeroRecords') === 'true' ? history.records : [
+        { ...history.records[0], upload: '0', download: '0' }, ...history.records] })
+  });
+  assert.equal(calls.find(c => c.path === '/api/history').query.get('nonZeroRecords'), 'true');
+  assert.equal(get('records').rows.length, 1);
+  assert.equal(get('record-count').textContent, '1 条非零记录');
+  assert.equal(get('next-page').disabled, true);
+  w.URL.createObjectURL = () => 'blob:synthetic-export';
+  w.URL.revokeObjectURL = () => {};
+  w.HTMLAnchorElement.prototype.click = () => {};
+  get('export-button').click();
+  await until(() => calls.some(c => c.path === '/api/export'));
+  assert.equal(calls.find(c => c.path === '/api/export').query.has('nonZeroRecords'), false);
+});
+test('zero-only local details explain that records are hidden without hiding quality warnings', async t => {
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, recordCount: 0, records: [], gapCount: 1,
+      gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', reason: 'snapshot_changed', isOpen: false }] })
+  });
+  assert.ok(get('records').textContent.includes('零字节记录已隐藏'));
+  assert.ok(get('gap-list').textContent.includes('快照'));
 });
 test('custom dates, bucket, node and pagination retain independent semantics', async t => {
   const { w, get, change, calls, submit } = await fixture(t);
@@ -392,9 +501,14 @@ test('provider list preserves large exact decimal values and source names remain
   assert.equal(errors.length, 0);
 });
 
-test('local attribution note states active configuration identity without exposing identifiers', async t => {
-  const { get } = await fixture(t);
-  assert.ok(get('attribution-note').textContent.includes('本机统计按 v2rayN 活动配置归属，连接参数相同的不同 IndexId 分账；名称仅用于展示。'));
+test('local history explains cross-core records without obsolete setup claims', async t => {
+  const { get, w } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, basis: 'local_proxy' })
+  });
+  assert.ok(get('attribution-note').textContent.includes('切换核心不隐藏记录'));
+  assert.ok(get('attribution-note').textContent.includes('同名记录仍按原身份分账'));
+  assert.ok(!w.document.body.textContent.includes('test.2'));
+  assert.ok(!w.document.body.textContent.includes('策略组实际成员、代理链和自定义配置尚未支持'));
 });
 
 test('local minute records show useful small units, exact tooltips and subdued approximation', async t => {
