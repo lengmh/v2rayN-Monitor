@@ -8,7 +8,10 @@ public sealed record TrafficRow(string Start, string End, string NodeKey, string
 {
     public TrafficDisplay? Display { get; init; }
 }
-public sealed record SeriesPoint(string Label, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0");
+public sealed record SeriesPoint(string Label, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0")
+{
+    public TrafficDisplay? Display { get; init; }
+}
 public sealed record NodeTotal(string Key, string Name, string Upload, string Download, string RecoveredUpload = "0", string RecoveredDownload = "0")
 {
     public TrafficDisplay? Display { get; init; }

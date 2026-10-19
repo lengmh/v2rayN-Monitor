@@ -58,11 +58,10 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     internal static Snapshot? Capture(string basis, string? nodeKey, CapturedNodeName? name)
     {
         if (name is null || basis is not ("actual_member" or "legacy_proxy" or "probe_urltest_member")) return null;
-        var rates = new[] { name.OriginalName, name.GroupLabel ?? "" }
-            .SelectMany(x => Regex.Matches(x, @"(?<![\p{L}\p{N}_.])([0-9]+(?:\.[0-9]+)?)\s*(?:[xX×]|倍)(?![\p{L}\p{N}])")
-                .Cast<Match>().Select(m => m.Groups[1].Value)).ToArray();
+        var rates = Regex.Matches(name.OriginalName, @"(?<![\p{L}\p{N}_.])([0-9]+(?:\.[0-9]+)?)\s*(?:[xX×]|倍)(?![\p{L}\p{N}])")
+            .Cast<Match>().Select(m => m.Groups[1].Value).ToArray();
         var parsed = rates.Select(x => ProviderDecimal.TryParse(x, out var value) ? value.ToString() : null).ToArray();
-        var rate = parsed.Length > 0 && parsed.All(x => x is not null) && parsed.Distinct().Count() == 1 ? parsed[0] : null;
+        var rate = parsed.Length == 0 ? "1" : parsed.All(x => x is not null) && parsed.Distinct().Count() == 1 ? parsed[0] : null;
         // Only a verified IndexId can combine outbounds; names and connection similarity cannot.
         return new(name.OriginalName, name.GroupLabel, nodeKey is null ? null : MergeKey(basis, nodeKey), rate);
     }
