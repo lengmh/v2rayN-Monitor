@@ -52,14 +52,29 @@ public static class ScopeCollector
         ArgumentNullException.ThrowIfNull(probes);
         var batch = Project(capture, business, at, invalidateContinuity);
         var enabled = capture.EnabledMembers.ToHashSet(StringComparer.Ordinal);
+        return AppendProbes(batch, probes, enabled, invalidateContinuity);
+    }
+
+    public static ScopeBatch ProjectXrayWithProbes(ScopeCapture capture, V2RayOutboundStatistics outbounds,
+        V2RayProbeStatistics probes, DateTimeOffset at, bool invalidateContinuity = false) =>
+        AppendProbes(ProjectXray(capture, outbounds, at, invalidateContinuity), probes, null, invalidateContinuity);
+
+    private static ScopeBatch AppendProbes(ScopeBatch batch, V2RayProbeStatistics probes, HashSet<string>? enabled,
+        bool invalidateContinuity)
+    {
+        ArgumentNullException.ThrowIfNull(probes);
         var readings = batch.Readings.ToList();
-        foreach (var member in batch.Readings.Where(x => x.Scope.Basis == "actual_member"))
+        foreach (var member in batch.Readings.Where(x => x.Scope.Basis is "actual_member" or "legacy_proxy"))
         {
-            var tag = member.Scope.OutboundTag!;
-            var scope = member.Scope with { Basis = "probe_urltest_member" };
-            var counter = enabled.Contains(tag) ? probes.Members.GetValueOrDefault(tag) : null;
+            var tag = member.Scope.OutboundTag ?? "proxy";
+            var scope = member.Scope.Basis == "legacy_proxy"
+                ? new MeasurementScope("probe_urltest_member", "index_id", member.Scope.NodeId!, member.Scope.Name,
+                    member.Scope.NodeId, tag) { CapturedName = member.Scope.CapturedName }
+                : member.Scope with { Basis = "probe_urltest_member" };
+            var active = enabled is null || enabled.Contains(tag);
+            var counter = active ? probes.Members.GetValueOrDefault(tag) : null;
             readings.Add(new(scope, counter?.Upload, counter?.Download, counter is not null ? null :
-                !enabled.Contains(tag) ? "probe_statistics_disabled" : probes.UnavailableMembers.GetValueOrDefault(tag, "missing_counter"),
+                !active ? "probe_statistics_disabled" : probes.UnavailableMembers.GetValueOrDefault(tag, "missing_counter"),
                 invalidateContinuity, member.PartialCoverage));
         }
         foreach (var total in new[] { "business", "excluded", "unknown" })

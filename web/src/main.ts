@@ -317,9 +317,9 @@ function renderHistory(history: HistoryResult): void {
   statisticLabels();
   const attribution = el('attribution-note');
   attribution.textContent = probeView()
-    ? '探测与业务分别记账。成员和总量分别查看，不重复相加。'
+    ? '探测流字节单独保存。成员和总量分别查看，不重复相加；Xray 原出站累计可能包含探测，不能与本页相加或直接相减。'
     : history.basis === 'local_proxy'
-    ? '包含当前账本中的 sing-box 成员、Xray 独立出站和旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。Xray 出站量尚未单独拆分内部探测。'
+    ? '包含当前账本中的 sing-box 成员、Xray 独立出站和旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。Xray 原出站累计可能包含内部探测，与探测页的流字节不能相加或直接相减。'
     : '按已核实的节点或出站身份分账，名称和策略组前缀仅用于展示。';
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   renderEstimate(history.display);
@@ -336,7 +336,7 @@ function renderHistory(history: HistoryResult): void {
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
   const quality = ['首次采样建立基线，接入前累计不回填；缺失记录不等于零流量。'];
   if (probeView()) {
-    quality.push('当前仅为所选 URLTest 探测维度，不与业务流量或服务商计费相加。');
+    quality.push('当前仅为所选 HTTP 探测维度，不与出站累计或服务商计费相加。');
     put('probe-coverage', history.earliestRecord
       ? `最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}（按分钟显示，不是精确的首次基线）。`
       : '所选维度及节点尚无已保存的探测区间；首次有效采样只建立基线，不回填此前累计。');
