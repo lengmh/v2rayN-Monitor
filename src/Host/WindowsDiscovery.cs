@@ -14,7 +14,7 @@ using V2rayNMonitor.Core;
 namespace V2rayNMonitor.Host;
 
 /// <summary>
-/// Read-only adapter for compatible v2rayN 7.25.1 builds, ordinary single-proxy Xray mode.
+/// Read-only adapter for compatible v2rayN 7.25.1 builds and a verified routed proxy.
 /// Never starts/stops a core or writes its configuration/profile records. SQLite is opened
 /// ReadOnly; SQLite can still participate in the existing database's shared-memory locking.
 /// Real Windows/core integration remains a separate acceptance requirement.
@@ -31,6 +31,8 @@ public sealed class WindowsDiscovery : IDisposable
     }) { Timeout = TimeSpan.FromSeconds(3) };
     private readonly XrayGenerationGuard guard = new();
     private readonly SemaphoreSlim gate = new(1, 1);
+    internal const string ApprovedSingboxSha256 = "C053F7C9D82C7FC241E60045ADFB399A44F4FDEB4E12CEF91C5F95244E3301BA";
+    private string? verifiedExtension;
 
     // The single collection loop calls this only after Ledger.Accept/RecordGap commits.
     public void AcknowledgePersistence() => guard.AcknowledgePersistence();
@@ -52,32 +54,21 @@ public sealed class WindowsDiscovery : IDisposable
             if (!guard.Observe(before, out var reason)) return GuardFailure(reason, before.NodeName);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(3));
-            using var request = new HttpRequestMessage(HttpMethod.Get, before.MetricsEndpoint);
             readingMetrics = true;
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-                return Unknown("interface_unavailable", "Xray 统计接口暂时不可用；当前流量未知。", before.NodeName);
-            if (response.Content.Headers.ContentLength is > MaxMetricsBytes)
-                return Unknown("invalid_metrics", "统计响应超出允许大小；当前流量未知。", before.NodeName);
-            using var responseStream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
-            using var bytes = new MemoryStream();
-            var buffer = new byte[8192];
-            int count;
-            while ((count = await responseStream.ReadAsync(buffer, timeout.Token).ConfigureAwait(false)) != 0)
-            {
-                if (bytes.Length + count > MaxMetricsBytes)
-                    return Unknown("invalid_metrics", "统计响应超出允许大小；当前流量未知。", before.NodeName);
-                bytes.Write(buffer, 0, count);
-            }
+            var counters = before.CoreName == "sing-box"
+                ? await V2RayStatistics.ReadAsync(client, before.MetricsEndpoint, timeout.Token).ConfigureAwait(false)
+                : await ReadXrayCounters(before.MetricsEndpoint, timeout.Token).ConfigureAwait(false);
             var observedAt = DateTimeOffset.UtcNow;
             readingMetrics = false;
             var after = Capture(dataRoot);
             if (!guard.Accept(before, after, out reason)) return GuardFailure(reason, after.NodeName);
-            if (!XrayParser.TryReadCounters(bytes.ToArray(), out var counters))
+            if (counters is null)
                 return Unknown("missing_counters", "proxy 上下行累计计数缺失或无效；未知不能记为零。", after.NodeName);
             return new(new CounterSample(after.InstanceId, after.NodeId, after.NodeName,
-                after.ProcessIdentity, after.Generation, observedAt, counters!.Upload, counters.Download),
-                "connected", "已按 v2rayN 活动配置读取 Xray proxy 原始累计字节。", after.NodeName, guard.RequiresBaseline);
+                after.ProcessIdentity, after.Generation, observedAt, counters!.Upload, counters.Download,
+                after.Scope?.IsPartial == true),
+                "connected", $"已按 v2rayN 活动配置读取 {after.CoreName} proxy 原始累计字节。",
+                after.NodeName, guard.RequiresBaseline, after.CoreName, after.Scope);
         }
         catch (DiscoveryException e)
         {
@@ -87,11 +78,11 @@ public sealed class WindowsDiscovery : IDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         { return Unknown("collector_stopped", "采集已停止；未完成的采样保留为缺口。"); }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        { return Unknown("interface_unavailable", "Xray 统计读取超时；当前流量未知。"); }
+        { return Unknown("interface_unavailable", "内核统计读取超时；当前流量未知。"); }
         catch (HttpRequestException)
-        { return Unknown("interface_unavailable", "Xray 统计接口暂时不可用；当前流量未知。"); }
+        { return Unknown("interface_unavailable", "内核统计接口暂时不可用；当前流量未知。"); }
         catch (IOException) when (readingMetrics)
-        { return Unknown("interface_unavailable", "Xray 统计响应中断；当前流量未知。"); }
+        { return Unknown("interface_unavailable", "内核统计响应中断；当前流量未知。"); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or SqliteException
             or ManagementException or Win32Exception or ArgumentException
             or InvalidOperationException or System.Security.SecurityException)
@@ -104,8 +95,25 @@ public sealed class WindowsDiscovery : IDisposable
         finally { gate.Release(); }
     }
 
+    private async Task<XrayCounters?> ReadXrayCounters(Uri endpoint, CancellationToken cancellationToken)
+    {
+        using var response = await client.GetAsync(endpoint, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode) throw new HttpRequestException("Statistics interface is unavailable.");
+        if (response.Content.Headers.ContentLength is > MaxMetricsBytes) return null;
+        using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var bytes = new MemoryStream();
+        var buffer = new byte[8192];
+        int count;
+        while ((count = await responseStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
+        {
+            if (bytes.Length + count > MaxMetricsBytes) return null;
+            bytes.Write(buffer, 0, count);
+        }
+        return XrayParser.TryReadCounters(bytes.ToArray(), out var counters) ? counters : null;
+    }
+
     [SupportedOSPlatform("windows")]
-    private static XraySnapshot Capture(string root)
+    private XraySnapshot Capture(string root)
     {
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         if (!Path.IsPathFullyQualified(root)) throw Fail("needs_directory", "请选择 v2rayN 数据目录的完整路径。");
@@ -119,7 +127,13 @@ public sealed class WindowsDiscovery : IDisposable
         if (!selection.StatisticsRequested)
             throw Fail("statistics_disabled", "请在 v2rayN 中手动开启流量统计或实时速度显示，并让 v2rayN 重新加载核心。Monitor 不会修改设置。");
         var configBytes = ReadStableFile(configPath, MaxConfigurationBytes, out var configStamp);
-        var node = ReadProfile(databasePath, selection.IndexId, guiBytes, configBytes, out var configuration);
+        var singbox = SingboxParser.HasAnyTlsProxy(configBytes);
+        var statisticsPath = Path.Combine(root, "bin", "sing_box", "monitor-stats.json");
+        FileStamp? statisticsStamp = null;
+        byte[]? statisticsBytes = null;
+        if (singbox && File.Exists(statisticsPath))
+            statisticsBytes = ReadStableFile(statisticsPath, 4096, out statisticsStamp);
+        var node = ReadProfile(databasePath, selection.IndexId, guiBytes, configBytes, out var configuration, statisticsBytes);
         var processes = ReadProcesses();
         var parents = processes.Where(p => p.Name.Equals("v2rayN.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
         // An unreadable candidate cannot be silently discarded in favour of a readable one.
@@ -136,27 +150,53 @@ public sealed class WindowsDiscovery : IDisposable
         var version = FileVersionInfo.GetVersionInfo(parent.ExecutablePath);
         if (version.FileMajorPart != 7 || version.FileMinorPart != 25 || version.FileBuildPart != 1)
             throw Fail("unsupported_version", "当前发现路径仅针对 v2rayN 7.25.1 兼容构建；其他版本尚未核实。");
-        var corePath = Path.Combine(root, "bin", "xray", "xray.exe");
-        var cores = processes.Where(p => p.ParentPid == parent.Pid && p.Name.Equals("xray.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (cores.Length == 0) throw Fail("core_not_running", "未找到该 v2rayN 启动的标准 Xray config.json 进程；其他内核或启动方式暂不支持。");
-        if (cores.Length != 1) throw Fail("ambiguous_instance", "发现多个 Xray 子进程；暂不归属流量。");
+        if (singbox && version.ProductVersion != SingboxParser.ClientVersion)
+            throw Fail("unsupported_version", "AnyTLS 配置核对仅针对已核实的定制 v2rayN 7.25.1 构建；当前客户端版本尚未核实。");
+        var corePath = singbox ? Path.Combine(root, "bin", "sing_box", "sing-box-client.exe")
+            : Path.Combine(root, "bin", "xray", "xray.exe");
+        var cores = processes.Where(p => p.ParentPid == parent.Pid && IsCoreName(p.Name)).ToArray();
+        if (cores.Length == 0) throw Fail("core_not_running", "未找到该 v2rayN 启动的标准 config.json 核心进程。");
+        if (cores.Length != 1) throw Fail("ambiguous_instance", "发现多个核心子进程；暂不归属流量。");
         var core = cores[0];
+        if (singbox && !core.Name.Equals("sing-box-client.exe", StringComparison.OrdinalIgnoreCase))
+            throw Fail("unsupported_core", "当前 sing-box 尚未加载 Monitor 统计扩展；请安装经核实的扩展后择时重新加载核心。");
         if (!ProcessBinding.TryBindCore(parent, core, corePath, ReadArguments(core.CommandLine), out var bindingReason))
             throw ProcessFailure(bindingReason);
         var coreStartedAt = core.StartedAt!.Value;
         var parentStartedAt = parent.StartedAt!.Value;
         var listenerIdentity = ReadListenerIdentity(configuration!.MetricsEndpoint, core.Pid);
-        if (Stamp(guiPath) != guiStamp || Stamp(configPath) != configStamp)
+        if (singbox) VerifyExtension(core);
+        if (Stamp(guiPath) != guiStamp || Stamp(configPath) != configStamp
+            || (singbox && Stamp(statisticsPath) != statisticsStamp))
             throw Fail("snapshot_changed", "配置在读取过程中发生变化；本次采样保留为缺口。");
         var instanceId = XrayParser.Hash(root.ToUpperInvariant());
         var processIdentity = XrayParser.Hash(string.Join('|', core.Pid, coreStartedAt.UtcTicks, core.ExecutablePath.ToUpperInvariant(),
             parent.Pid, parentStartedAt.UtcTicks, parent.ExecutablePath.ToUpperInvariant()));
         var generation = XrayParser.Hash(configBytes) + ":" + configStamp.WrittenAt.UtcTicks.ToString(CultureInfo.InvariantCulture);
+        if (singbox) generation += ":" + XrayParser.Hash(statisticsBytes!) + ":" + statisticsStamp!.WrittenAt.UtcTicks;
+        var writtenAt = singbox && statisticsStamp!.WrittenAt > configStamp.WrittenAt ? statisticsStamp.WrittenAt : configStamp.WrittenAt;
         return new(instanceId, selection.IndexId, node, processIdentity, generation, coreStartedAt,
-            configStamp.WrittenAt, listenerIdentity, configuration.MetricsEndpoint);
+            writtenAt, listenerIdentity, configuration.MetricsEndpoint, configuration.CoreName, configuration.Scope);
     }
 
-    internal static string ReadProfile(string path, string indexId, byte[] guiBytes, byte[] configBytes, out XrayEffectiveConfiguration configuration)
+    private void VerifyExtension(ProcessInfo core)
+    {
+        var stamp = Stamp(core.ExecutablePath);
+        var identity = string.Join('|', core.Pid, core.StartedAt!.Value.UtcTicks, core.ExecutablePath, stamp);
+        if (identity == verifiedExtension) return;
+        using var stream = new FileStream(core.ExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+        if (hash != ApprovedSingboxSha256 || Stamp(core.ExecutablePath) != stamp)
+            throw Fail("unsupported_core", "sing-box 扩展与此预览已核实的构建不一致；当前流量保持未知。");
+        verifiedExtension = identity;
+    }
+
+    private static bool IsCoreName(string name) => name.Equals("xray.exe", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("sing-box.exe", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("sing-box-client.exe", StringComparison.OrdinalIgnoreCase);
+
+    internal static string ReadProfile(string path, string indexId, byte[] guiBytes, byte[] configBytes,
+        out XrayEffectiveConfiguration configuration, byte[]? statisticsBytes = null)
     {
         configuration = null!;
         if (!File.Exists(path)) throw Fail("missing_database", "所选目录中没有 guiConfigs/guiNDB.db。");
@@ -190,16 +230,23 @@ public sealed class WindowsDiscovery : IDisposable
             name = reader.IsDBNull(1) ? "" : reader.GetString(1);
             type = reader.GetInt32(2);
             coreType = reader.IsDBNull(3) ? null : reader.GetInt32(3);
-            if (type == 11)
-                throw Fail("unsupported_core", "此版本的 AnyTLS 使用 sing-box，当前 Xray 采集器尚未覆盖；流量保持未知。");
+            if (type == 11 && statisticsBytes is null)
+                throw Fail("unsupported_core", "此版本的 AnyTLS 需要 Monitor 统计扩展及回环端点文件；当前流量保持未知。");
             // Classify the selected protocol before parsing Xray-only fields so AnyTLS does
             // not misleadingly ask the user to enable Xray metrics in a sing-box config.
-            if (!XrayParser.TryReadConfiguration(configBytes, out var parsedConfiguration, out var configurationReason))
-                throw configurationReason is "statistics_unavailable" or "statistics_disabled"
+            var parsed = type == 11
+                ? SingboxParser.TryReadConfiguration(configBytes, statisticsBytes!, out var parsedConfiguration, out var configurationReason)
+                : XrayParser.TryReadConfiguration(configBytes, out parsedConfiguration, out configurationReason);
+            if (!parsed)
+                throw configurationReason == "invalid_statistics_configuration"
+                    ? Fail(configurationReason, "Monitor 统计端点文件无效；仅允许一个数值回环地址及非零端口，当前流量保持未知。")
+                    : configurationReason is "statistics_unavailable" or "statistics_disabled"
                     ? Fail(configurationReason, "有效配置没有可用的回环 Xray metrics 统计；请在 v2rayN 中检查统计设置。")
+                    : type == 11
+                    ? Fail("unsupported_mode", "无法核实独立的 AnyTLS proxy 计量范围；proxy 链、TUN、endpoints 或已有自定义统计配置尚未支持。")
                     : Fail("unsupported_mode", "仅支持可核实的单 proxy 出站；自定义配置、策略组、代理链和多代理出站暂不支持。");
             configuration = parsedConfiguration!;
-            if (XrayParser.ProtocolForConfigType(type) != configuration.Protocol)
+            if ((type == 11 ? "anytls" : XrayParser.ProtocolForConfigType(type)) != configuration.Protocol)
                 throw Fail("unsupported_mode", "当前节点类型或内核与已读取的 Xray 配置不一致。");
             address = reader.GetString(4);
             port = reader.GetInt32(5);
@@ -209,11 +256,15 @@ public sealed class WindowsDiscovery : IDisposable
                 selectedFields.Add(reader.GetName(i), reader.IsDBNull(i) ? null : reader.GetString(i));
             if (reader.Read()) throw Fail("ambiguous_node", "当前节点标识不唯一；暂不采集。");
         }
-        if (!XrayParser.TryProfileIdentity(type, coreType, address, port, password, username, out var identity))
+        var identity = type == 11 ? XrayParser.ServerIdentity("anytls", address, port, "", password) : "";
+        if (type != 11 && !XrayParser.TryProfileIdentity(type, coreType, address, port, password, username, out identity))
             throw Fail("unsupported_mode", "当前节点类型或内核与已读取的 Xray 配置不一致。");
         if (identity != configuration.ServerIdentity)
             throw Fail("mapping_changed", "当前节点与核心有效配置不一致；等待重新加载后再采集。");
-        if (!XrayParser.MatchesSelectedConnection(selectedFields, guiBytes, configBytes, out var matchReason))
+        var matches = type == 11
+            ? SingboxParser.MatchesSelectedConnection(selectedFields, guiBytes, configBytes, out var matchReason)
+            : XrayParser.MatchesSelectedConnection(selectedFields, guiBytes, configBytes, out matchReason);
+        if (!matches)
             throw matchReason == "unsupported_connection"
                 ? Fail(matchReason, "当前连接包含尚未核实的配置字段；本次采样保留为缺口。")
                 : Fail("mapping_changed", "活动配置的协议、传输或 TLS 字段与核心有效配置不一致；等待重新加载后再采集。");
@@ -246,7 +297,7 @@ public sealed class WindowsDiscovery : IDisposable
     private static List<ProcessInfo> ReadProcesses()
     {
         var result = new List<ProcessInfo>();
-        using var query = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, CreationDate, ExecutablePath, CommandLine, Name FROM Win32_Process WHERE Name = 'v2rayN.exe' OR Name = 'xray.exe'");
+        using var query = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, CreationDate, ExecutablePath, CommandLine, Name FROM Win32_Process WHERE Name = 'v2rayN.exe' OR Name = 'xray.exe' OR Name = 'sing-box.exe' OR Name = 'sing-box-client.exe'");
         query.Options.Timeout = TimeSpan.FromSeconds(3);
         using var rows = query.Get();
         foreach (ManagementObject row in rows)
@@ -273,9 +324,9 @@ public sealed class WindowsDiscovery : IDisposable
         if (argv == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
         try
         {
-            if (count != 4) return [];
+            if (count is not (4 or 5)) return [];
             string Arg(int index) => Marshal.PtrToStringUni(Marshal.ReadIntPtr(argv, index * IntPtr.Size)) ?? "";
-            return [Arg(0), Arg(1), Arg(2), Arg(3)];
+            return Enumerable.Range(0, count).Select(Arg).ToArray();
         }
         finally { _ = LocalFree(argv); }
     }
@@ -311,7 +362,7 @@ public sealed class WindowsDiscovery : IDisposable
                 if (pid != expectedPid) throw Fail("listener_unverified", "统计端口属于其他进程；暂不读取。");
                 matches++;
             }
-            if (matches != 1) throw Fail("listener_unverified", "未找到唯一的 Xray 回环统计监听；当前流量未知。");
+            if (matches != 1) throw Fail("listener_unverified", "未找到唯一的内核回环统计监听；当前流量未知。");
             return $"{address}:{endpoint.Port}:{expectedPid}";
         }
         finally { Marshal.FreeHGlobal(memory); }
@@ -320,10 +371,10 @@ public sealed class WindowsDiscovery : IDisposable
     private static bool SamePath(string a, string b) => ProcessBinding.SamePath(a, b);
     private static DiscoveryException ProcessFailure(string state) => Fail(state, state switch
     {
-        "process_commandline_unverified" => "普通权限无法读取 Xray 启动命令行，无法核实有效配置归属；本次采样保留为缺口。Monitor 不会自动提权。",
-        "process_path_unverified" => "普通权限无法核实 v2rayN 或 Xray 程序路径；本次采样保留为缺口。Monitor 不会自动提权。",
+        "process_commandline_unverified" => "普通权限无法读取内核启动命令行，无法核实有效配置归属；本次采样保留为缺口。Monitor 不会自动提权。",
+        "process_path_unverified" => "普通权限无法核实 v2rayN 或内核程序路径；本次采样保留为缺口。Monitor 不会自动提权。",
         "process_identity_changed" => "进程身份或启动信息在读取时不一致；本次采样保留为缺口。",
-        "process_binding_mismatch" => "Xray 父子进程、程序路径或标准启动命令不匹配；不猜测有效配置归属。",
+        "process_binding_mismatch" => "内核父子进程、程序路径或标准启动命令不匹配；不猜测有效配置归属。",
         _ => "无法只读核实进程创建身份；本次采样保留为缺口。"
     });
     private CollectorReading Unknown(string state, string message, string? node = null) => new(null, state, message, node, guard.RequiresBaseline);

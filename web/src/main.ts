@@ -103,12 +103,14 @@ function selectPeriod(next: Period): void {
 function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
   const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
-  put('collector-state', states[status.state.toLowerCase()] || status.state);
-  put('collector-message', status.message || '等待有效采样。');
+  const state = status.scope?.isPartial ? '部分采集' : states[status.state.toLowerCase()] || status.state;
+  const message = [status.message || '等待有效采样。', status.scope?.description].filter(Boolean).join(' ');
+  put('collector-state', state);
+  put('collector-message', message);
   put('current-node', status.currentNode || '未确定'); el('current-node').title = status.currentNode || '未确定';
   put('live-upload', `↑ ${rate(status.uploadPerSecond, unit)}`); put('live-download', `↓ ${rate(status.downloadPerSecond, unit)}`);
-  put('settings-collector-status', `当前状态：${states[status.state.toLowerCase()] || status.state}。${status.message} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
-  el('status-dot').className = `status-dot ${['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
+  put('settings-collector-status', `当前状态：${state}。${message} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
+  el('status-dot').className = `status-dot ${status.scope?.isPartial ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
   show('demo-notice', status.demo); show('demo-controls', status.demo);
 }
 function renderNodes(nodes: NodeInfo[]): void {
@@ -175,6 +177,8 @@ function renderHistory(history: HistoryResult): void {
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
   const quality = ['已知总量不等于完整使用量；缺失记录不等于零流量。'];
+  if (history.partialCoverage || (history.gaps ?? []).some(gap => gap.reason === 'uncollected_outbounds') || history.records.some(record => record.partialCoverage))
+    quality.push('本范围包含其他出站未采集的区间；组和其他代理的流量未知，合计仅包含已核实的计量范围。');
   if (recovered > 0n) quality.push(`合计及节点排行已包含恢复量 ${formatBytes(recovered, unit)}（${exactBytes(recovered)}）。`);
   if (unbucketed > 0n) quality.push(`其中 ${formatBytes(unbucketed, unit)} 跨越多个时间桶，已计入合计，尚未分配到当前趋势图。`);
   if (partial > 0n) quality.push(`另有部分重叠的恢复区间，共 ${formatBytes(partial, unit)}（${exactBytes(partial)}）；本范围内用量未知，未计入合计，不能跨日期相加。`);
@@ -182,7 +186,7 @@ function renderHistory(history: HistoryResult): void {
   put('quality-notice', quality.join(' '));
   put('quality-summary', recovered > 0n ? `已知合计包含 ${formatBytes(recovered, unit)} 恢复量` : history.gapCount ? `本范围有 ${history.gapCount} 段历史采集间断` : '统计口径与数据说明');
   const details = el('gap-list'); details.replaceChildren();
-  const reasons: Record<string, string> = { long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
+  const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
   for (const gap of history.gaps ?? []) details.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
   show('gap-details', history.gapCount > 0);
   put('gap-summary', `查看历史间断（${history.gapCount} 段，最多展示最近 200 段）`);
@@ -215,7 +219,7 @@ function renderHistory(history: HistoryResult): void {
     const download = recordTrafficCell(record.download);
     const upload = recordTrafficCell(record.upload);
     const approximate = ['approximate', 'estimated', 'interpolated', 'apportioned'].includes(record.quality);
-    const qualityCell = element('td'); const label = element('span', labels[record.quality] || record.quality, `quality-pill ${['exact', 'normal', 'measured'].includes(record.quality) ? '' : approximate ? 'approximate' : 'warning'}`);
+    const qualityCell = element('td'); const label = element('span', (labels[record.quality] || record.quality) + (record.partialCoverage ? ' · 部分出站' : ''), `quality-pill ${record.partialCoverage ? 'warning' : ['exact', 'normal', 'measured'].includes(record.quality) ? '' : approximate ? 'approximate' : 'warning'}`);
     if (approximate) label.title = '区间流量按分钟分配，分时用量为近似值；原始总量保持不变。';
     if (record.quality === 'recovered-partial') label.title = '恢复区间仅与当前查询范围部分重叠，范围内用量未知，未计入本范围合计。';
     qualityCell.append(label);

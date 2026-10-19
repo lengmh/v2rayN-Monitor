@@ -13,3 +13,5 @@ The original v2rayN Monitor code is MIT licensed. It uses these separately licen
 | xUnit (test tool) | Apache-2.0 | https://github.com/xunit/xunit |
 
 License texts for distributed runtime components are in `licenses/` and included in the portable archive. Package versions are specified in project files and `web/package-lock.json`. Frontend code is original vanilla TypeScript; build/test tools are not installed on end-user machines.
+
+The optional experimental sing-box core is a separate GPLv3 program. Its source patch, license, exact revision and build instructions are in `extensions/sing-box/`. The Monitor portable archive does not contain this core binary.
