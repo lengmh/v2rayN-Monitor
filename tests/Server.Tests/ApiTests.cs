@@ -13,6 +13,7 @@ public sealed class ApiTests : IAsyncLifetime
     {
         Directory.CreateDirectory(Path.Combine(root, "web"));
         File.WriteAllText(Path.Combine(root, "web", "index.html"), "<!doctype html><title>Synthetic test</title>");
+        using (new V2rayNMonitor.Core.Ledger(Path.Combine(root, "history.db"))) { } // Existing unextended v1 fixture.
         server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
         client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
     }
@@ -23,11 +24,317 @@ public sealed class ApiTests : IAsyncLifetime
         var response = await client.PostAsJsonAsync("/api/session", new { token });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
+    [Fact]
+    public async Task DisplaySnapshotsKeepHistoricalNameFiltersAndExactEstimatesInExport()
+    {
+        await server.DisposeAsync(); client.Dispose();
+        V2rayNMonitor.Core.ScopeLedgerMigration.InitializeDisplay(Path.Combine(root, "history.db"), Path.Combine(root, "display-backup.db"));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        for (var i = 0; i < 4; i++)
+            server.Ledger.Accept(new("synthetic", "node", i < 2 ? "Original 0.5x" : "Renamed 2倍",
+                "core", "config", at.AddSeconds(i), i * 10, 0));
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.True(history.GetProperty("displayMetadataEnabled").GetBoolean());
+        Assert.Equal("25", history.GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("25", history.GetProperty("series")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("10", history.GetProperty("display").GetProperty("estimateUnknownBytes").GetString());
+        var old = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeName=Original%200.5x");
+        Assert.Equal("10", old.GetProperty("upload").GetString());
+        Assert.Equal("5", old.GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("5", old.GetProperty("comparisonNodes")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        var csv = await client.GetStringAsync("/api/export" + query + "&nodeName=Original%200.5x");
+        Assert.Contains("original_name,group_labels,rate,estimated_billed_bytes,estimate_covered_bytes,estimate_unknown_bytes", csv);
+        Assert.Contains("\"Original 0.5x\",\"\",\"0.5\",\"5\",\"10\",\"0\"", csv);
+        Assert.DoesNotContain("Renamed", csv);
+    }
+
+    [Fact]
+    public async Task ScopeDisplayFiltersUseVerifiedOpaqueKeysAndCapturedNames()
+    {
+        await server.DisposeAsync(); client.Dispose();
+        var path = Path.Combine(root, "history.db");
+        V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(path, Path.Combine(root, "v1-before-scope.db"));
+        V2rayNMonitor.Core.ScopeLedgerMigration.InitializeDisplay(path, Path.Combine(root, "display-backup.db"));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var scope = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "private-synthetic-index",
+            "【US-0.5x】 1-Original", "private-synthetic-index", "proxy")
+            { CapturedName = new("Original", "US-0.5x") };
+        foreach (var second in new[] { 0, 1 })
+            server.Scopes!.Accept(new("synthetic", "core", "config", at.AddSeconds(second), [new(scope, second * 11, 0)], []));
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        var merge = history.GetProperty("nodes")[0].GetProperty("display").GetProperty("mergeKey").GetString()!;
+        Assert.DoesNotContain("private-synthetic-index", history.GetRawText());
+        var named = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeName=Original");
+        Assert.Equal("11", named.GetProperty("upload").GetString());
+        Assert.Equal("11", named.GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("1", named.GetProperty("display").GetProperty("rate").GetString());
+        Assert.Equal("11", named.GetProperty("comparisonNodes")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        Assert.Equal("11", named.GetProperty("series")[0].GetProperty("display").GetProperty("estimatedBilledBytes").GetString());
+        var grouped = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeKey=" + Uri.EscapeDataString("merge:" + merge));
+        Assert.Equal("11", grouped.GetProperty("upload").GetString());
+        var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
+        Assert.Equal("Original", nodes[0].GetProperty("name").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&nodeKey=merge:unverified")).StatusCode);
+    }
+    [Fact] public async Task OptInScopeApiKeepsDimensionsSeparateAndExportCarriesBasis()
+    {
+        await server.DisposeAsync();
+        client.Dispose();
+        V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/scope-history")).StatusCode);
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var member = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "synthetic-id", " =Synthetic member", "synthetic-id", "proxy");
+        var business = new V2rayNMonitor.Core.MeasurementScope("business", "aggregate", "business", "Synthetic business");
+        var scopes = server.Scopes!;
+        scopes.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at,
+            [new(member, 0, 0), new(business, 0, 0)], []));
+        scopes.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at.AddSeconds(1),
+            [new(member, 9007199254740993, 7), new(business, 9007199254740999, 20)], []));
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("local_proxy", history.GetProperty("basis").GetString());
+        Assert.Equal("9007199254740993", history.GetProperty("upload").GetString());
+        var filtered = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeName=" + Uri.EscapeDataString(" =Synthetic member"));
+        Assert.Equal("9007199254740993", filtered.GetProperty("upload").GetString());
+        var aggregate = await client.GetFromJsonAsync<JsonElement>("/api/scope-history" + query + "&basis=business");
+        Assert.Equal("business", aggregate.GetProperty("basis").GetString());
+        Assert.Equal("9007199254740999", aggregate.GetProperty("upload").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/scope-history" + query)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/scope-history" + query + "&basis=all")).StatusCode);
+        var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
+        Assert.StartsWith("scope:", nodes[0].GetProperty("key").GetString());
+        Assert.False(nodes[0].TryGetProperty("identityValue", out _)); // No configuration digest/IndexId leaked by the public list.
+        var csv = await client.GetStringAsync("/api/export" + query);
+        Assert.Contains("quality,basis,scope_key", csv);
+        Assert.Contains("\"actual_member\"", csv);
+        Assert.Contains("\"scope:", csv);
+        Assert.Contains("' =Synthetic member", csv);
+        Assert.Contains("9007199254740993", csv);
+    }
+
+    [Fact] public async Task LocalHistoryKeepsBothCoreHistoriesAcrossCurrentCoreChanges()
+    {
+        await server.DisposeAsync();
+        client.Dispose();
+        V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var member = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "synthetic-member", "Same synthetic name", "synthetic-member", "proxy");
+        var legacy = new V2rayNMonitor.Core.MeasurementScope("legacy_proxy", "legacy_node", "synthetic/synthetic-xray",
+            "Same synthetic name", "synthetic-xray");
+        var aggregate = new V2rayNMonitor.Core.MeasurementScope("business", "aggregate", "business", "Synthetic total");
+        server.Scopes!.Accept(new("synthetic", "singbox", "config", at,
+            [new(member, 0, 0), new(aggregate, 0, 0)], []));
+        server.Scopes.Accept(new("synthetic", "singbox", "config", at.AddSeconds(1),
+            [new(member, 9007199254740993, 7), new(aggregate, 9007199254740993, 7)], []));
+        var retired = server.Scopes.GetScopes("actual_member").Concat(server.Scopes.GetScopes("business")).Select(x => x.Id).ToArray();
+        server.Scopes.Accept(new("synthetic", "xray", "config", at.AddMinutes(1),
+            [new(legacy, 100, 0, PartialCoverage: true)], retired));
+        server.Scopes.Accept(new("synthetic", "xray", "config", at.AddMinutes(1).AddSeconds(1),
+            [new(legacy, 111, 13, PartialCoverage: true)], retired));
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        foreach (var current in new[] { "legacy_proxy", "actual_member" })
+        {
+            server.SetStatus(new("collecting", "Synthetic", null, at, CollectionBasis: current));
+            var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&pageSize=1&nonZeroRecords=true");
+            Assert.Equal("local_proxy", history.GetProperty("basis").GetString());
+            Assert.Equal("9007199254741004", history.GetProperty("upload").GetString());
+            Assert.Equal("20", history.GetProperty("download").GetString());
+            Assert.Equal(2, history.GetProperty("recordCount").GetInt32());
+            Assert.Equal(2, history.GetProperty("nodes").GetArrayLength());
+            Assert.True(history.GetProperty("partialCoverage").GetBoolean());
+            var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
+            Assert.Equal(2, nodes.GetArrayLength());
+            var key = nodes[0].GetProperty("key").GetString();
+            var filtered = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeKey=" + key);
+            Assert.Equal("9007199254740993", filtered.GetProperty("upload").GetString());
+            var named = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nodeName=Same%20synthetic%20name");
+            Assert.Equal("9007199254741004", named.GetProperty("upload").GetString());
+            var second = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&pageSize=1&page=1&nonZeroRecords=true");
+            Assert.NotEqual(history.GetProperty("records")[0].GetProperty("nodeKey").GetString(),
+                second.GetProperty("records")[0].GetProperty("nodeKey").GetString());
+            var csv = await client.GetStringAsync("/api/export" + query);
+            Assert.Contains("\"actual_member\"", csv);
+            Assert.Contains("\"legacy_proxy\"", csv);
+            Assert.DoesNotContain("\"local_proxy\"", csv);
+            Assert.DoesNotContain("Synthetic total", csv);
+        }
+    }
+
+    [Fact] public async Task ProbeHistoryUsesExplicitBasisWhileDefaultHistoryAndExportRemainBusinessOnly()
+    {
+        await server.DisposeAsync();
+        client.Dispose();
+        var provider = File.ReadAllBytes(Path.Combine(root, "provider.db"));
+        V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
+        V2rayNMonitor.Core.ScopeLedgerMigration.MigrateProbes(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v2-backup.db"));
+        Assert.Equal(provider, File.ReadAllBytes(Path.Combine(root, "provider.db")));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useProbeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/scope-history?basis=probe_urltest_member")).StatusCode);
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var member = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "synthetic", "Synthetic business", "synthetic", "proxy");
+        var probe = member with { Basis = "probe_urltest_member", Name = "Synthetic probe" };
+        var aggregate = new V2rayNMonitor.Core.MeasurementScope("probe_urltest_business", "aggregate", "probe_urltest_business", "Synthetic probes");
+        foreach (var second in new[] { 0, 1 })
+            server.Scopes!.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at.AddSeconds(second),
+                [new(member, second * 17, 0), new(probe, second * 9007199254740993, second * 7),
+                 new(aggregate, second * 9007199254740993, second * 7)], []));
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var business = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("17", business.GetProperty("upload").GetString());
+        var probes = await client.GetFromJsonAsync<JsonElement>("/api/scope-history" + query + "&basis=probe_urltest_member");
+        Assert.Equal("probe_urltest_member", probes.GetProperty("basis").GetString());
+        Assert.Equal("9007199254740993", probes.GetProperty("upload").GetString());
+        Assert.Equal("7", probes.GetProperty("download").GetString());
+        var page = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&basis=probe_urltest_member&nonZeroRecords=true");
+        Assert.Equal("9007199254740993", page.GetProperty("upload").GetString());
+        Assert.Equal("Synthetic probe", page.GetProperty("nodes")[0].GetProperty("name").GetString());
+        Assert.StartsWith("2026-01-01T00:00:00", page.GetProperty("earliestRecord").GetString());
+        var probeNodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes?basis=probe_urltest_member");
+        Assert.Single(probeNodes.EnumerateArray());
+        Assert.Equal("Synthetic probe", probeNodes[0].GetProperty("name").GetString());
+        Assert.False(probeNodes[0].TryGetProperty("identityValue", out _));
+        var probeCsv = await client.GetStringAsync("/api/export" + query + "&basis=probe_urltest_member");
+        Assert.Contains("\"probe_urltest_member\"", probeCsv);
+        Assert.Contains("Synthetic probe", probeCsv);
+        Assert.DoesNotContain("Synthetic business", probeCsv);
+        var total = await client.GetFromJsonAsync<JsonElement>("/api/scope-history" + query + "&basis=probe_urltest_business");
+        Assert.Equal(probes.GetProperty("upload").GetString(), total.GetProperty("upload").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.GetAsync("/api/scope-history" + query + "&basis=actual_member,probe_urltest_member")).StatusCode);
+        var csv = await client.GetStringAsync("/api/export" + query);
+        Assert.DoesNotContain("Synthetic probe", csv);
+        Assert.DoesNotContain("probe_urltest", csv);
+        var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
+        Assert.Single(nodes.EnumerateArray());
+        Assert.Equal("Synthetic business", nodes[0].GetProperty("name").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&basis=business")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/nodes?basis=probe_urltest_member&basis=probe_urltest_business")).StatusCode);
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        Assert.True(status.GetProperty("probes").GetProperty("historyEnabled").GetBoolean());
+    }
+
+    [Fact] public async Task ProbeStartupCreatesV3ExplicitlyAndRejectsModeMismatchWithoutMigration()
+    {
+        var fresh = Path.Combine(root, "synthetic-probe-data");
+        await using (var probe = await MonitorServer.StartAsync(fresh, Path.Combine(root, "web"), useProbeLedger: true))
+            Assert.True(probe.Scopes!.SupportsProbes);
+        var v3 = File.ReadAllBytes(Path.Combine(fresh, "history.db"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MonitorServer.StartAsync(fresh, Path.Combine(root, "web"), useScopeLedger: true));
+        Assert.Equal(v3, File.ReadAllBytes(Path.Combine(fresh, "history.db")));
+        var old = Path.Combine(root, "synthetic-member-data");
+        await using (var member = await MonitorServer.StartAsync(old, Path.Combine(root, "web"), useScopeLedger: true))
+            Assert.False(member.Scopes!.SupportsProbes);
+        var v2 = File.ReadAllBytes(Path.Combine(old, "history.db"));
+        var provider = File.ReadAllBytes(Path.Combine(old, "provider.db"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MonitorServer.StartAsync(old, Path.Combine(root, "web"), useProbeLedger: true));
+        Assert.Equal(v2, File.ReadAllBytes(Path.Combine(old, "history.db")));
+        Assert.Equal(provider, File.ReadAllBytes(Path.Combine(old, "provider.db")));
+        await Login();
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        Assert.False(status.GetProperty("probes").GetProperty("historyEnabled").GetBoolean());
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z";
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&basis=probe_urltest_member")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/export" + query + "&basis=probe_urltest_member")).StatusCode);
+    }
+
+    [Fact] public async Task ScopeStartupDoesNotAutomaticallyMigrateOrTouchProviderDatabase()
+    {
+        await server.DisposeAsync();
+        var history = File.ReadAllBytes(Path.Combine(root, "history.db"));
+        var provider = File.ReadAllBytes(Path.Combine(root, "provider.db"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true));
+        Assert.Equal(history, File.ReadAllBytes(Path.Combine(root, "history.db")));
+        Assert.Equal(provider, File.ReadAllBytes(Path.Combine(root, "provider.db")));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NonZeroDetailOptionFiltersPaginationButNeverTotalsOrRawExport(bool scopeMode)
+    {
+        if (scopeMode)
+        {
+            await server.DisposeAsync();
+            client.Dispose();
+            V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-v1-backup.db"));
+            server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+            client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        }
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        foreach (var second in new[] { 0, 1, 61 })
+        {
+            if (scopeMode)
+                server.Scopes!.Accept(new("synthetic-instance", "synthetic-core", "synthetic-config", at.AddSeconds(second),
+                    [new(new("actual_member", "index_id", "active", "Synthetic active", "active", "active"), second == 0 ? 0 : 5, second == 0 ? 0 : 7),
+                     new(new("actual_member", "index_id", "idle", "Synthetic idle", "idle", "idle"), 0, 0)], []));
+            else
+            {
+                server.Ledger.Accept(new("synthetic-active-instance", "active", "Synthetic active", "core", "config", at.AddSeconds(second), second == 0 ? 0 : 5, second == 0 ? 0 : 7));
+                server.Ledger.Accept(new("synthetic-idle-instance", "idle", "Synthetic idle", "core", "config", at.AddSeconds(second), 0, 0));
+            }
+        }
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var all = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        var filtered = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nonZeroRecords=true&pageSize=1");
+        Assert.Equal(4, all.GetProperty("recordCount").GetInt32());
+        Assert.Equal(1, filtered.GetProperty("recordCount").GetInt32());
+        Assert.Equal("5", filtered.GetProperty("records")[0].GetProperty("upload").GetString());
+        foreach (var field in new[] { "upload", "download", "series", "nodes", "gaps" })
+            Assert.Equal(all.GetProperty(field).GetRawText(), filtered.GetProperty(field).GetRawText());
+        var secondPage = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&nonZeroRecords=true&pageSize=1&page=1");
+        Assert.Empty(secondPage.GetProperty("records").EnumerateArray());
+        Assert.Equal(await client.GetStringAsync("/api/export" + query),
+            await client.GetStringAsync("/api/export" + query + "&nonZeroRecords=true"));
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&nonZeroRecords=invalid")).StatusCode);
+    }
+
     [Fact] public async Task ReadAndWriteApisRequireSession()
     {
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/status")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/settings", new { })).StatusCode);
         await Login(); Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/status")).StatusCode);
+    }
+    [Fact] public async Task PartialCollectionIsExplicitInStatusHistoryAndExport()
+    {
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        server.SetStatus(new("collecting", "Synthetic partial collector", "Synthetic node",
+            Scope: new V2rayNMonitor.Core.ProxyCollectionScope(37, 4)));
+        server.Ledger.Accept(new("test", "one", "Synthetic node", "process1", "config1", at, 100, 200, true));
+        server.Ledger.Accept(new("test", "one", "Synthetic node", "process1", "config1", at.AddSeconds(1), 110, 220, true));
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        Assert.Equal("routed_proxy", status.GetProperty("scope").GetProperty("basis").GetString());
+        Assert.True(status.GetProperty("scope").GetProperty("isPartial").GetBoolean());
+        Assert.Equal(37, status.GetProperty("scope").GetProperty("uncollectedOutbounds").GetInt32());
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("10", history.GetProperty("upload").GetString());
+        Assert.Equal("20", history.GetProperty("download").GetString());
+        Assert.True(history.GetProperty("partialCoverage").GetBoolean());
+        Assert.True(history.GetProperty("records")[0].GetProperty("partialCoverage").GetBoolean());
+        Assert.Equal("uncollected_outbounds", history.GetProperty("gaps")[0].GetProperty("reason").GetString());
+        Assert.Contains("measured;uncollected_outbounds", await client.GetStringAsync("/api/export" + query));
     }
     [Fact] public async Task BootstrapTokenIsOneUseAndCookieHttpOnlyStrict()
     {

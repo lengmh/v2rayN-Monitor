@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using V2rayNMonitor.Host;
 using Xunit;
 
@@ -40,6 +41,26 @@ public class LinkedLaunchTests
         Assert.Contains("--background --data-dir ", arguments);
         Assert.Contains(LinkedLaunch.QuoteWindowsArgument(dataDirectory), arguments);
         Assert.Contains("--launch-v2rayn " + LinkedLaunch.QuoteWindowsArgument(executable), arguments);
+        Assert.DoesNotContain("--scope-ledger", arguments);
+        Assert.DoesNotContain("--probe-ledger", arguments);
+    }
+
+    [Theory]
+    [InlineData(false, false, "")]
+    [InlineData(true, false, " --scope-ledger")]
+    [InlineData(false, true, " --probe-ledger")]
+    [InlineData(true, true, " --probe-ledger")]
+    public void PreservesLedgerModeAndQuotedPathsInLinkedArguments(bool scopeMode, bool probeMode,
+        string expectedMode)
+    {
+        var executable = Path.Combine(Path.GetTempPath(), "合成 路径", "v2rayN.exe");
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "Existing Monitor Data");
+
+        var arguments = LinkedLaunch.BuildArguments(executable, dataDirectory, scopeMode, probeMode);
+
+        Assert.Equal("--background" + expectedMode + " --data-dir " +
+            LinkedLaunch.QuoteWindowsArgument(dataDirectory) + " --launch-v2rayn " +
+            LinkedLaunch.QuoteWindowsArgument(executable), arguments);
     }
 
     [Fact]
@@ -153,11 +174,16 @@ public class LinkedLaunchTests
         Assert.Throws<ApplicationException>(() => owner.Mutex.ReleaseMutex());
     }
 
-    [Fact]
-    public void WritesActualWindowsShortcutWithoutReplacingExistingFile()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void WritesActualWindowsShortcutPreservingModeWithoutReplacingExistingFile(bool scopeMode,
+        bool probeMode)
     {
         if (!OperatingSystem.IsWindows()) return;
-        var directory = Path.Combine(Path.GetTempPath(), "v2rayn-monitor-synthetic-link-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(Path.GetTempPath(), "v2rayn-monitor-synthetic link-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
         {
@@ -172,10 +198,14 @@ public class LinkedLaunchTests
             {
                 try
                 {
-                    LinkedLaunch.CreateShortcut(shortcut, monitor, v2rayN, directory);
+                    LinkedLaunch.CreateShortcut(shortcut, monitor, v2rayN, directory, scopeMode, probeMode);
+                    var saved = ReadWindowsShortcut(shortcut);
+                    Assert.Equal(monitor, saved.TargetPath);
+                    Assert.Equal(LinkedLaunch.BuildArguments(v2rayN, directory, scopeMode, probeMode),
+                        saved.Arguments);
                     var bytes = File.ReadAllBytes(shortcut);
                     Assert.Throws<IOException>(() =>
-                        LinkedLaunch.CreateShortcut(shortcut, monitor, v2rayN, directory));
+                        LinkedLaunch.CreateShortcut(shortcut, monitor, v2rayN, directory, scopeMode, probeMode));
                     Assert.Equal(bytes, File.ReadAllBytes(shortcut));
                     Assert.Empty(Directory.GetFiles(directory, ".v2rayn-monitor-*.lnk"));
                 }
@@ -189,6 +219,33 @@ public class LinkedLaunchTests
             Assert.True(new FileInfo(shortcut).Length > 0);
         }
         finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    private static (string TargetPath, string Arguments) ReadWindowsShortcut(string shortcutPath)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        var shellType = Type.GetTypeFromProgID("WScript.Shell")
+            ?? throw new InvalidOperationException("Windows shortcut component is unavailable.");
+        var shell = Activator.CreateInstance(shellType)
+            ?? throw new InvalidOperationException("Could not create Windows shortcut component.");
+        try
+        {
+            dynamic shellObject = shell;
+            object shortcut = shellObject.CreateShortcut(shortcutPath);
+            try
+            {
+                dynamic link = shortcut;
+                return ((string)link.TargetPath, (string)link.Arguments);
+            }
+            finally
+            {
+                if (Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
+            }
+        }
+        finally
+        {
+            if (Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+        }
     }
 
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
