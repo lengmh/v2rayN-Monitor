@@ -50,6 +50,20 @@ test('partial route coverage stays explicit in live status and historical record
   assert.ok(get('records').textContent.includes('部分出站'));
   assert.equal(get('total-value').textContent, '16.106 GB');
 });
+test('Xray verified outbound coverage remains distinct from internal probe support', async t => {
+  const description = '采集 3 个 Xray 独立代理出站，包含 1 个策略组选择后的连接；排除直连和阻断，内部探测尚未单独区分。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Xray 多出站联合采样', currentNode: 'Synthetic A',
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false,
+      scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 3, collectedGroups: 1,
+        uncollectedOutbounds: 0, uncollectedGroups: 0, description },
+      probes: { historyEnabled: true, state: 'unsupported', message: 'Xray 尚未拆分内部探测' } })
+  });
+  assert.equal(get('collector-state').textContent, '正在采集');
+  assert.ok(get('collector-message').textContent.includes(description));
+  assert.equal(get('status-dot').classList.contains('connected'), true);
+  assert.equal(get('probe-state').textContent, '当前核心未支持探测计量');
+});
 for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`disabling probe history on a collector tick closes ${target} details`, async t => {
   let historyEnabled = true;
   const display = { originalName: 'Synthetic probe', groups: ['Synthetic probe group'], mergeKey: null };

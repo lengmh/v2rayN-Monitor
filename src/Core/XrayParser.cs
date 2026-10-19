@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.ObjectModel;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -48,6 +49,117 @@ public static class XrayParser
             return true;
         }
         catch (Exception e) when (e is JsonException or InvalidOperationException) { return false; }
+    }
+
+    /// <summary>Reads all verified tag pairs from one expvar response; missing pairs never become zero.</summary>
+    public static bool TryReadOutboundsCounters(ReadOnlyMemory<byte> json, IReadOnlyCollection<string> tags,
+        out V2RayOutboundStatistics? counters)
+    {
+        counters = null;
+        if (tags.Count == 0 || tags.Any(x => string.IsNullOrWhiteSpace(x) || x.Contains(">>>", StringComparison.Ordinal)) ||
+            tags.Distinct(StringComparer.Ordinal).Count() != tags.Count) throw new ArgumentException("Distinct outbound tags are required.");
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (!Property(document.RootElement, "stats", out var stats) || !Property(stats, "outbound", out var outbounds) ||
+                outbounds.ValueKind != JsonValueKind.Object) return false;
+            var complete = new Dictionary<string, XrayCounters>(StringComparer.Ordinal);
+            var unavailable = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var tag in tags)
+            {
+                var entries = outbounds.EnumerateObject().Where(x => x.NameEquals(tag)).ToArray();
+                if (entries.Length == 0) { unavailable.Add(tag, "missing_counter"); continue; }
+                if (entries.Length != 1) { unavailable.Add(tag, "duplicate_counter"); continue; }
+                var entry = entries[0].Value;
+                if (!Property(entry, "uplink", out var up) || !Property(entry, "downlink", out var down))
+                {
+                    unavailable.Add(tag, entry.ValueKind == JsonValueKind.Object &&
+                        entry.EnumerateObject().GroupBy(x => x.Name, StringComparer.Ordinal).Any(x => x.Count() > 1)
+                        ? "invalid_counter" : "missing_counter");
+                    continue;
+                }
+                if (up.ValueKind != JsonValueKind.Number || down.ValueKind != JsonValueKind.Number ||
+                    !up.TryGetInt64(out var upload) || !down.TryGetInt64(out var download) || upload < 0 || download < 0)
+                    unavailable.Add(tag, "invalid_counter");
+                else complete.Add(tag, new(upload, download));
+            }
+            counters = new(new ReadOnlyDictionary<string, XrayCounters>(complete), new ReadOnlyDictionary<string, string>(unavailable));
+            return true;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException) { return false; }
+    }
+
+    /// <summary>Builds independent outbound identities from the already bound standard configuration.</summary>
+    public static bool TryReadOutboundCatalog(XraySnapshot snapshot, ReadOnlyMemory<byte> json,
+        out XrayOutboundCatalog? catalog, out string reason)
+    {
+        catalog = null; reason = "snapshot_changed";
+        if (snapshot.CoreName != "Xray" || string.IsNullOrEmpty(snapshot.InstanceId) ||
+            !snapshot.Generation.StartsWith(Hash(json.Span) + ":", StringComparison.Ordinal)) return false;
+        if (!TryReadConfiguration(json, out var configuration, out reason) || configuration!.MetricsEndpoint != snapshot.MetricsEndpoint)
+            return false;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            reason = "unsupported_configuration";
+            if (!UniqueKeys(root)) return false;
+            var entries = root.GetProperty("outbounds").EnumerateArray().ToArray();
+            var groups = new List<string[]>();
+            if (Property(root, "routing", out var routing) && Property(routing, "balancers", out var balancers))
+            {
+                var groupTags = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var group in balancers.EnumerateArray())
+                {
+                    if (!Text(group, "tag", out var groupTag) || string.IsNullOrWhiteSpace(groupTag) || !groupTags.Add(groupTag) ||
+                        !Property(group, "selector", out var selectors) || selectors.ValueKind != JsonValueKind.Array) return false;
+                    var values = selectors.EnumerateArray().Select(x => x.ValueKind == JsonValueKind.String ? x.GetString()! : "").ToArray();
+                    if (values.Length == 0 || values.Any(string.IsNullOrWhiteSpace) || values.Distinct(StringComparer.Ordinal).Count() != values.Length)
+                        return false;
+                    groups.Add(values);
+                }
+            }
+            var candidates = new Dictionary<string, XrayOutboundIdentity>(StringComparer.Ordinal);
+            var unavailable = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var entry in entries)
+            {
+                var tag = entry.GetProperty("tag").GetString()!;
+                var protocol = entry.GetProperty("protocol").GetString()!;
+                if (string.IsNullOrWhiteSpace(tag) || tag.Contains(">>>", StringComparison.Ordinal)) return false;
+                if (protocol is "freedom" or "blackhole") continue;
+                if (!SupportedProtocol(protocol) || !TryServerIdentity(entry, protocol, out _))
+                { unavailable.Add(tag, "unsupported_member_type"); continue; }
+                CapturedNodeName? name = null;
+                if (tag == "proxy") name = new(snapshot.NodeName);
+                else
+                {
+                    var parents = groups.Where(x => x.Any(prefix => tag.StartsWith(prefix, StringComparison.Ordinal))).ToArray();
+                    if (parents.Length == 1 && parents[0].Length == 1)
+                    {
+                        var prefix = parents[0][0];
+                        if (tag.StartsWith(prefix + "-", StringComparison.Ordinal))
+                        {
+                            var member = tag[(prefix.Length + 1)..];
+                            var split = member.IndexOf('-');
+                            if (split > 0 && int.TryParse(member[..split], out var number) && number > 0 &&
+                                member[..split] == number.ToString(CultureInfo.InvariantCulture) && split + 1 < member.Length)
+                            {
+                                var separator = prefix.IndexOf("-proxy-", StringComparison.Ordinal);
+                                var label = separator > 0 && prefix[..separator].All(char.IsAsciiDigit) ? prefix[(separator + 7)..] : prefix;
+                                name = new(member[(split + 1)..], label);
+                            }
+                        }
+                    }
+                }
+                candidates.Add(tag, new(tag, protocol, name));
+            }
+            if (!candidates.ContainsKey("proxy")) return false;
+            catalog = new(snapshot.InstanceId, snapshot.Generation, snapshot.ProcessIdentity,
+                new ReadOnlyDictionary<string, XrayOutboundIdentity>(candidates),
+                new ReadOnlyDictionary<string, string>(unavailable), groups.Count);
+            reason = "ready"; return true;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { return false; }
     }
 
     public static bool TryReadConfiguration(ReadOnlyMemory<byte> json,
@@ -412,6 +524,14 @@ public static class XrayParser
             foreach (var child in item.EnumerateArray()) if (HasChaining(child)) return true;
         return false;
     }
+
+    private static bool UniqueKeys(JsonElement item) => item.ValueKind switch
+    {
+        JsonValueKind.Object => item.EnumerateObject().Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() == item.EnumerateObject().Count() &&
+            item.EnumerateObject().All(x => UniqueKeys(x.Value)),
+        JsonValueKind.Array => item.EnumerateArray().All(UniqueKeys),
+        _ => true
+    };
 
     // Duplicate critical JSON keys are ambiguous. Do not silently choose the last one.
     private static bool Property(JsonElement root, string name, out JsonElement value)

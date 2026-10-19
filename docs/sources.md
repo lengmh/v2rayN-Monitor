@@ -77,6 +77,13 @@
 
 本轮仍只创建合成 fixtures。真实配置、订阅、地址、口令及用户目录不进入源码、测试或日志。
 
+### Xray 多出站核对（2026-10-19）
+
+- 固定客户端的 [BuildOutboundsList](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayOutboundService.cs#L626-L655) 使用 `组前缀-正整数序号-Remarks`，单成员可能直接使用组前缀；只有明确唯一的多成员结构提取友好名，不反推 IndexId。
+- [策略组生成](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayBalancerService.cs) 的 selector 是出站前缀；组标签不作为额外流量维度。
+- 上游同版本 [出站 handler](https://github.com/XTLS/Xray-core/blob/v26.7.28/app/proxyman/outbound/handler.go) 为 tag 注册上下行计数，[metrics](https://github.com/XTLS/Xray-core/blob/v26.7.28/app/metrics/metrics.go) 映射到 `/debug/vars`。它们只作接口参考，不能替代 `ced1f55` 精确源码。
+- 当前二进制另作仅回环的隔离验证：组轮换 A／B、旧连接仍归 A，计数与 SOCKS 后端实收实发（含握手）一致。真实环境另做只读多出站累计／隔离账本对账，结果见 STATUS 和本机证据，不改变正式支持版本或借此声称已拆分内部探测。
+
 ### 普通权限进程信息回退
 
 - [QueryFullProcessImageNameW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew) 与 [GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)：支持 `PROCESS_QUERY_LIMITED_INFORMATION` 句柄。与 WMI 创建时间在微秒精度核对，输出保持同一精度，不能因取证来源改变而伪造一次核心重启。
