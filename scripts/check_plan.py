@@ -15,7 +15,7 @@ def main() -> None:
     plan = json.loads((ROOT / 'docs/backlog.json').read_text(encoding='utf-8'))
     tasks = plan['tasks']
     ids = [t['id'] for t in tasks]
-    assert len(ids) == len(set(ids)) == 36, 'Expected 36 unique task nodes'
+    assert len(ids) == len(set(ids)) == 37, 'Expected 37 unique task nodes'
     phases = {m['id'] for m in plan['milestones']}
     assert len(phases) == 8
     seen: set[str] = set()
@@ -54,7 +54,7 @@ def main() -> None:
             if '://' in link or link.startswith(('#', 'mailto:')):
                 continue
             assert (document.parent / link.split('#')[0]).exists(), f'Broken local link: {document}: {link}'
-    print('PASS: 8 phases / 36 unique tasks / ordered acyclic dependencies')
+    print('PASS: 8 phases / 37 unique tasks / ordered acyclic dependencies')
     print('PASS: one matching plan heading per task; required task fields present')
     print('PASS: Python syntax / internal Markdown links / public file allowlist')
     print('PASS: synthetic-only CSV fixture including a legal duplicate')
