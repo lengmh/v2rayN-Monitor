@@ -334,6 +334,128 @@ test('newer navigation cancels and supersedes earlier API responses', async t =>
   change('node-filter', 'b'); assert.equal(older.signal.aborted, true); resolve(Response.json({ ...history, download: '1', upload: '1' }));
   await new Promise(r => setTimeout(r, 10)); assert.equal(get('total-value').textContent, '16.106 GB');
 });
+test('history renders while status and the directory are pending, and period changes reuse both', async t => {
+  let completeStatus, completeNodes;
+  const { w, calls, get } = await fixture(t, {
+    '/api/status': () => new Promise(resolve => { completeStatus = resolve; }),
+    '/api/nodes': () => new Promise(resolve => { completeNodes = resolve; })
+  });
+  assert.equal(get('summary').getAttribute('aria-busy'), 'false');
+  assert.equal(get('node-filter').options.length, 1);
+  const before = calls.length;
+  w.document.querySelector('[data-period=day]').click();
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.deepEqual(calls.slice(before).map(call => call.path), ['/api/history']);
+  assert.equal(calls.filter(call => call.path === '/api/status').length, 1);
+  assert.equal(calls.filter(call => call.path === '/api/nodes').length, 1);
+  completeStatus(Response.json({ state: 'collecting', demo: false, uploadPerSecond: '1', downloadPerSecond: '2' }));
+  completeNodes(Response.json([{ key: 'a', name: 'Synthetic A' }]));
+  await until(() => get('node-filter').options.length === 2 && get('live-upload').textContent === '↑ 1 B/s');
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+});
+test('rapid period changes cancel only obsolete history and render the final range', async t => {
+  const pending = [];
+  let hold = false;
+  const { w, calls, get } = await fixture(t, {
+    '/api/history': (url, options) => hold ? new Promise(resolve => pending.push({ url, options, resolve })) : Response.json(history)
+  });
+  await until(() => get('node-filter').options.length === 3);
+  const before = calls.length;
+  hold = true;
+  for (const period of ['year', 'month', 'day']) w.document.querySelector(`[data-period=${period}]`).click();
+  assert.equal(pending.length, 3);
+  assert.equal(pending[0].options.signal.aborted, true);
+  assert.equal(pending[1].options.signal.aborted, true);
+  assert.equal(pending[2].options.signal.aborted, false);
+  pending[2].resolve(Response.json(history));
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  for (const request of pending.slice(0, 2)) request.resolve(Response.json({ ...history, upload: '1', download: '1' }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  assert.deepEqual(calls.slice(before).map(call => call.path), ['/api/history', '/api/history', '/api/history']);
+});
+test('comparison renders both histories before directories, then switches periods with two requests', async t => {
+  const pending = [];
+  let hold = false;
+  const provider = { source: 'Synthetic provider', rawBytes: '10', billedBytes: '12.5', recordCount: 1, series: [], nodes: [], records: [] };
+  const { w, calls, get, change } = await fixture(t, {
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/nodes': () => hold ? new Promise(resolve => pending.push(resolve)) : Response.json([{ key: 'a', name: 'Synthetic A' }]),
+    '/api/provider/nodes': () => hold ? new Promise(resolve => pending.push(resolve)) : Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  hold = true;
+  change('statistics-source', provider.source);
+  await until(() => get('total-exact').textContent === '10 bytes');
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-local-exact').textContent === '16,106,127,360 bytes');
+  assert.equal(get('comparison-billed-exact').textContent, '12.5 bytes');
+  const before = calls.length;
+  w.document.querySelector('[data-period=day]').click();
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.deepEqual(calls.slice(before).map(call => call.path).sort(), ['/api/history', '/api/provider/history']);
+  for (const resolve of pending) resolve(Response.json([{ key: 'a', name: 'Synthetic A' }]));
+  await until(() => [...get('node-filter').options].some(option => option.value === 'Synthetic A'));
+  assert.equal(get('comparison-billed-exact').textContent, '12.5 bytes');
+});
+test('hidden tabs cancel requests and settings ticks refresh status without scanning history', async t => {
+  const pending = [];
+  let hold = false;
+  const { w, calls, get, change } = await fixture(t, {
+    '/api/history': (url, options) => hold ? new Promise(resolve => pending.push({ resolve, options })) : Response.json(history)
+  });
+  hold = true; change('bucket', 'hour');
+  assert.equal(pending.length, 1);
+  Object.defineProperty(w.document, 'hidden', { configurable: true, value: true });
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  assert.equal(pending[0].options.signal.aborted, true);
+  const before = calls.length;
+  w.document.querySelector('[data-period=year]').click();
+  assert.equal(calls.length, before);
+  pending[0].resolve(Response.json({ ...history, upload: '1', download: '1' }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  hold = false;
+  let tick;
+  const originalTimeout = w.setTimeout.bind(w);
+  w.setTimeout = (callback, delay, ...args) => delay === 5000 ? (tick = callback, 0) : originalTimeout(callback, delay, ...args);
+  w.document.querySelector('.nav-item[data-view=settings]').click();
+  Object.defineProperty(w.document, 'hidden', { configurable: true, value: false });
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  await until(() => calls.at(-1).path === '/api/status');
+  const historyReads = calls.filter(call => call.path === '/api/history').length;
+  tick();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls.filter(call => call.path === '/api/history').length, historyReads);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => calls.filter(call => call.path === '/api/history').length === historyReads + 1 && get('summary').getAttribute('aria-busy') === 'false');
+});
+test('a failed comparison cancels its remaining history request and the next selection recovers', async t => {
+  let failing = false, pending;
+  const provider = { source: 'Synthetic provider', rawBytes: '10', billedBytes: '12.5', recordCount: 1, series: [], nodes: [], records: [] };
+  const { w, get, change } = await fixture(t, {
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => failing ? new Response('{}', { status: 500 }) : Response.json(provider),
+    '/api/history': (url, options) => failing ? new Promise(resolve => { pending = { options, resolve }; }) : Response.json(history)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('statistics-source', provider.source);
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  failing = true;
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => !get('global-error').hidden);
+  assert.equal(pending.options.signal.aborted, true);
+  assert.equal(get('summary').getAttribute('aria-busy'), 'false');
+  failing = false;
+  w.document.querySelector('[data-period=day]').click();
+  await until(() => get('comparison-local-exact').textContent === '16,106,127,360 bytes');
+  pending.resolve(Response.json({ ...history, upload: '1', download: '1' }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('comparison-local-exact').textContent, '16,106,127,360 bytes');
+  assert.equal(get('global-error').hidden, true);
+});
 test('401 disables writes and asks to reopen tray', async t => {
   let expired = false;
   const { change, get } = await fixture(t, { '/api/history': () => expired ? new Response('{}', { status: 401 }) : Response.json(history) });

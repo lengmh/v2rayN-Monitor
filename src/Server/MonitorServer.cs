@@ -126,6 +126,11 @@ public sealed class MonitorServer : IAsyncDisposable
                 { response.StatusCode = 401; await response.WriteAsJsonAsync(new { error = "会话已过期，请从托盘重新打开页面。" }); return; }
             }
             try { await next(context); }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+                // The client abandoned this read; do not turn it into an application failure.
+                if (!response.HasStarted) response.StatusCode = 499;
+            }
             catch (Exception ex) when (ex is ArgumentException or FormatException or TimeZoneNotFoundException or InvalidTimeZoneException or OverflowException or Microsoft.VisualBasic.FileIO.MalformedLineException or JsonException or BadHttpRequestException)
             {
                 if (!response.HasStarted) { response.StatusCode = 400; await response.WriteAsJsonAsync(new { error = "请求无效。" + SafeError(ex) }); }
@@ -153,13 +158,15 @@ public sealed class MonitorServer : IAsyncDisposable
         {
             var basis = RequestedBasis(request);
             return Scopes is null ? Ledger.GetNodes() :
-                Scopes.GetDisplayNodes(basis);
+                Scopes.GetDisplayNodes(basis, request.HttpContext.RequestAborted);
         });
-        app.MapGet("/api/history", (HttpRequest request) => QueryHistory(ParseQuery(request), RequestedBasis(request)));
+        app.MapGet("/api/history", (HttpRequest request) =>
+            QueryHistory(ParseQuery(request), RequestedBasis(request), request.HttpContext.RequestAborted));
         app.MapGet("/api/scope-history", (HttpRequest request) =>
         {
             if (Scopes is null) throw new ArgumentException("当前实例未显式启用多范围账本。");
-            return Scopes.Query(ToScopeQuery(ParseQuery(request), request.Query["basis"].ToString()));
+            return Scopes.Query(ToScopeQuery(ParseQuery(request), request.Query["basis"].ToString(),
+                request.HttpContext.RequestAborted), request.HttpContext.RequestAborted);
         });
         app.MapGet("/api/export", (HttpRequest request) =>
         {
@@ -212,15 +219,16 @@ public sealed class MonitorServer : IAsyncDisposable
         if (Scopes?.SupportsProbes != true) throw new ArgumentException("此实例未启用 v3 探测历史，未知不能记为零。");
         return values[0]!;
     }
-    private ScopeQuery ToScopeQuery(QuerySpec query, string basis)
+    private ScopeQuery ToScopeQuery(QuerySpec query, string basis, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         long? id = null;
         long[]? ids = null;
         if (query.NodeKey is { } key)
         {
             if (key.StartsWith("merge:", StringComparison.Ordinal))
             {
-                ids = Scopes!.GetScopes(basis).Where(x => x.Scope.NodeId is not null &&
+                ids = Scopes!.GetScopes(basis, cancellationToken).Where(x => x.Scope.NodeId is not null &&
                     key == "merge:" + x.Scope.Basis + ":" + XrayParser.Hash(Uri.EscapeDataString(x.InstanceId) + "/" + Uri.EscapeDataString(x.Scope.NodeId)))
                     .Select(x => x.Id).ToArray();
                 if (ids.Length == 0) throw new ArgumentException("没有可核实的节点归并范围。");
@@ -236,11 +244,13 @@ public sealed class MonitorServer : IAsyncDisposable
     private static TrafficRow ToTraffic(ScopeTrafficRow row) =>
         new(row.Start, row.End, "scope:" + row.ScopeId.ToString(CultureInfo.InvariantCulture),
             row.Name, row.Upload, row.Download, row.Quality, row.PartialCoverage) { Display = row.Display };
-    private HistoryResult QueryHistory(QuerySpec query, string basis)
+    private HistoryResult QueryHistory(QuerySpec query, string basis, CancellationToken cancellationToken = default)
     {
-        if (Scopes is null) return Ledger.Query(query);
-        var result = Scopes.Query(ToScopeQuery(query, basis));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Scopes is null) return Ledger.Query(query, cancellationToken);
+        var result = Scopes.Query(ToScopeQuery(query, basis, cancellationToken), cancellationToken);
         string Add(string a, string b) => (BigInteger.Parse(a, CultureInfo.InvariantCulture) + BigInteger.Parse(b, CultureInfo.InvariantCulture)).ToString(CultureInfo.InvariantCulture);
+        cancellationToken.ThrowIfCancellationRequested();
         return new(query.Start.ToString("O", CultureInfo.InvariantCulture), query.End.ToString("O", CultureInfo.InvariantCulture),
             result.Upload, result.Download, Add(result.RecoveredUpload, result.PartialUpload), Add(result.RecoveredDownload, result.PartialDownload),
             result.Gaps.Count, result.Series,

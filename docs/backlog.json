@@ -11,9 +11,9 @@
     "issue": 23,
     "status": "in_progress",
     "branch": "feat/issue23-ui-polish-v2",
-    "scope": "PR #30 预览反馈：增加 MB/MiB、统计与探测独立浏览器单位偏好；实测周期查询及渲染，将折叠缺口列表改为展开才生成，保留完整数据和主线后端",
+    "scope": "PR #30 周期查询优化：拆分状态/目录/历史请求，贯通取消，提前 ScopeIds/展示 entity 筛选，保留事务快照并在锁外聚合；沿用 MB/MiB、分页面单位与缺口延迟渲染",
     "implementation_status": "complete",
-    "remaining": "本批新包尚未启用；提醒并在用户退出 Monitor 后接回原 v3，再做页面确认和 PR 合并收口。后端查询性能与 #18 新模式实时速度另行处理，固定目录部署分开记录；精确 CI/产物结果留在对应 PR 与本机检查点",
+    "remaining": "本地整合与固定副本21种结果逐值一致、切换p50/p95测量已完成；核对精确 CI/产物后提醒用户退出 Monitor 接回原 v3，再做页面确认和 PR 合并收口。#18 新模式实时速度、固定目录部署、服务商缓存/局部重绘分别处理",
     "resume_requirement": "保留已合并 #25、原 v3 与数据目录，不重开普通统计验收或自行更换核心/搬迁数据；新预览启用前提醒，仅退出 Monitor、保持代理运行；PR #35 仍 planned 且最后处理，PR #33 不合并"
   },
   "capability_levels": [

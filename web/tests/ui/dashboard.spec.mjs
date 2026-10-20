@@ -700,12 +700,15 @@ test('expired session clearly asks to reopen tray and disables writes', async ({
   await expect(page.locator('#session-alert')).toBeVisible(); await expect(page.locator('#export-button')).toBeDisabled();
   await page.click('.nav-item[data-view=settings]'); await expect(page.locator('#save-settings')).toBeDisabled();
 });
-test('settings save posts path and IANA timezone then queries that timezone', async ({ page }) => {
+test('settings save posts path and timezone, deferring history until statistics is visible', async ({ page }) => {
   const calls = await mock(page); await page.click('.nav-item[data-view=settings]');
+  const histories = calls.filter(c => c.path === '/api/history').length;
   await page.fill('#v2rayn-path', 'D:\\Proxy\\v2rayN'); await page.selectOption('#time-zone', 'Asia/Shanghai'); await page.click('#save-settings');
   await expect(page.locator('#settings-result')).toContainText('设置已保存');
   const post = calls.filter(c => c.path === '/api/settings' && c.body).at(-1);
   expect(post.body.v2rayNPath).toBe('D:\\Proxy\\v2rayN'); expect(post.body.timeZoneId).toBe('Asia/Shanghai');
+  expect(calls.filter(c => c.path === '/api/history')).toHaveLength(histories);
+  await page.click('.nav-item[data-view=overview]');
   await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('timeZoneId')).toBe('Asia/Shanghai');
 });
 test('provider preview is separate, edits invalidate preview, and explicit confirmation commits once', async ({ page }) => {
