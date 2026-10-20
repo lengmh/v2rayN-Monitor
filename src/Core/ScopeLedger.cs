@@ -344,6 +344,7 @@ public sealed class ScopeLedger : IDisposable
             var directory = new Dictionary<long, StoredScope>();
             var projections = new Dictionary<long, ScopeProjection>();
             var snapshots = new Dictionary<string, TrafficDisplayStore.Snapshot>(StringComparer.Ordinal);
+            var rates = new Dictionary<string, BigInteger>(StringComparer.Ordinal);
             var rawMetadata = new List<TrafficDisplayStore.StoredPart>();
             Dictionary<TrafficDisplayStore.RecordKey, List<TrafficDisplayStore.Part>>? metadata = null;
             var matchingScopes = new HashSet<long>();
@@ -431,10 +432,11 @@ public sealed class ScopeLedger : IDisposable
                         cancellationToken.ThrowIfCancellationRequested();
                         var record = ReadStoredTraffic(reader, directory);
                         rowsRead++;
-                        foreach (var row in Project(record, Projection(record.ScopeId, directory, projections), metadata))
+                        var projection = Projection(record.ScopeId, directory, projections);
+                        foreach (var row in Project(record, projection, metadata, rates))
                         {
                             cancellationToken.ThrowIfCancellationRequested();
-                            if ((row.Display!.OriginalName ?? row.Name) == query.ScopeName) { earliest = row.Start; break; }
+                            if ((row.Display.OriginalName ?? projection.Name) == query.ScopeName) { earliest = Iso(record.Start); break; }
                         }
                     }
                 }
@@ -488,32 +490,34 @@ public sealed class ScopeLedger : IDisposable
             foreach (var record in storedRows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                foreach (var row in Project(record, Projection(record.ScopeId, directory, projections), metadata))
+                var projection = Projection(record.ScopeId, directory, projections);
+                foreach (var row in Project(record, projection, metadata, rates))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var comparisonName = row.Display!.OriginalName ?? row.Name;
+                    var comparisonName = row.Display.OriginalName ?? projection.Name;
                     if (query.ScopeName is not null && comparisonName != query.ScopeName) continue;
-                    matchingScopes.Add(row.ScopeId);
+                    matchingScopes.Add(record.ScopeId);
                     var start = record.Start; var end = record.End; var id = record.ScopeId;
-                    var up = long.Parse(row.Upload, CultureInfo.InvariantCulture); var down = long.Parse(row.Download, CultureInfo.InvariantCulture);
+                    var up = row.Upload; var down = row.Download;
                     var recovery = record.Kind == 1;
                     if (!query.NonZeroRecords || up != 0 || down != 0)
                     {
-                        if (count >= (long)query.Page * query.PageSize && rows.Count < query.PageSize) rows.Add(row);
+                        if (count >= (long)query.Page * query.PageSize && rows.Count < query.PageSize)
+                            rows.Add(new(projection.Basis, id, comparisonName, Iso(start), Iso(end),
+                                Text(up), Text(down), record.Quality, record.PartialCoverage) { Display = row.Display.Result() });
                         count++;
                     }
                     if (recovery && (start < query.Start.UtcTicks || end > query.End.UtcTicks)) { partial.Add(up, down); continue; }
                     total.Add(up, down);
-                    var amounts = TrafficDisplayStore.Summary.Amounts(row.Display);
-                    estimate.Add(row.Display, amounts);
+                    estimate.Add(row.Display);
                     if (!scopeDisplay.TryGetValue(id, out var summary)) scopeDisplay.Add(id, summary = new());
-                    summary.Add(row.Display, amounts); scopeMerge[id] = row.Display.MergeKey;
+                    summary.Add(row.Display); scopeMerge[id] = row.Display.MergeKey;
                     if (!comparisons.TryGetValue(comparisonName, out var comparison)) comparisons.Add(comparisonName, comparison = (new(), new()));
                     comparison.Bytes.Add(up, down);
-                    comparison.Display.Add(row.Display, amounts);
+                    comparison.Display.Add(row.Display);
                     if (recovery) recovered.Add(up, down);
                     if (!scopes.TryGetValue(id, out var scope))
-                        scopes.Add(id, scope = (row.Name, new Bytes(), new Bytes()));
+                        scopes.Add(id, scope = (comparisonName, new Bytes(), new Bytes()));
                     scope.Total.Add(up, down);
                     if (recovery) scope.Recovered.Add(up, down);
                     var label = Label(start);
@@ -522,7 +526,7 @@ public sealed class ScopeLedger : IDisposable
                     if (!series.TryGetValue(label, out var bucket))
                         series.Add(label, bucket = (start, new Bytes(), new Bytes(), new()));
                     bucket.Total.Add(up, down);
-                    bucket.Display.Add(row.Display, amounts);
+                    bucket.Display.Add(row.Display);
                     if (recovery) bucket.Recovered.Add(up, down);
                     if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered, bucket.Display);
                 }
@@ -581,19 +585,15 @@ public sealed class ScopeLedger : IDisposable
         return projection;
     }
 
-    private static IEnumerable<ScopeTrafficRow> Project(StoredTraffic row, ScopeProjection scope,
-        Dictionary<TrafficDisplayStore.RecordKey, List<TrafficDisplayStore.Part>>? metadata)
+    private static IEnumerable<TrafficDisplayStore.ValueSlice> Project(StoredTraffic row, ScopeProjection scope,
+        Dictionary<TrafficDisplayStore.RecordKey, List<TrafficDisplayStore.Part>>? metadata,
+        Dictionary<string, BigInteger> rates)
     {
         var parts = metadata?.GetValueOrDefault(new(scope.Entity, row.Kind, row.Start, row.End));
-        var start = Iso(row.Start); var end = Iso(row.End);
-        foreach (var part in TrafficDisplayStore.Split(parts, Text(row.Upload), Text(row.Download), scope.MergeKey))
-            yield return new(scope.Basis, row.ScopeId, part.Name ?? scope.Historical?.OriginalName ?? scope.Name,
-                start, end, part.Upload, part.Download, row.Quality, row.PartialCoverage)
-            {
-                Display = part.Name is null && scope.Historical is not null
-                    ? part.Display with { OriginalName = scope.Historical.OriginalName, Groups = [scope.Historical.GroupLabel!] }
-                    : part.Display
-            };
+        foreach (var part in TrafficDisplayStore.SplitValues(parts, row.Upload, row.Download, scope.MergeKey, rates))
+            yield return part.Display.OriginalName is null && scope.Historical is not null
+                ? part with { Display = part.Display with { OriginalName = scope.Historical.OriginalName, GroupLabel = scope.Historical.GroupLabel } }
+                : part;
     }
 
     private const string RecordsSql = """

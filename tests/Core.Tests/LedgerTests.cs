@@ -1006,6 +1006,62 @@ public sealed class LedgerTests : IDisposable
         Assert.True(selectedMetrics.Total >= selectedMetrics.LockWait + selectedMetrics.LockHeld + selectedMetrics.Aggregation);
     }
 
+    [Theory]
+    [InlineData("actual_member")]
+    [InlineData("probe_urltest_member")]
+    public void ScopeQueryPreservesExactEstimatesAndExportOrderAcrossZeroPartsAndPages(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        const long large = 9007199254740993;
+        const string preciseName = "Synthetic 1.0000000000000000000000000001x";
+        var original = Member("a", "Synthetic fallback") with { Basis = basis, CapturedName = new(preciseName, "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic 0x", "Synthetic other group") };
+        var idle = Member("b", "Synthetic idle fallback") with { Basis = basis, CapturedName = new("Synthetic idle 1x") };
+        ledger.Accept(Batch(0, new(original, 0, 0), new(idle, 0, 0)));
+        ledger.Accept(Batch(1, new(original, large, large), new(idle, 0, 0)));
+        ledger.Accept(Batch(2, new(renamed, large + 7, large + 11), new(idle, 0, 0)));
+        ledger.Accept(Batch(3, new(renamed, large + 20, large + 28), new(idle, 0, 0)));
+        ledger.Accept(Batch(31, new(renamed, large + 120, large + 128), new(idle, 0, 0)));
+        var query = ScopeAll(basis, size: 1);
+        var all = ledger.Query(query);
+        Assert.Equal("18014398509481986.0000000000018014398509481986", all.Display!.EstimatedBilledBytes);
+        Assert.Equal("partial", all.Display.RateStatus);
+        Assert.True(BigInteger.Parse(all.Display.EstimateUnknownBytes) > 0);
+        foreach (var name in new string?[] { null, preciseName, "Synthetic 0x", "Synthetic idle 1x" })
+        foreach (var nonZero in new[] { false, true })
+        {
+            var selected = query with { ScopeName = name, NonZeroRecords = nonZero };
+            var expected = ledger.Export(selected)
+                .Where(x => !nonZero || x.Upload != "0" || x.Download != "0").ToArray();
+            foreach (var page in new[] { 0, 1, 2, 99 })
+            {
+                var actual = ledger.Query(selected with { Page = page });
+                Assert.Equal(expected.Length, actual.RecordCount);
+                Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected.Skip(page).Take(1)),
+                    System.Text.Json.JsonSerializer.Serialize(actual.Records));
+            }
+        }
+        var idleResult = ledger.Query(query with { ScopeName = "Synthetic idle 1x" });
+        Assert.Equal("known", idleResult.Display!.RateStatus);
+        Assert.Equal("0", idleResult.Display.EstimatedBilledBytes);
+        Assert.Single(idleResult.Scopes);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScopeQueryValidatesDisplayEvidenceEvenOutsideTheRequestedPage(bool invalidRate)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true);
+        var member = Member() with { CapturedName = new("Synthetic 1x") };
+        ledger.Accept(Batch(0, new ScopeReading(member, 0, 0)));
+        ledger.Accept(Batch(1, new ScopeReading(member, 10, 0)));
+        RunSql(invalidRate
+            ? """UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.Rate','invalid');"""
+            : "UPDATE ui_display_records SET upload=11;");
+        Assert.Throws<InvalidOperationException>(() => ledger.Query(ScopeAll(page: 99, size: 1)));
+    }
+
     [Fact]
     public void LocalProxyBroadDisplayReadMatchesScopedReadsForHistoricalPartsAndPages()
     {
