@@ -1007,6 +1007,83 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Theory]
+    [InlineData("local_proxy")]
+    [InlineData("probe_urltest_member")]
+    public void HistoricalNameCandidatesKeepIndependentIdentitiesFallbacksAndGapOnlyScopes(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        var memberBasis = basis == "local_proxy" ? "actual_member" : basis;
+        const string name = "Synthetic target 0.5x";
+        var original = Member("a", "Synthetic configured A") with { Basis = memberBasis, CapturedName = new(name, "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic renamed 2x", "Synthetic other group") };
+        var sameName = Member("b", "Synthetic configured B") with { Basis = memberBasis, CapturedName = new(name) };
+        var gapOnly = Member("c", name) with { Basis = memberBasis };
+        var historical = Member("d", "【Synthetic old】 1-" + name) with
+            { Basis = memberBasis, OutboundTag = "123-proxy-Synthetic old-1-" + name };
+        var unrelated = Member("e", "Synthetic unrelated") with { Basis = memberBasis, CapturedName = new("Synthetic unrelated 1x") };
+        ledger.Accept(Batch(0, new(original, 0, 0), new(sameName, 0, 0), new(gapOnly, 0, 0),
+            new(historical, 0, 0), new(unrelated, 0, 0)));
+        var gapId = ledger.GetScopes(memberBasis).Single(x => x.Scope.IdentityValue == "c").Id;
+        foreach (var second in new[] { 1, 2, 3, 61 })
+            ledger.Accept(Batch(second, new(second < 2 ? original : renamed, second * 10, 0),
+                new(sameName, second * 20, 0), new(historical, second * 30, 0), new(unrelated, second * 40, 0))
+                with { RetiredScopeIds = [gapId] });
+        var scopes = ledger.GetScopes(memberBasis);
+        var unrelatedId = scopes.Single(x => x.Scope.IdentityValue == "e").Id;
+        RunSql($"""
+            INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin) VALUES
+                ({Epoch.UtcTicks},{Epoch.AddSeconds(1).UtcTicks},{gapId},'snapshot_changed',0,'collector'),
+                ({Epoch.UtcTicks},{Epoch.AddSeconds(1).UtcTicks},NULL,'synthetic_legacy',0,'legacy');
+            """);
+        var query = ScopeAll(basis, size: 1) with { ScopeName = name };
+        var expected = ledger.Export(query).ToArray();
+        var result = ledger.Query(query);
+        Assert.Equal(3, result.Scopes.Count);
+        Assert.Contains(result.Gaps, x => x.ScopeId == gapId);
+        Assert.Contains(result.Gaps, x => x.ScopeId is null);
+        Assert.DoesNotContain(result.Gaps, x => x.ScopeId == unrelatedId);
+        Assert.Equal(expected.Aggregate(BigInteger.Zero, (sum, row) => sum + BigInteger.Parse(row.Upload)).ToString(CultureInfo.InvariantCulture), result.Upload);
+        foreach (var page in new[] { 0, 1, 2, 99 })
+        {
+            var actual = ledger.Query(query with { Page = page });
+            Assert.Equal(expected.Length, actual.RecordCount);
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected.Skip(page).Take(1)),
+                System.Text.Json.JsonSerializer.Serialize(actual.Records));
+        }
+        var capturedId = scopes.Single(x => x.Scope.IdentityValue == "b").Id;
+        Assert.Single(ledger.Query(query with { ScopeId = capturedId, ScopeIds = [capturedId] }).Scopes);
+        Assert.Empty(ledger.Query(query with { ScopeId = capturedId, ScopeIds = [unrelatedId] }).Scopes);
+        Assert.Empty(ledger.Query(query with { ScopeIds = [] }).Scopes);
+        ScopeQueryMetrics? allMetrics = null, namedMetrics = null;
+        ledger.Query(query with { ScopeName = null }, observer: value => allMetrics = value);
+        ledger.Query(query, observer: value => namedMetrics = value);
+        Assert.True(namedMetrics!.RowsRead < allMetrics!.RowsRead);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NamedProbeCandidatesKeepEarliestCapturedNameOutsideTheQueryWindow(bool metadata)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: metadata);
+        const string oldName = "Synthetic old probe 0.5x";
+        var probe = Member("a", metadata ? "Synthetic fallback" : oldName) with
+            { Basis = "probe_urltest_member", CapturedName = new(oldName) };
+        var renamed = probe with { CapturedName = new("Synthetic new probe 2x") };
+        ledger.Accept(Batch(0, new ScopeReading(probe, 0, 0)));
+        ledger.Accept(Batch(1, new ScopeReading(probe, 10, 0)));
+        ledger.Accept(Batch(2, new ScopeReading(renamed, 20, 0)));
+        ledger.Accept(Batch(3, new ScopeReading(renamed, 30, 0)));
+        var query = ScopeAll("probe_urltest_member") with
+            { ScopeName = oldName, Start = Epoch.AddHours(2), End = Epoch.AddHours(3) };
+        var result = ledger.Query(query);
+        Assert.Empty(result.Records);
+        Assert.Equal(Epoch.ToString("O", CultureInfo.InvariantCulture), result.EarliestRecord);
+        Assert.Null(ledger.Query(query with { ScopeIds = [] }).EarliestRecord);
+        Assert.Null(ledger.Query(query with { ScopeName = "Synthetic absent" }).EarliestRecord);
+    }
+
+    [Theory]
     [InlineData("actual_member")]
     [InlineData("probe_urltest_member")]
     public void ScopeQueryPreservesExactEstimatesAndExportOrderAcrossZeroPartsAndPages(string basis)
