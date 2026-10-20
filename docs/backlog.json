@@ -8,13 +8,13 @@
   },
   "plan_date": "2026-10-09",
   "active_checkpoint": {
-    "issue": 18,
+    "issue": 23,
     "status": "in_progress",
-    "branch": "feat/issue18-xray-multi-outbounds",
-    "scope": "Release按basic/full/extended三档独立分包；复用普通统计既有实机通过结果，纠正笼统重复验收表述；S5.8继续作为可选扩展",
+    "branch": "feat/issue23-ui-polish-v2",
+    "scope": "PR #30 合入已完成联动收口的 main 2ca6427；保留主线后端，验证现有主题、动效、排序及整节点配对分页",
     "implementation_status": "complete",
-    "remaining": "本批只更新发布约定及验收状态说明，文档检查与精确CI另核；普通采集/记账已有实机通过记录，不重开。尚未启用的名称修复与历史未覆盖的受控切换/重启分别保留；三档发布资产尚未构建或发布",
-    "resume_requirement": "复用sing-box成员统计/重开恢复和69ffdfa的Xray八批/范围实机对账，不要求重做普通统计；后续只检查新改动及直接影响。三档发包按对应内容和摘要分别提供，实际发布另行授权；S5.8可选且不要求更换原生Xray，启用新预览前仍提醒"
+    "remaining": "本批前端检查、桌面/窄屏合成截图和精确 CI 单独核对；随后准备新预览并在用户退出 Monitor 后验证接回原 v3。页面确认、合并与固定目录部署分开记录",
+    "resume_requirement": "保留已合并 #25、原 v3 与数据目录，不重开普通统计验收或自行更换核心/搬迁数据；新预览启用前提醒，仅退出 Monitor、保持代理运行；PR #35 仍 planned 且最后处理，PR #33 不合并"
   },
   "capability_levels": [
     {
@@ -414,7 +414,7 @@
       ],
       "acceptance": "关闭页面采集继续，退出托盘采集停止；重复启动不创建双写实例；唤醒后按会话连续性恢复；禁用开机启动后不留下启动项。",
       "stop_rule": "先发布便携包，不把安装器、签名采购和自动更新服务作为 v0.1 前提。",
-      "implementation_note": "初版代码/合成验证的具体证据和未完成部分见 docs/STATUS.md；blocked 不表示没有代码，而是实机门槛未过。"
+      "implementation_note": "Issue #24 / PR #25 联动入口已按 2026-10-20 用户整体确认完成本轮验收：精确 0b2d3e7、Windows 快捷方式、实际 采样批次/相邻区间/范围及重复点击通过，旧历史/provider/设置与代理进程保留。冷启动、仅 Monitor 运行、UAC 和原睡眠/唤醒等场景未新增逐项记录，故不将整个 S4.1 标为 done；固定目录部署另行处理。详见 docs/STATUS.md。"
     },
     {
       "id": "S4.2",
