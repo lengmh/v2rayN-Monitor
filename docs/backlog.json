@@ -11,9 +11,9 @@
     "issue": 23,
     "status": "in_progress",
     "branch": "feat/issue23-ui-polish-v2",
-    "scope": "PR #30 合入已完成联动收口的 main 2ca6427；保留主线后端，验证现有主题、动效、排序及整节点配对分页",
+    "scope": "PR #30 预览反馈：增加 MB/MiB、统计与探测独立浏览器单位偏好；实测周期查询及渲染，将折叠缺口列表改为展开才生成，保留完整数据和主线后端",
     "implementation_status": "complete",
-    "remaining": "本批前端检查、桌面/窄屏合成截图和精确 CI 单独核对；随后准备新预览并在用户退出 Monitor 后验证接回原 v3。页面确认、合并与固定目录部署分开记录",
+    "remaining": "本批新包尚未启用；提醒并在用户退出 Monitor 后接回原 v3，再做页面确认和 PR 合并收口。后端查询性能与 #18 新模式实时速度另行处理，固定目录部署分开记录；精确 CI/产物结果留在对应 PR 与本机检查点",
     "resume_requirement": "保留已合并 #25、原 v3 与数据目录，不重开普通统计验收或自行更换核心/搬迁数据；新预览启用前提醒，仅退出 Monitor、保持代理运行；PR #35 仍 planned 且最后处理，PR #33 不合并"
   },
   "capability_levels": [
