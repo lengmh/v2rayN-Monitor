@@ -13,8 +13,8 @@
     "branch": "feat/issue23-ui-polish-v2",
     "scope": "PR #30 周期查询优化：拆分状态/目录/历史请求，贯通取消，提前 ScopeIds/展示 entity 筛选，保留事务快照并在锁外聚合；沿用 MB/MiB、分页面单位与缺口延迟渲染",
     "implementation_status": "complete",
-    "remaining": "本地整合与固定副本21种结果逐值一致、切换p50/p95测量已完成；核对精确 CI/产物后提醒用户退出 Monitor 接回原 v3，再做页面确认和 PR 合并收口。#18 新模式实时速度、固定目录部署、服务商缓存/局部重绘分别处理",
-    "resume_requirement": "保留已合并 #25、原 v3 与数据目录，不重开普通统计验收或自行更换核心/搬迁数据；新预览启用前提醒，仅退出 Monitor、保持代理运行；PR #35 仍 planned 且最后处理，PR #33 不合并"
+    "remaining": "精确0bddc99已接回原v3，锁下备份/旧数据保留及采样批次相邻区间范围对账通过；用户页面确认pending，PR30保持Draft，确认后再合并收口。状态提交精确CI另核；#18新模式实时速度、固定目录部署、服务商缓存/局部重绘分别处理",
+    "resume_requirement": "实际运行0bddc99，沿用已合并#25、原v3与数据目录，现有联动快捷方式目标已更新且参数保留；不重开普通统计验收或自行更换核心/搬迁数据。后续新预览仍启用前提醒；PR35仍planned且最后处理，PR33不合并"
   },
   "capability_levels": [
     {
