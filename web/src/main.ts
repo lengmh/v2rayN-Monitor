@@ -346,6 +346,11 @@ function renderGapDetails(): void {
   target.replaceChildren(rows);
   displayedGaps = latestHistory.gaps; displayedGapZone = settings.timeZoneId;
 }
+function hideGapDetails(): void {
+  el<HTMLDetailsElement>('gap-details').open = false;
+  show('gap-details', false);
+  renderGapDetails();
+}
 function renderHistory(history: HistoryResult): void {
   motion.cancel();
   latestHistory = history;
@@ -550,7 +555,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   put('comparison-recovery', `本机历史间断 ${local.gapCount} 段。已计入总量但未分配到当前时间桶：${exactBytes(unbucketed)}；部分重叠恢复区间（未计入）：${exactBytes(partial)}。`);
   put('quality-summary', '同名汇总对照 · 两边数值分别计量');
   put('quality-notice', '名称相同仅用于展示对照，不证明节点身份相同；服务商记录范围可能不同。缺口不是零，不把差额归因于设备或漏计。');
-  show('gap-details', false);
+  hideGapDetails();
   const table = (id: string, rows: ComparisonRow[], scaleRows = rows): void => {
     const body = el(id); detailPopover.beforeReplace(body); body.replaceChildren();
     const maximum = scaleRows.reduce((max, row) => {
@@ -683,7 +688,7 @@ function renderProviderHistory(history: ProviderHistory): void {
   }
   put('quality-notice', '仅统计所选服务商的已导入记录，不代表完整使用量。上下行方向、设备和 IP 未知；不与本机流量相加。');
   put('quality-summary', '服务商独立记录 · 与本机分别统计');
-  show('gap-details', false);
+  hideGapDetails();
   put('trend-subtitle', `${providerMetric === 'raw' ? '原始量' : '计费量'} · ${settings.timeZoneId}`);
   renderChart({ series: history.series.map(point => ({ label: point.label, upload: '0', download: providerUnits(metric(point)).toString() })) }, true);
   put('node-count', String(history.nodes.length));
@@ -734,7 +739,7 @@ async function refresh(force = false): Promise<void> {
         el('chart').classList.add('empty');
         el('chart').append(element('p', '探测历史尚未启用，流量未知。'));
         el('chart').setAttribute('aria-label', '探测量未知');
-        show('gap-details', false); pagination(0);
+        hideGapDetails(); pagination(0);
         el('summary').setAttribute('aria-busy', 'false');
         el<HTMLButtonElement>('export-button').disabled = true;
         put('refresh-note', '探测未启用 · 5 秒检查');
@@ -853,7 +858,7 @@ function chooseSource(source: string): void {
   for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
   for (const id of ['comparison-nodes', 'comparison-buckets', 'comparison-chart', 'comparison-nodes-shares', 'comparison-buckets-shares']) el(id).replaceChildren();
   for (const id of ['local', 'raw', 'billed']) { put(`comparison-${id}`, '—'); put(`comparison-${id}-exact`, '正在读取…'); }
-  pagination(0); put('chart-scale', ''); show('gap-details', false);
+  pagination(0); put('chart-scale', ''); hideGapDetails();
   put('quality-notice', '正在读取所选来源…'); put('quality-summary', '正在读取所选来源…');
   if (probeView()) put('probe-coverage', '正在读取所选探测维度及节点的历史起点…');
 }

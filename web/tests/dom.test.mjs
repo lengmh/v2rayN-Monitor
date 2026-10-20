@@ -95,6 +95,42 @@ test('closed gap details defer all list rows and expansion preserves the complet
   await until(() => get('gap-list').children.length === gaps.length);
   assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
 });
+test('changing gap context closes and releases old rows, including disabled probe history', async t => {
+  let historyEnabled = true;
+  const gaps = Array.from({ length: 1500 }, () => ({ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z',
+    reason: 'snapshot_changed', isOpen: false }));
+  const provider = { source: 'Synthetic provider', rawBytes: '1000000', billedBytes: '1000000', recordCount: 0, series: [], nodes: [], records: [] };
+  const { w, get, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled, state: historyEnabled ? 'available' : 'disabled' } }),
+    '/api/history': () => Response.json({ ...history, gapCount: gaps.length, gaps }),
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  const expand = async () => { get('gap-details').open = true; await until(() => get('gap-list').children.length === gaps.length); };
+  const closed = () => { assert.equal(get('gap-details').open, false); assert.equal(get('gap-list').children.length, 0); };
+  await until(() => get('statistics-source').options.length === 2);
+  await expand();
+  change('statistics-source', provider.source);
+  closed();
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  change('statistics-source', '');
+  await until(() => get('total-value').textContent === '16.106 GB');
+  closed();
+  await expand();
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  closed();
+  await until(() => get('total-value').textContent === '16,106.127 MB');
+  await expand();
+  historyEnabled = false;
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查');
+  closed();
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '16.106 GB');
+  closed();
+});
 test('partial route coverage stays explicit in live status and historical records', async t => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
   const { get } = await fixture(t, {
