@@ -22,7 +22,7 @@ const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const put = (id: string, value: string): void => {
   const target = el(id);
   // Preserve the exact text/accessibility name; only the display unit is quieter.
-  const amount = target.classList.contains('metric-value') ? /^(.*)( GB| GiB)$/.exec(value) : null;
+  const amount = target.classList.contains('metric-value') ? /^(.*)( [MG]i?B)$/.exec(value) : null;
   if (amount) {
     const suffix = document.createElement('span'); suffix.className = 'metric-unit'; suffix.textContent = amount[2];
     target.replaceChildren(document.createTextNode(amount[1]), suffix);
@@ -55,7 +55,15 @@ let period: Period = 'month';
 let anchor = dateInZone(new Date(), 'UTC');
 let range: Range;
 let bucket: Bucket = 'day';
-let unit: Unit = 'GB';
+const pageUnits: Record<'overview' | 'probes', Unit> = { overview: 'GB', probes: 'MB' };
+for (const view of ['overview', 'probes'] as const) {
+  try {
+    const saved = localStorage.getItem(`v2rayn-monitor-unit-${view}`);
+    if (saved === 'GB' || saved === 'GiB' || saved === 'MB' || saved === 'MiB') pageUnits[view] = saved;
+  } catch { /* Page units still work for this session when browser storage is unavailable. */ }
+}
+let unit: Unit = pageUnits.overview;
+el<HTMLSelectElement>('unit').value = unit;
 let nodeKey = '';
 let page = 0;
 const pageSize = 50;
@@ -324,6 +332,20 @@ function renderEstimate(display: TrafficDisplay | null | undefined): void {
   put('billing-note', display?.estimatedBilledBytes == null ? '未估算，不表示计费为零' :
     `名称倍率估算 · 覆盖 ${formatBytes(covered, unit)}${unknown && bytes(unknown) > 0n ? ` · 未估算 ${formatBytes(unknown, unit)}` : ''} · 非服务商扣费`);
 }
+let displayedGaps: HistoryResult['gaps'];
+let displayedGapZone = '';
+function renderGapDetails(): void {
+  const target = el('gap-list');
+  if (!latestHistory || !el<HTMLDetailsElement>('gap-details').open) {
+    target.replaceChildren(); displayedGaps = undefined; displayedGapZone = ''; return;
+  }
+  if (displayedGaps === latestHistory.gaps && displayedGapZone === settings.timeZoneId) return;
+  const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
+  const rows = document.createDocumentFragment();
+  for (const gap of latestHistory.gaps ?? []) rows.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
+  target.replaceChildren(rows);
+  displayedGaps = latestHistory.gaps; displayedGapZone = settings.timeZoneId;
+}
 function renderHistory(history: HistoryResult): void {
   motion.cancel();
   latestHistory = history;
@@ -367,11 +389,9 @@ function renderHistory(history: HistoryResult): void {
   if (history.gapCount) quality.push(`本范围有 ${history.gapCount} 段历史采集间断，当前采集状态见上方。`);
   put('quality-notice', quality.join(' '));
   put('quality-summary', recovered > 0n ? `已知合计包含 ${formatBytes(recovered, unit)} 恢复量` : history.gapCount ? `本范围有 ${history.gapCount} 段历史采集间断` : '统计口径与数据说明');
-  const details = el('gap-list'); details.replaceChildren();
-  const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
-  for (const gap of history.gaps ?? []) details.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
   show('gap-details', history.gapCount > 0);
   put('gap-summary', `查看历史间断与覆盖缺口（${history.gapCount} 段）`);
+  renderGapDetails();
   put('trend-subtitle', `${({ hour: '小时', day: '日', week: '周', month: '月', year: '年' } as const)[bucket]}分桶 · ${settings.timeZoneId}`);
   renderChart(history);
   const nodes = displayNodes(history.nodes);
@@ -771,6 +791,9 @@ function navigate(view: string): void {
   detailPopover.close();
   const wasProbe = probeView();
   activeView = view;
+  unit = pageUnits[probeView() ? 'probes' : 'overview'];
+  el<HTMLSelectElement>('unit').value = unit;
+  updateFilterDisclosure();
   for (const id of ['overview', 'settings', 'provider']) show(`${id}-view`, id === view || (id === 'overview' && probeView()));
   for (const nav of document.querySelectorAll<HTMLButtonElement>('.nav-item')) { const active = nav.dataset.view === view; nav.classList.toggle('active', active); if (active) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current'); }
   put('page-name', ({ overview: '流量统计', probes: '探测流量', settings: '采集与设置', provider: '导入记录' } as Record<string, string>)[view]);
@@ -867,12 +890,24 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')
 document.querySelector('.brand')?.addEventListener('click', event => { event.preventDefault(); navigate('overview'); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-period]')) button.addEventListener('click', () => selectPeriod(button.dataset.period as Period));
 el('custom-range').addEventListener('submit', event => { event.preventDefault(); selectRange(); });
+el('gap-details').addEventListener('toggle', renderGapDetails);
 el('previous-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, -1); selectRange(); } });
 el('next-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, 1); selectRange(); } });
 el('today-button').addEventListener('click', () => { anchor = dateInZone(new Date(), settings.timeZoneId); if (period === 'custom') selectPeriod('day'); else selectRange(); });
 el('node-filter').addEventListener('change', () => { nodeKey = el<HTMLSelectElement>('node-filter').value; page = 0; void refresh(true); });
 el('bucket').addEventListener('change', () => { bucket = el<HTMLSelectElement>('bucket').value as Bucket; page = 0; void refresh(true); });
-el('unit').addEventListener('change', () => { detailPopover.close(); unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
+el('unit').addEventListener('change', () => {
+  detailPopover.close();
+  unit = el<HTMLSelectElement>('unit').value as Unit;
+  const view = probeView() ? 'probes' : 'overview';
+  pageUnits[view] = unit;
+  try { localStorage.setItem(`v2rayn-monitor-unit-${view}`, unit); } catch { /* Session-only preference. */ }
+  if (latestHistory) renderHistory(latestHistory);
+  if (latestProvider) renderProviderHistory(latestProvider);
+  if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+  if (latestStatus) renderStatus(latestStatus);
+  renderBatches();
+});
 el('previous-page').addEventListener('click', () => { if (page > 0) { page--; void refresh(true); } });
 el('next-page').addEventListener('click', () => { if ((page + 1) * pageSize < (latestProvider?.recordCount ?? latestHistory?.recordCount ?? 0)) { page++; void refresh(true); } });
 el('filter-disclosure').addEventListener('click', () => {

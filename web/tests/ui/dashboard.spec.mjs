@@ -110,6 +110,40 @@ test('probe view separates dimensions and keeps a readable desktop and mobile la
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   expect(calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.has('basis')).toBe(false);
 });
+test('statistics and probes keep separate megabyte preferences across navigation and reload', async ({ page }) => {
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic unit preferences', demo: false,
+      currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: '524288', downloadPerSecond: '2097152',
+      probes: { historyEnabled: true, state: 'available' } }))
+  });
+  await expect(page.locator('#unit option')).toHaveText(['GB', 'GiB', 'MB', 'MiB']);
+  await page.selectOption('#unit', 'GiB');
+  await expect(page.locator('#total-value')).toHaveText('15.000 GiB');
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#total-value')).toHaveText('16,106.127 MB');
+  await expect(page.locator('#unit')).toHaveValue('MB');
+  await expect(page.locator('#total-value .metric-unit')).toHaveText(' MB');
+  await settledScreenshot(page, 'test-results/probe-units-mb-desktop.png');
+  const reads = calls.filter(call => call.path === '/api/history').length;
+  await page.selectOption('#unit', 'MiB');
+  await expect(page.locator('#total-value')).toHaveText('15,360.000 MiB');
+  await expect(page.locator('#live-download')).toHaveText('↓ 2.00 MiB/s');
+  expect(calls.filter(call => call.path === '/api/history').length).toBe(reads);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.selectOption('#theme', 'dark');
+  await page.click('#filter-disclosure');
+  await settledScreenshot(page, 'test-results/probe-units-mib-mobile.png');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.click('.nav-item[data-view=overview]');
+  await expect(page.locator('#total-value')).toHaveText('15.000 GiB');
+  await expect(page.locator('#unit')).toHaveValue('GiB');
+  await page.reload();
+  await expect(page.locator('#total-value')).toHaveText('15.000 GiB');
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#total-value')).toHaveText('15,360.000 MiB');
+  await expect(page.locator('#unit')).toHaveValue('MiB');
+  await expect(page.locator('#total-exact')).toHaveText('16,106,127,360 bytes');
+});
 test('member group labels wrap fully and local details request nonzero rows', async ({ page }) => {
   const name = '【US-1x】 1-Synthetic member with a deliberately long readable name for the ranking';
   const calls = await mock(page, {
@@ -336,7 +370,7 @@ test('issue23 captured rates, group names and exact copy work across business an
   expect(await page.evaluate(() => window.syntheticCopied)).toBe('8,053,063,680 bytes');
   await page.locator('#exact-value-dialog form button').click();
   await page.click('.nav-item[data-view=probes]');
-  await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
+  await expect(page.locator('#billing-value')).toHaveText('8,053.064 MB');
   await page.screenshot({ path: 'test-results/issue23-captured-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
