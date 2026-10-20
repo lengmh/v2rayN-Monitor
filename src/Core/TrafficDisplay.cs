@@ -124,13 +124,14 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     }
 
     internal List<StoredPart> ReadRaw(SqliteTransaction? transaction, long start, long end,
-        IReadOnlyList<string>? entities = null, CancellationToken cancellationToken = default)
+        IReadOnlyList<string>? entities = null, CancellationToken cancellationToken = default, bool scan = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (entities is { Count: 0 }) return [];
         // Preserve the original table-scan part order even when the entity index is used.
-        using var command = Command(transaction, """
-            SELECT entity_key,kind,start_ticks,end_ticks,snapshot,upload,download FROM ui_display_records
+        // Broad local-proxy queries avoid entity-index lookups followed by a rowid sort.
+        using var command = Command(transaction, $"""
+            SELECT entity_key,kind,start_ticks,end_ticks,snapshot,upload,download FROM ui_display_records{(scan ? " NOT INDEXED" : "")}
             WHERE start_ticks<$end AND end_ticks>$start
             """ + (entities is null ? "" : " AND entity_key IN (SELECT value FROM json_each($entities))") + " ORDER BY rowid;",
             ("$start", start), ("$end", end),
