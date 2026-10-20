@@ -196,8 +196,9 @@ public sealed class Ledger : IDisposable
     /// Known totals include recovered intervals fully contained by the query.
     /// Partially overlapping recovery is disclosed separately and never apportioned.
     /// </summary>
-    public HistoryResult Query(QuerySpec query)
+    public HistoryResult Query(QuerySpec query, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(query);
         if (query.End <= query.Start) throw new ArgumentException("The end must be after the start.", nameof(query));
         if (query.Page < 0 || query.PageSize is < 1 or > 1000)
@@ -209,8 +210,10 @@ public sealed class Ledger : IDisposable
         {
             ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks), ("$node", query.NodeKey), ("$name", null)
         };
-        lock (gate)
+        while (!Monitor.TryEnter(gate, 25)) cancellationToken.ThrowIfCancellationRequested();
+        try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ThrowIfDisposed();
             // A read transaction keeps the multiple summary/page queries at one snapshot.
             using var transaction = connection.BeginTransaction();
@@ -221,7 +224,7 @@ public sealed class Ledger : IDisposable
             var unbucketed = new Bytes();
             var series = new Dictionary<string, (long FirstTick, Bytes Bytes, Bytes Recovered, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var nodes = new Dictionary<string, (string Name, Bytes Bytes, Bytes Recovered)>(StringComparer.Ordinal);
-            var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
+            var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks, cancellationToken);
             var estimate = new TrafficDisplayStore.Summary();
             var nodeDisplay = new Dictionary<string, TrafficDisplayStore.Summary>(StringComparer.Ordinal);
             var comparisons = new Dictionary<string, (Bytes Bytes, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
@@ -231,7 +234,11 @@ public sealed class Ledger : IDisposable
             {
                 using var names = Command(transaction, "SELECT node_key FROM nodes WHERE name=$name COLLATE BINARY;", ("$name", query.NodeName));
                 using var named = names.ExecuteReader();
-                while (named.Read()) matchingKeys.Add(named.GetString(0));
+                while (named.Read())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    matchingKeys.Add(named.GetString(0));
+                }
             }
             var count = 0;
             using (var command = RecordCommand(transaction, query with { NodeName = null }, -1, 0))
@@ -240,6 +247,7 @@ public sealed class Ledger : IDisposable
                 while (reader.Read())
                 foreach (var row in ReadRecords(reader, metadata))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var name = row.Display!.OriginalName ?? row.NodeName;
                     if (query.NodeName is not null && name != query.NodeName) continue;
                     matchingKeys.Add(row.NodeKey);
@@ -304,12 +312,14 @@ public sealed class Ledger : IDisposable
             using (var reader = command.ExecuteReader())
                 while (reader.Read())
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (query.NodeName is not null && !reader.IsDBNull(4) && !matchingKeys.Contains(reader.GetString(4))) continue;
                     gaps++;
                     partialCoverage |= reader.GetString(2) == "uncollected_outbounds";
                     if (gapDetails.Count < 200)
                         gapDetails.Add(new(Iso(reader.GetInt64(0)), Iso(reader.GetInt64(1)), reader.GetString(2), reader.GetInt64(3) != 0));
                 }
+            cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
             return new HistoryResult(Iso(query.Start.UtcTicks), Iso(query.End.UtcTicks), totals.UploadText, totals.DownloadText,
                 unallocated.UploadText, unallocated.DownloadText, gaps,
@@ -329,6 +339,7 @@ public sealed class Ledger : IDisposable
                     { Display = x.Value.Display.Result() }).ToArray()
             };
         }
+        finally { Monitor.Exit(gate); }
     }
 
     /// <summary>Materializes a bounded export from one SQLite snapshot, without page-by-page reads.</summary>

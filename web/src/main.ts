@@ -49,6 +49,11 @@ let ready = false;
 const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo'];
 for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 let refreshController: AbortController | null = null;
+let statusController: AbortController | null = null;
+let statusRequest: Promise<CollectorStatus | undefined> | null = null;
+let nodesController: AbortController | null = null;
+let nodesContext = '';
+let nodeCatalog: NodeInfo[] | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let settings: Settings = { v2rayNPath: '', timeZoneId: 'UTC', demo: false };
 let period: Period = 'month';
@@ -88,8 +93,7 @@ let importRequest: { source: string; timeZoneId: string; csv: string } | null = 
 let importRevision = 0;
 
 function expireSession(): void {
-  expired = true; refreshController?.abort();
-  if (refreshTimer) clearTimeout(refreshTimer);
+  expired = true; pauseRefresh();
   show('session-alert', true); put('refresh-note', '会话已失效');
   for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 }
@@ -713,19 +717,77 @@ async function loadSources(): Promise<void> {
   for (const source of sources) { const option = element('option', `服务商 · ${source}`); option.value = source; select.append(option); }
   select.value = statisticsSource;
 }
-async function refresh(force = false): Promise<void> {
-  if (expired || !ready || !range) return;
-  if (refreshController && !force) return;
+function statisticsVisible(): boolean { return activeView === 'overview' || probeView(); }
+function directoryContext(): string { return JSON.stringify([probeView() ? probeBasis : '', statisticsSource, comparison]); }
+function renderNodeCatalog(): void {
+  if (!nodeCatalog) return;
+  if (comparison) {
+    const names = [...new Set([...nodeCatalog, ...(latestComparison?.local.comparisonNodes ?? [])].map(node => node.name))].sort();
+    renderNodes(names.map(name => ({ key: name, name })));
+  } else renderNodes(nodeCatalog);
+  updateFilterDisclosure();
+}
+function pauseRefresh(): void {
+  refreshController?.abort(); refreshController = null;
+  statusController?.abort(); statusController = null; statusRequest = null;
+  nodesController?.abort(); nodesController = null;
   if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+}
+function scheduleRefresh(): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+  if (!ready || expired || document.hidden) return;
+  refreshTimer = setTimeout(() => { scheduleRefresh(); void refresh(false, true); }, 5000);
+}
+function refreshStatus(): Promise<CollectorStatus | undefined> {
+  if (statusRequest) return statusRequest;
+  const controller = new AbortController(); statusController = controller;
+  statusRequest = api<CollectorStatus>('/api/status', { signal: controller.signal }).then(status => {
+    if (controller.signal.aborted || statusController !== controller) return undefined;
+    renderStatus(status); return status;
+  }).catch(error => {
+    if (!controller.signal.aborted && !expired) fail(`暂时无法读取采集状态。${errorText(error)}`);
+    return undefined;
+  }).finally(() => {
+    if (statusController === controller) { statusController = null; statusRequest = null; }
+  });
+  return statusRequest;
+}
+async function refreshNodes(poll: boolean): Promise<void> {
+  const context = directoryContext();
+  if (nodesContext === context && (nodesController || (nodeCatalog && !poll))) return;
+  nodesController?.abort();
+  if (nodesContext !== context) nodeCatalog = null;
+  nodesContext = context;
+  const controller = new AbortController(); nodesController = controller;
+  try {
+    const paths = comparison ? ['/api/nodes', `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}`] :
+      [statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : `/api/nodes${probeView() ? `?basis=${probeBasis}` : ''}`];
+    const catalogs = await Promise.all(paths.map(path => api<NodeInfo[]>(path, { signal: controller.signal })));
+    if (controller.signal.aborted || nodesController !== controller || context !== directoryContext()) return;
+    nodeCatalog = catalogs.flat(); renderNodeCatalog();
+  } catch (error) {
+    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法更新节点目录。${errorText(error)}`); }
+  } finally {
+    if (nodesController === controller) nodesController = null;
+  }
+}
+async function refresh(force = false, auxiliary = false): Promise<void> {
+  if (expired || !ready || !range || document.hidden) return;
+  const status = auxiliary || !latestStatus ? refreshStatus() : Promise.resolve(latestStatus);
+  if (!statisticsVisible()) return;
+  // A period/filter change needs history only. Collector ticks update the directory independently.
+  if (!probeView()) void refreshNodes(auxiliary && !statisticsSource);
+  if (refreshController && !force) return;
   refreshController?.abort();
   const controller = new AbortController(); refreshController = controller;
   if (force) { detailPopover.close(); show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
   try {
-    let probeStatus: CollectorStatus | undefined;
     if (probeView()) {
-      probeStatus = await api<CollectorStatus>('/api/status', { signal: controller.signal });
+      const probeStatus = await status;
       if (controller.signal.aborted || refreshController !== controller) return;
-      renderStatus(probeStatus);
+      if (!probeStatus) { el('summary').setAttribute('aria-busy', 'false'); return; }
       if (!probeStatus.probes?.historyEnabled) {
         latestHistory = null; statisticLabels();
         for (const id of ['total-value', 'upload-value', 'download-value', 'node-count']) put(id, '—');
@@ -746,49 +808,31 @@ async function refresh(force = false): Promise<void> {
         return;
       }
       el<HTMLButtonElement>('export-button').disabled = false;
+      void refreshNodes(auxiliary);
     }
     // Imported history changes only on an explicit operation, not each collector tick.
-    if (statisticsSource && (latestProvider || latestComparison) && !force) {
-      const status = await api<CollectorStatus>('/api/status', { signal: controller.signal });
-      if (!controller.signal.aborted && refreshController === controller) renderStatus(status);
-      return;
-    }
+    if (statisticsSource && (latestProvider || latestComparison) && !force) return;
     if (comparison) {
-      const [status, localNodes, providerNodes, local, provider] = await Promise.all([
-        api<CollectorStatus>('/api/status', { signal: controller.signal }),
-        api<NodeInfo[]>('/api/nodes', { signal: controller.signal }),
-        api<NodeInfo[]>(`/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}`, { signal: controller.signal }),
+      const [local, provider] = await Promise.all([
         api<HistoryResult>(`/api/history?${query(true)}`, { signal: controller.signal }),
         api<ProviderHistory>(`/api/provider/history?${query()}`, { signal: controller.signal })
       ]);
       if (controller.signal.aborted || refreshController !== controller) return;
-      renderStatus(status);
-      const names = [...new Set([...localNodes, ...providerNodes, ...(local.comparisonNodes ?? [])].map(node => node.name))].sort();
-      renderNodes(names.map(name => ({ key: name, name })));
       renderComparison(local, provider);
+      renderNodeCatalog();
       put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)} · 对照按操作刷新`);
       return;
     }
-    const results = await Promise.allSettled([
-      probeStatus ? Promise.resolve(probeStatus) : api<CollectorStatus>('/api/status', { signal: controller.signal }),
-      api<NodeInfo[]>(statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : `/api/nodes${probeView() ? `?basis=${probeBasis}` : ''}`, { signal: controller.signal }),
-      api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal })
-    ]);
+    const history = await api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal });
     if (controller.signal.aborted || refreshController !== controller) return;
-    const [status, nodes, history] = results;
-    if (status.status === 'fulfilled') renderStatus(status.value);
-    if (nodes.status === 'fulfilled') renderNodes(nodes.value);
-    if (history.status === 'fulfilled') {
-      if (statisticsSource) renderProviderHistory(history.value as ProviderHistory); else renderHistory(history.value as HistoryResult);
-      show('global-error', false);
-    }
-    for (const result of results) if (result.status === 'rejected') throw result.reason;
+    if (statisticsSource) renderProviderHistory(history as ProviderHistory); else renderHistory(history as HistoryResult);
+    show('global-error', false);
     put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 5 秒'}`);
   } catch (error) {
-    if (!controller.signal.aborted && !expired) { fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '连接中断 · 自动重试'); }
+    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '连接中断 · 自动重试'); }
   } finally {
     updateFilterDisclosure();
-    if (refreshController === controller) { refreshController = null; if (!expired) refreshTimer = setTimeout(() => { void refresh(); }, 5000); }
+    if (refreshController === controller) { refreshController = null; el('summary').setAttribute('aria-busy', 'false'); }
   }
 }
 function navigate(view: string): void {
@@ -805,8 +849,9 @@ function navigate(view: string): void {
   if (wasProbe !== probeView()) {
     chooseSource(probeView() ? '' : statisticsSource);
     el<HTMLButtonElement>('export-button').disabled = expired || !ready;
-    if (ready) void refresh(true);
   }
+  if (!statisticsVisible()) { refreshController?.abort(); refreshController = null; nodesController?.abort(); nodesController = null; }
+  if (ready) void refresh(true, true);
   if (view === 'provider' && ready) void loadBatches();
 }
 async function loadBatches(): Promise<void> {
@@ -826,7 +871,7 @@ function renderBatches(): void {
     view.addEventListener('click', async () => {
       try {
         await loadSources(); chooseSource(batch.source);
-        navigate('overview'); void refresh(true);
+        navigate('overview');
       } catch (error) { formResult('import-result', errorText(error), true); }
     });
     group.append(element('span', batch.source), view); source.append(group);
@@ -834,6 +879,7 @@ function renderBatches(): void {
   }
 }
 function chooseSource(source: string): void {
+  nodesController?.abort(); nodesController = null; nodesContext = ''; nodeCatalog = null;
   statisticsSource = source; el<HTMLSelectElement>('statistics-source').value = source;
   if (!source) comparison = false;
   el<HTMLInputElement>('compare-toggle').checked = comparison;
@@ -1007,7 +1053,8 @@ el('settings-form').addEventListener('submit', async event => {
     dateInZone(new Date(), next.timeZoneId);
     await post('/api/settings', next); settings = next; anchor = dateInZone(new Date(), settings.timeZoneId);
     el<HTMLSelectElement>('import-zone').value = settings.timeZoneId; invalidateImport();
-    selectRange(); formResult('settings-result', '设置已保存。采集器会重新检查实例，首次有效采样先建立基线。');
+    updateRange(); page = 0; void refresh(true, true);
+    formResult('settings-result', '设置已保存。采集器会重新检查实例，首次有效采样先建立基线。');
   } catch (error) { formResult('settings-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('export-button').addEventListener('click', async () => {
@@ -1046,17 +1093,18 @@ el('commit-import').addEventListener('click', async () => {
       const result = await post<ImportPreview>('/api/imports/commit', request); invalidateImport();
       formResult('import-result', `导入完成：新增 ${result.newRowCount.toLocaleString('zh-CN')} 条，跳过 ${result.skippedRowCount.toLocaleString('zh-CN')} 条。${result.duplicate ?
         '全部记录已存在，未新增批次。' : `新增原始量 ${exactBytes(result.newRawBytes)}，新增计费量 ${exactProviderBytes(result.newBilledBytes)}。已保存到独立服务商账本。`}可在统计来源中选择查看节点历史。`);
-      await loadBatches(); await loadSources(); if (statisticsSource === request.source.trim()) await refresh(true);
+      await loadBatches(); await loadSources();
+      if (statisticsSource === request.source.trim()) { nodesContext = ''; await refresh(true, true); }
     }
   catch (error) { formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('seed-demo').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('seed-demo'); button.disabled = true;
-  try { await post('/api/demo', {}); put('demo-result', '已生成合成记录，请回到本机总览查看。'); await refresh(true); }
+  try { await post('/api/demo', {}); put('demo-result', '已生成合成记录，请回到本机总览查看。'); nodesContext = ''; await refresh(true, true); }
   catch (error) { put('demo-result', errorText(error)); } finally { button.disabled = expired; }
 });
-window.addEventListener('pagehide', () => { refreshController?.abort(); if (refreshTimer) clearTimeout(refreshTimer); });
-window.addEventListener('pageshow', event => { if (event.persisted && !expired) void refresh(true); });
+window.addEventListener('pagehide', pauseRefresh);
+window.addEventListener('pageshow', event => { if (event.persisted && !expired) { scheduleRefresh(); void refresh(true, true); } });
 let resizePending = false;
 window.addEventListener('resize', () => {
   if (resizePending) return;
@@ -1067,7 +1115,10 @@ window.addEventListener('resize', () => {
     else if (latestProvider) renderProviderHistory(latestProvider); else if (latestHistory) renderChart(latestHistory);
   });
 });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !expired && range) void refresh(true); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) pauseRefresh();
+  else if (!expired && range) { scheduleRefresh(); void refresh(true, true); }
+});
 
 async function start(): Promise<void> {
   // A launch credential is used once, kept out of storage, and removed before any async work.
@@ -1086,7 +1137,7 @@ async function start(): Promise<void> {
     }
     ready = true; for (const id of writeControls) el<HTMLButtonElement>(id).disabled = false;
     anchor = dateInZone(new Date(), settings.timeZoneId); updateRange(); show('demo-notice', settings.demo); show('demo-controls', settings.demo);
-    await refresh(true);
+    scheduleRefresh(); await refresh(true, true);
     await loadSources();
     if (activeView === 'provider') await loadBatches();
   } catch (error) { if (!expired) fail(`无法连接本机采集器。${errorText(error)} 请确认托盘仍在运行，并从托盘重新打开页面。`); }

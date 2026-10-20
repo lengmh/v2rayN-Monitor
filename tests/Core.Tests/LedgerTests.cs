@@ -873,6 +873,139 @@ public sealed class LedgerTests : IDisposable
     private static ScopeQuery ScopeAll(string basis = "actual_member", long? id = null, int page = 0, int size = 50) =>
         new(basis, Epoch.AddYears(-2), Epoch.AddYears(3), "UTC", ScopeId: id, Page: page, PageSize: size);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HistoryCancellationBeforeAndWhileWaitingLeavesTheLedgerUsable(bool scopes)
+    {
+        using IDisposable ledger = scopes ? ScopeLedger.CreateNew(Database) : new Ledger(Database);
+        var gate = ledger.GetType().GetField("gate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(ledger)!;
+        using var cancellation = new CancellationTokenSource();
+        Action query = () =>
+        {
+            if (ledger is ScopeLedger scope) scope.Query(ScopeAll(), cancellation.Token);
+            else ((Ledger)ledger).Query(All(), cancellation.Token);
+        };
+        var before = HistorySnapshot(Database, includeSchema: false);
+        using var started = new ManualResetEventSlim();
+        Monitor.Enter(gate);
+        try
+        {
+            Exception? error = null;
+            var pending = new Thread(() =>
+            {
+                started.Set();
+                try { query(); }
+                catch (Exception ex) { error = ex; }
+            });
+            pending.Start();
+            Assert.True(started.Wait(TimeSpan.FromSeconds(2)));
+            cancellation.CancelAfter(75);
+            // Cancellation must complete before the writer releases its gate.
+            Assert.True(pending.Join(TimeSpan.FromSeconds(2)));
+            Assert.IsType<OperationCanceledException>(error);
+        }
+        finally { Monitor.Exit(gate); }
+        Assert.Throws<OperationCanceledException>(query);
+        Assert.Equal(before, HistorySnapshot(Database, includeSchema: false));
+        if (ledger is ScopeLedger scopeLedger)
+        {
+            scopeLedger.Accept(Batch(0, Reading("a", 0)));
+            scopeLedger.Accept(Batch(1, Reading("a", 7)));
+            Assert.Equal("7", scopeLedger.Query(ScopeAll()).Upload);
+        }
+        else
+        {
+            ((Ledger)ledger).Accept(Sample(0, 0));
+            ((Ledger)ledger).Accept(Sample(1, 7));
+            Assert.Equal("7", ((Ledger)ledger).Query(All()).Upload);
+        }
+    }
+
+    [Fact]
+    public void ScopeScanCancellationReleasesTransactionAndAllowsSubsequentCollection()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true);
+        ledger.Accept(Batch(0, Reading("a", 0), Reading("b", 0)));
+        ledger.Accept(Batch(1, Reading("a", 5), Reading("b", 7)));
+        var before = HistorySnapshot(Database, includeSchema: false);
+        var connection = (SqliteConnection)typeof(ScopeLedger).GetField("connection",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(ledger)!;
+        using var cancellation = new CancellationTokenSource();
+        var scanned = 0;
+        connection.CreateFunction<long, long>("cancel_scan", value =>
+        {
+            if (++scanned == 2) cancellation.Cancel();
+            return value;
+        });
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                ALTER TABLE scope_minutes RENAME TO synthetic_scan_minutes;
+                CREATE VIEW scope_minutes AS SELECT start_ticks,scope_id,cancel_scan(upload) AS upload,
+                    download,approximate,synthetic FROM synthetic_scan_minutes;
+                """;
+            command.ExecuteNonQuery();
+        }
+        ScopeQueryMetrics? metrics = null;
+        Assert.Throws<OperationCanceledException>(() => ledger.Query(ScopeAll(), cancellation.Token, value => metrics = value));
+        Assert.True(scanned >= 2);
+        Assert.NotNull(metrics);
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "DROP VIEW scope_minutes; ALTER TABLE synthetic_scan_minutes RENAME TO scope_minutes;";
+            command.ExecuteNonQuery();
+        }
+        Assert.Equal(before, HistorySnapshot(Database, includeSchema: false));
+        Assert.Equal("12", ledger.Query(ScopeAll()).Upload);
+        ledger.Accept(Batch(2, Reading("a", 8), Reading("b", 9)));
+        Assert.Equal("17", ledger.Query(ScopeAll()).Upload);
+    }
+
+    [Theory]
+    [InlineData("actual_member")]
+    [InlineData("probe_urltest_member")]
+    public void ScopeIdsFilterRawRowsAndMetadataWithoutChangingHistoricalProjection(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        var original = new MeasurementScope(basis, "index_id", "a", "Synthetic fallback", "a", "fixture-a")
+            { CapturedName = new("Synthetic zebra 0.5x", "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic alpha 2x", "Synthetic group") };
+        var other = original with { IdentityValue = "b", NodeId = "b", OutboundTag = "fixture-b" };
+        foreach (var second in new[] { 0, 1, 2, 3, 61 })
+            ledger.Accept(new("instance", "process-1", "config-1", Epoch.AddSeconds(second),
+                [new(second < 2 ? original : renamed, second * 10, 0), new(other, second * 100, 0)], []));
+        RunSql($"INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin) VALUES({Epoch.UtcTicks},{Epoch.AddSeconds(1).UtcTicks},NULL,'synthetic_legacy',0,'legacy');");
+        var id = ledger.GetScopes(basis).Single(x => x.Scope.NodeId == "a").Id;
+        var otherId = ledger.GetScopes(basis).Single(x => x.Scope.NodeId == "b").Id;
+        var query = ScopeAll(basis, size: 1);
+        ScopeQueryMetrics? allMetrics = null, selectedMetrics = null, emptyMetrics = null;
+        ledger.Query(query, observer: value => allMetrics = value);
+        foreach (var name in new string?[] { null, "Synthetic zebra 0.5x", "Synthetic alpha 2x" })
+        foreach (var bucket in new[] { "hour", "day" })
+        foreach (var page in new[] { 0, 1 })
+        {
+            var selected = query with { ScopeName = name, Bucket = bucket, Page = page, NonZeroRecords = true };
+            var expected = ledger.Query(selected with { ScopeId = id });
+            var actual = ledger.Query(selected with { ScopeIds = [id] }, observer: value => selectedMetrics = value);
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected), System.Text.Json.JsonSerializer.Serialize(actual));
+        }
+        Assert.True(selectedMetrics!.RowsRead < allMetrics!.RowsRead);
+        Assert.True(selectedMetrics.MetadataRowsRead < allMetrics.MetadataRowsRead);
+        Assert.Equal("5", ledger.Query(query with { ScopeIds = [id], ScopeName = "Synthetic zebra 0.5x" }).Display!.EstimatedBilledBytes);
+        Assert.Equal(new[] { "Synthetic zebra 0.5x", "Synthetic alpha 2x", "Synthetic fallback" },
+            ledger.Query(query with { ScopeIds = [id], PageSize = 50 }).Records
+                .Where(x => x.Quality == "measured").Select(x => x.Name).ToArray());
+        var empty = ledger.Query(query with { ScopeIds = [] }, observer: value => emptyMetrics = value);
+        Assert.Equal("0", empty.Upload);
+        Assert.Empty(empty.Records);
+        Assert.Null(Assert.Single(empty.Gaps).ScopeId);
+        Assert.Equal(0, emptyMetrics!.RowsRead);
+        Assert.Equal(0, emptyMetrics.MetadataRowsRead);
+        Assert.Empty(ledger.Query(query with { ScopeId = id, ScopeIds = [otherId] }).Records);
+        Assert.True(selectedMetrics.Total >= selectedMetrics.LockWait + selectedMetrics.LockHeld + selectedMetrics.Aggregation);
+    }
+
     [Fact]
     public void ScopeNonZeroDetailsFilterBeforePagingWithoutChangingTotalsGapsOrExport()
     {
