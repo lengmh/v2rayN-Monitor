@@ -15,6 +15,18 @@ test('GB and GiB use different exact divisors and integer rounding', () => {
   assert.equal(formatBytes('0', 'GiB'), '0.000 GiB');
   assert.equal(formatBytes('1', 'GB'), '< 0.001 GB');
 });
+test('MB and MiB use exact megabyte divisors and the selected decimal or binary family', () => {
+  assert.equal(formatBytes('1000000', 'MB'), '1.000 MB');
+  assert.equal(formatBytes('1048576', 'MiB'), '1.000 MiB');
+  assert.equal(formatBytes('1048576', 'MB'), '1.049 MB');
+  assert.equal(formatBytes('0', 'MiB'), '0.000 MiB');
+  assert.equal(formatBytes('1', 'MB'), '< 0.001 MB');
+  assert.equal(formatBytes('9007199254740993', 'MB'), '9,007,199,254.741 MB');
+  assert.equal(formatRecordBytes('1000', 'MB'), '1.00 KB');
+  assert.equal(formatRecordBytes('1024', 'MiB'), '1.00 KiB');
+  assert.equal(rate('1000000', 'MB'), '1.00 MB/s');
+  assert.equal(rate('1048576', 'MiB'), '1.00 MiB/s');
+});
 test('rates preserve missing vs zero', () => { assert.equal(rate(null, 'GB'), '—'); assert.equal(rate('0', 'GB'), '0 B/s'); assert.equal(rate('2048', 'GiB'), '2.00 KiB/s'); });
 test('invalid byte payload fails closed', () => { for (const value of ['-1', '1.5', '1e3', 'NaN', '<script>']) assert.throws(() => bytes(value)); });
 test('chart percentage converts only bounded ratio', () => { assert.equal(percentage(10n ** 30n, 2n * 10n ** 30n), 50); assert.equal(percentage(1n, 0n), 0); assert.equal(percentage(3n, 2n), 100); });

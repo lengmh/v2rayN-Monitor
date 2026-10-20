@@ -7,10 +7,11 @@ const asset = (await readdir(new URL('../dist/assets/', import.meta.url))).find(
 const script = await readFile(new URL(`../dist/assets/${asset}`, import.meta.url), 'utf8');
 const history = { upload: '1073741824', download: '15032385536', unallocatedUpload: '0', unallocatedDownload: '0', gapCount: 0, series: [{ label: '2026-10-09', upload: '1073741824', download: '15032385536' }], nodes: [{ key: 'a', name: 'Synthetic A', upload: '1073741824', download: '15032385536' }], records: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', nodeKey: 'a', nodeName: 'Synthetic A', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51 };
 async function until(condition, timeout = 1000) { for (let i = 0; i < timeout / 5; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
-async function fixture(t, overrides = {}) {
+async function fixture(t, overrides = {}, savedUnits = {}) {
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4173/#synthetic-once', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const w = dom.window, calls = [], errors = [];
+  for (const [view, unit] of Object.entries(savedUnits)) w.localStorage.setItem(`v2rayn-monitor-unit-${view}`, unit);
   w.addEventListener('error', event => errors.push(event.error));
   w.AbortSignal = AbortSignal; w.AbortController = AbortController;
   w.fetch = async (url, options = {}) => {
@@ -22,7 +23,7 @@ async function fixture(t, overrides = {}) {
     return Response.json(routes[parsed.pathname] || {});
   };
   w.eval(script);
-  await until(() => w.document.getElementById('total-value').textContent === '16.106 GB').catch(error => { throw new Error(`${error.message}; alert=${w.document.getElementById('global-error').textContent}; calls=${calls.map(c=>c.path).join(',')}; errors=${errors.map(e=>String(e)).join(',')}`); });
+  await until(() => w.document.getElementById('total-exact').textContent === '16,106,127,360 bytes').catch(error => { throw new Error(`${error.message}; alert=${w.document.getElementById('global-error').textContent}; calls=${calls.map(c=>c.path).join(',')}; errors=${errors.map(e=>String(e)).join(',')}`); });
   return { w, calls, errors, get: id => w.document.getElementById(id), change: (id, value) => { const el = w.document.getElementById(id); el.value = value; el.dispatchEvent(new w.Event('change')); }, submit: id => w.document.getElementById(id).dispatchEvent(new w.Event('submit', { cancelable: true })) };
 }
 test('production DOM exchanges fragment once, keeps integer bytes, separates missing rate from zero', async t => {
@@ -31,6 +32,68 @@ test('production DOM exchanges fragment once, keeps integer bytes, separates mis
   assert.equal(calls.find(c => c.path === '/api/session').headers['x-monitor-request'], '1');
   assert.equal(get('live-upload').textContent, '↑ —'); assert.equal(get('live-download').textContent, '↓ 0 B/s');
   change('unit', 'GiB'); assert.equal(get('total-value').textContent, '15.000 GiB'); assert.equal(get('total-exact').textContent, '16,106,127,360 bytes'); assert.equal(errors.length, 0);
+});
+test('statistics and probes default to GB and MB and retain independent display units', async t => {
+  const { w, calls, get, change, errors } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'available' } })
+  });
+  assert.deepEqual(Array.from(get('unit').options, option => option.value).sort(), ['GB', 'GiB', 'MB', 'MiB'].sort());
+  assert.equal(get('unit').value, 'GB');
+  change('unit', 'GiB');
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('statistics-title').textContent === '探测流量' && get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(get('unit').value, 'MB');
+  assert.equal(get('total-value').textContent, '16,106.127 MB');
+  assert.equal(get('total-value').querySelector('.metric-unit').textContent, ' MB');
+  const historyReads = calls.filter(call => call.path === '/api/history').length;
+  change('unit', 'MiB');
+  assert.equal(get('total-value').textContent, '15,360.000 MiB');
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  assert.equal(calls.filter(call => call.path === '/api/history').length, historyReads);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '15.000 GiB');
+  assert.equal(get('unit').value, 'GiB');
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('total-value').textContent === '15,360.000 MiB');
+  assert.equal(get('unit').value, 'MiB');
+  assert.equal(w.localStorage.getItem('v2rayn-monitor-unit-overview'), 'GiB');
+  assert.equal(w.localStorage.getItem('v2rayn-monitor-unit-probes'), 'MiB');
+  assert.deepEqual(errors, []);
+});
+test('saved page units restore on a new page and invalid preferences retain the defaults', async t => {
+  const overrides = { '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+    probes: { historyEnabled: true, state: 'available' } }) };
+  const saved = await fixture(t, overrides, { overview: 'MB', probes: 'MiB' });
+  assert.equal(saved.get('unit').value, 'MB');
+  assert.equal(saved.get('total-value').textContent, '16,106.127 MB');
+  saved.w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => saved.get('total-value').textContent === '15,360.000 MiB');
+  const invalid = await fixture(t, overrides, { overview: 'TB', probes: 'NaN' });
+  assert.equal(invalid.get('unit').value, 'GB');
+  invalid.w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => invalid.get('total-value').textContent === '16,106.127 MB');
+  assert.equal(invalid.get('unit').value, 'MB');
+});
+test('closed gap details defer all list rows and expansion preserves the complete history', async t => {
+  const gaps = Array.from({ length: 1500 }, () => ({ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z',
+    reason: 'snapshot_changed', isOpen: false }));
+  const { get, change } = await fixture(t, { '/api/history': () => Response.json({ ...history, gapCount: gaps.length, gaps }) });
+  assert.equal(get('gap-details').open, false);
+  assert.equal(get('gap-list').children.length, 0);
+  assert.ok(get('gap-summary').textContent.includes('1500 段'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').children.length === gaps.length);
+  assert.ok(get('gap-list').lastElementChild.textContent.includes('配置快照变化'));
+  const first = get('gap-list').firstElementChild;
+  change('unit', 'MB');
+  assert.equal(get('gap-list').firstElementChild, first);
+  assert.equal(get('gap-list').children.length, gaps.length);
+  get('gap-details').open = false;
+  await until(() => get('gap-list').children.length === 0);
+  get('gap-details').open = true;
+  await until(() => get('gap-list').children.length === gaps.length);
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
 });
 test('partial route coverage stays explicit in live status and historical records', async t => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
@@ -46,6 +109,8 @@ test('partial route coverage stays explicit in live status and historical record
   assert.ok(get('settings-collector-status').textContent.includes(description));
   assert.equal(get('status-dot').classList.contains('connected'), false);
   assert.ok(get('quality-notice').textContent.includes('未覆盖范围的流量未知'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').textContent.includes('其他出站未采集，流量未知'));
   assert.ok(get('gap-list').textContent.includes('其他出站未采集，流量未知'));
   assert.ok(get('records').textContent.includes('部分出站'));
   assert.equal(get('total-value').textContent, '16.106 GB');
@@ -215,6 +280,8 @@ test('zero-only local details explain that records are hidden without hiding qua
       gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', reason: 'snapshot_changed', isOpen: false }] })
   });
   assert.ok(get('records').textContent.includes('零字节记录已隐藏'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').textContent.includes('快照'));
   assert.ok(get('gap-list').textContent.includes('快照'));
 });
 test('custom dates, bucket, node and pagination retain independent semantics', async t => {
@@ -278,6 +345,8 @@ test('recovery is disclosed as already included while partial overlap stays excl
   assert.ok(get('quality-notice').textContent.includes('已包含恢复量 3.000 GB'));
   assert.ok(get('quality-notice').textContent.includes('尚未分配到当前趋势图'));
   assert.ok(get('quality-notice').textContent.includes('本范围内用量未知，未计入合计'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').textContent.includes('已结束（不代表流量全部恢复）'));
   assert.ok(get('gap-list').textContent.includes('已结束（不代表流量全部恢复）'));
 });
 
