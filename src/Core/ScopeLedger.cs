@@ -356,17 +356,54 @@ public sealed class ScopeLedger : IDisposable
                 ThrowIfDisposed();
                 // Copy every component from one transaction before releasing the single-writer gate.
                 using var transaction = connection.BeginTransaction();
+                var recordParameters = parameters;
+                var selectedIds = ids;
                 if (query.ScopeName is not null)
                 {
-                    using var names = Command(transaction, "SELECT scope_id FROM measurement_scopes WHERE name=$name COLLATE BINARY;", ("$name", query.ScopeName));
-                    using var named = names.ExecuteReader();
-                    while (named.Read())
+                    using (var command = Command(transaction, """
+                        SELECT scope_id,basis,name,node_key,outbound_tag FROM measurement_scopes
+                        WHERE (basis=$basis OR ($basis='local_proxy' AND basis IN ('actual_member','legacy_proxy')))
+                            AND ($id IS NULL OR scope_id=$id)
+                            AND ($ids IS NULL OR scope_id IN (SELECT value FROM json_each($ids)));
+                        """, parameters))
+                    using (var reader = command.ExecuteReader())
+                        while (reader.Read())
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            directory.Add(reader.GetInt64(0), new(reader.GetString(1), reader.GetString(2),
+                                reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4)));
+                        }
+                    var candidates = new HashSet<long>();
+                    foreach (var (id, scope) in directory)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        matchingScopes.Add(named.GetInt64(0));
+                        if (scope.Name == query.ScopeName) { matchingScopes.Add(id); candidates.Add(id); }
+                        if (Projection(id, directory, projections).Historical?.OriginalName == query.ScopeName)
+                            candidates.Add(id);
                     }
+                    if (display is not null)
+                    {
+                        var entities = directory.Keys.ToDictionary(id => "scope:" + id.ToString(CultureInfo.InvariantCulture), id => id, StringComparer.Ordinal);
+                        var namedProbe = query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal);
+                        rawMetadata = display.ReadRaw(transaction, namedProbe ? 0 : query.Start.UtcTicks,
+                            namedProbe ? DateTimeOffset.MaxValue.UtcTicks : query.End.UtcTicks, entities.Keys.ToArray(), cancellationToken,
+                            scan: query.Basis == "local_proxy" && query.ScopeId is null && query.ScopeIds is null);
+                        metadataRowsRead += rawMetadata.Count;
+                        foreach (var part in rawMetadata)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (!snapshots.TryGetValue(part.Snapshot, out var snapshot))
+                                snapshots.Add(part.Snapshot, snapshot = JsonSerializer.Deserialize<TrafficDisplayStore.Snapshot>(part.Snapshot)
+                                    ?? throw new InvalidOperationException("Invalid stored display snapshot."));
+                            if (snapshot.OriginalName == query.ScopeName) candidates.Add(entities[part.Key.Entity]);
+                        }
+                        rawMetadata.RemoveAll(part => !candidates.Contains(entities[part.Key.Entity]));
+                    }
+                    // Names select candidate identities only; each stored fragment is still checked below.
+                    selectedIds = JsonSerializer.Serialize(candidates.Order().ToArray());
+                    recordParameters = parameters.Select(x => x.Item1 == "$ids" ? ("$ids", (object?)selectedIds) : x).ToArray();
                 }
-                using (var command = Command(transaction, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id;", parameters))
+                using (var command = Command(transaction, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id;", recordParameters))
                 using (var reader = command.ExecuteReader())
                     while (reader.Read())
                     {
@@ -376,28 +413,18 @@ public sealed class ScopeLedger : IDisposable
                     }
                 if (display is not null)
                 {
-                    var entities = new List<string>();
-                    if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal) && query.ScopeName is not null)
+                    if (query.ScopeName is not null)
                     {
-                        using var command = Command(transaction, """
-                            SELECT scope_id FROM measurement_scopes
-                            WHERE basis=$basis AND ($id IS NULL OR scope_id=$id)
-                                AND ($ids IS NULL OR scope_id IN (SELECT value FROM json_each($ids)));
-                            """, parameters);
-                        using var reader = command.ExecuteReader();
-                        while (reader.Read())
+                        if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal))
                         {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            entities.Add("scope:" + reader.GetInt64(0).ToString(CultureInfo.InvariantCulture));
+                            // Earliest named-probe lookup needs captured names outside the requested interval.
+                            metadata = TrafficDisplayStore.Parse(rawMetadata, cancellationToken, snapshots);
+                            rawMetadata.Clear();
                         }
-                        rawMetadata = display.ReadRaw(transaction, 0, DateTimeOffset.MaxValue.UtcTicks, entities, cancellationToken);
-                        metadataRowsRead += rawMetadata.Count;
-                        // The rare named-probe earliest search streams history instead of copying all of it.
-                        metadata = TrafficDisplayStore.Parse(rawMetadata, cancellationToken, snapshots);
-                        rawMetadata.Clear();
                     }
                     else
                     {
+                        var entities = new List<string>();
                         foreach (var id in directory.Keys)
                             entities.Add("scope:" + id.ToString(CultureInfo.InvariantCulture));
                         rawMetadata = display.ReadRaw(transaction, query.Start.UtcTicks, query.End.UtcTicks, entities, cancellationToken,
@@ -424,7 +451,7 @@ public sealed class ScopeLedger : IDisposable
                 if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal) && query.ScopeName is not null)
                 {
                     using var command = Command(transaction, RecordsSql + " ORDER BY start_ticks,scope_id,kind,row_id;",
-                        ("$basis", query.Basis), ("$id", query.ScopeId), ("$ids", ids), ("$name", null),
+                        ("$basis", query.Basis), ("$id", query.ScopeId), ("$ids", selectedIds), ("$name", null),
                         ("$start", 0), ("$end", DateTimeOffset.MaxValue.UtcTicks));
                     using var reader = command.ExecuteReader();
                     while (earliest is null && reader.Read())
