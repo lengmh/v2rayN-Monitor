@@ -28,6 +28,15 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     internal sealed record Snapshot(string OriginalName, string? GroupLabel, string? MergeKey, string? Rate);
     internal sealed record Part(Snapshot Snapshot, long Upload, long Download);
     internal sealed record Slice(string? Name, string Upload, string Download, TrafficDisplay Display);
+    internal readonly record struct ValueSlice(long Upload, long Download, DisplayValues Display);
+    internal readonly record struct DisplayValues(string? OriginalName, string? GroupLabel, string? MergeKey, string? Rate,
+        BigInteger Covered, BigInteger Unknown, BigInteger? Units)
+    {
+        internal TrafficDisplay Result() => new(OriginalName, GroupLabel is null ? [] : [GroupLabel], MergeKey, Rate,
+            Units is null ? "unknown" : Unknown != 0 ? "partial" : "known",
+            Units is { } units ? ProviderDecimal.FormatScaledUnits(units) : null,
+            Covered.ToString(CultureInfo.InvariantCulture), Unknown.ToString(CultureInfo.InvariantCulture));
+    }
     internal readonly record struct RecordKey(string Entity, int Kind, long Start, long End);
     internal readonly record struct StoredPart(RecordKey Key, string Snapshot, long Upload, long Download);
     internal static string MergeKey(string basis, string key) => basis + ":" + XrayParser.Hash(key);
@@ -217,6 +226,36 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
         }
     }
 
+    internal static IEnumerable<ValueSlice> SplitValues(IReadOnlyList<Part>? parts, long upload, long download,
+        string? mergeKey, Dictionary<string, BigInteger> rates)
+    {
+        BigInteger capturedUp = 0, capturedDown = 0;
+        foreach (var part in parts ?? []) { capturedUp += part.Upload; capturedDown += part.Download; }
+        if (capturedUp > upload || capturedDown > download)
+            throw new InvalidOperationException("Display evidence exceeds its history record.");
+        foreach (var part in parts ?? [])
+        {
+            upload -= part.Upload; download -= part.Download;
+            var total = (BigInteger)part.Upload + part.Download;
+            BigInteger? units = null;
+            if (part.Snapshot.Rate is { } text)
+            {
+                if (!rates.TryGetValue(text, out var rate))
+                {
+                    if (!ProviderDecimal.TryParse(text, out var parsed))
+                        throw new InvalidOperationException("Invalid captured multiplier.");
+                    rates.Add(text, rate = parsed.ScaledUnits);
+                }
+                units = total * rate;
+            }
+            yield return new(part.Upload, part.Download,
+                new(part.Snapshot.OriginalName, part.Snapshot.GroupLabel, mergeKey, part.Snapshot.Rate,
+                    units is null ? 0 : total, units is null ? total : 0, units));
+        }
+        if (upload != 0 || download != 0 || parts is not { Count: > 0 })
+            yield return new(upload, download, new(null, null, mergeKey, null, 0, (BigInteger)upload + download, null));
+    }
+
     internal sealed class Summary
     {
         private BigInteger covered, unknown, units;
@@ -233,9 +272,21 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
             covered += amounts.Covered;
             unknown += amounts.Unknown;
             if (amounts.Units is { } estimate) { units += estimate; hasEstimate = true; }
-            if (seen) { mixedName |= name != value.OriginalName; mixedRate |= rate != value.Rate; }
-            else { name = value.OriginalName; rate = value.Rate; seen = true; }
+            Observe(value.OriginalName, value.Rate);
             foreach (var group in value.Groups) groups.Add(group);
+        }
+        internal void Add(DisplayValues value)
+        {
+            covered += value.Covered;
+            unknown += value.Unknown;
+            if (value.Units is { } estimate) { units += estimate; hasEstimate = true; }
+            Observe(value.OriginalName, value.Rate);
+            if (value.GroupLabel is { } group) groups.Add(group);
+        }
+        private void Observe(string? originalName, string? capturedRate)
+        {
+            if (seen) { mixedName |= name != originalName; mixedRate |= rate != capturedRate; }
+            else { name = originalName; rate = capturedRate; seen = true; }
         }
         internal TrafficDisplay Result(string? mergeKey = null)
         {
