@@ -399,7 +399,8 @@ public sealed class ScopeLedger : IDisposable
                     {
                         foreach (var id in directory.Keys)
                             entities.Add("scope:" + id.ToString(CultureInfo.InvariantCulture));
-                        rawMetadata = display.ReadRaw(transaction, query.Start.UtcTicks, query.End.UtcTicks, entities, cancellationToken);
+                        rawMetadata = display.ReadRaw(transaction, query.Start.UtcTicks, query.End.UtcTicks, entities, cancellationToken,
+                            scan: query.Basis == "local_proxy" && query.ScopeId is null && query.ScopeIds is null);
                         metadataRowsRead += rawMetadata.Count;
                     }
                 }
@@ -596,11 +597,14 @@ public sealed class ScopeLedger : IDisposable
     }
 
     private const string RecordsSql = """
+        WITH coverage_gaps AS MATERIALIZED (
+            SELECT scope_id,start_ticks,end_ticks FROM scope_gaps WHERE reason='uncollected_outbounds'
+        )
         SELECT m.start_ticks AS start_ticks,m.start_ticks+600000000 AS end_ticks,m.scope_id AS scope_id,s.name,
             m.upload,m.download,
             CASE WHEN m.synthetic=1 THEN 'synthetic' WHEN m.approximate=1 THEN 'approximate' ELSE 'measured' END AS quality,
             0 AS kind,0 AS row_id,
-            EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=m.scope_id AND g.reason='uncollected_outbounds'
+            EXISTS(SELECT 1 FROM coverage_gaps g WHERE g.scope_id=m.scope_id
                 AND g.start_ticks < m.start_ticks+600000000 AND g.end_ticks > m.start_ticks) AS partial_coverage,
             s.basis AS basis,s.node_key AS node_key,s.outbound_tag AS outbound_tag
         FROM scope_minutes m JOIN measurement_scopes s ON s.scope_id=m.scope_id
@@ -611,7 +615,7 @@ public sealed class ScopeLedger : IDisposable
         SELECT u.start_ticks,u.end_ticks,u.scope_id,s.name,u.upload,u.download,
             CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
             1,u.id,
-            EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=u.scope_id AND g.reason='uncollected_outbounds'
+            EXISTS(SELECT 1 FROM coverage_gaps g WHERE g.scope_id=u.scope_id
                 AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks), s.basis,s.node_key,s.outbound_tag
         FROM scope_unallocated u JOIN measurement_scopes s ON s.scope_id=u.scope_id
         WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)

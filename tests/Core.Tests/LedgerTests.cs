@@ -1007,6 +1007,33 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Fact]
+    public void LocalProxyBroadDisplayReadMatchesScopedReadsForHistoricalPartsAndPages()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        var original = Member("a", "Synthetic fallback") with { CapturedName = new("Synthetic zebra 0.5x", "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic alpha 2x", "Synthetic group") };
+        var other = Member("b", "Synthetic other") with { CapturedName = new("Synthetic other 1x") };
+        var probe = original with { Basis = "probe_urltest_member" };
+        foreach (var second in new[] { 0, 1, 2, 3, 61 })
+            ledger.Accept(Batch(second, new(second < 2 ? original : renamed, second * 10, 0),
+                new(other, second * 100, 0), new(probe, second * 1000, 0)));
+        var ids = ledger.GetScopes("local_proxy").Select(x => x.Id).ToArray();
+        Assert.Equal(2, ids.Length);
+        foreach (var name in new string?[] { null, "Synthetic zebra 0.5x", "Synthetic alpha 2x" })
+        foreach (var page in new[] { 0, 1, 2 })
+        {
+            var query = ScopeAll("local_proxy", page: page, size: 1) with { ScopeName = name, NonZeroRecords = true };
+            var broad = ledger.Query(query);
+            var indexed = ledger.Query(query with { ScopeIds = ids });
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(indexed), System.Text.Json.JsonSerializer.Serialize(broad));
+        }
+        var all = ledger.Query(ScopeAll("local_proxy"));
+        Assert.Equal("6710", all.Upload);
+        Assert.Equal(new[] { "Synthetic zebra 0.5x", "Synthetic alpha 2x", "Synthetic fallback" },
+            all.Records.Where(x => x.ScopeId == ids[0] && x.Quality == "measured").Select(x => x.Name).ToArray());
+    }
+
+    [Fact]
     public void ScopeNonZeroDetailsFilterBeforePagingWithoutChangingTotalsGapsOrExport()
     {
         using var ledger = ScopeLedger.CreateNew(Database);
@@ -1248,6 +1275,38 @@ public sealed class LedgerTests : IDisposable
         });
         Assert.Empty(ledger.Query(ScopeAll("business", a)).Records);
         Assert.Throws<ArgumentOutOfRangeException>(() => ledger.Query(ScopeAll(page: -1)));
+    }
+
+    [Theory]
+    [InlineData("actual_member")]
+    [InlineData("probe_urltest_member")]
+    public void ScopeCoverageLookupPreservesIdentityIntervalEdgesAndRecoveryFlags(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true);
+        var a = Member("a") with { Basis = basis };
+        var b = Member("b") with { Basis = basis };
+        ledger.Accept(Batch(0, new(a, 0, 0), new(b, 0, 0)));
+        ledger.Accept(Batch(1, new(a, 10, 0), new(b, 20, 0)));
+        ledger.Accept(Batch(61, new(a, 70, 0), new(b, 80, 0)));
+        var scopes = ledger.GetScopes(basis);
+        var aid = scopes.Single(x => x.Scope.IdentityValue == "a").Id;
+        var bid = scopes.Single(x => x.Scope.IdentityValue == "b").Id;
+        RunSql($"""
+            INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin) VALUES
+                ({Epoch.AddSeconds(60).UtcTicks},{Epoch.AddSeconds(61).UtcTicks},{aid},'uncollected_outbounds',0,'collector'),
+                ({Epoch.AddSeconds(61).UtcTicks},{Epoch.AddSeconds(62).UtcTicks},{bid},'uncollected_outbounds',0,'collector'),
+                ({Epoch.UtcTicks},{Epoch.AddSeconds(60).UtcTicks},{aid},'snapshot_changed',0,'collector');
+            """);
+        var query = ScopeAll(basis);
+        var result = ledger.Query(query);
+        Assert.Equal("150", result.Upload);
+        Assert.Single(result.Records, x => x.PartialCoverage && x.ScopeId == aid && x.Quality == "recovered-contained");
+        Assert.All(result.Records.Where(x => x.ScopeId == bid || x.Quality == "measured"), x => Assert.False(x.PartialCoverage));
+        Assert.Equal(result.Records.Select(x => x.PartialCoverage), ledger.Export(query).Select(x => x.PartialCoverage));
+        var partial = ledger.Query(query with { ScopeId = aid, Start = Epoch.AddSeconds(30), End = Epoch.AddSeconds(61) });
+        Assert.Equal("0", partial.Upload);
+        Assert.Equal("60", partial.PartialUpload);
+        Assert.True(Assert.Single(partial.Records).PartialCoverage);
     }
 
     [Fact]
