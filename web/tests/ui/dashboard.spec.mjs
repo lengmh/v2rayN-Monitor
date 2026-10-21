@@ -424,6 +424,77 @@ test('historical and captured group members use the same labels without merging 
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
   await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
 });
+test('ordinary history dimensions stay isolated, readable and exportable', async ({ page }) => {
+  const bases = ['local_proxy', 'actual_member', 'business', 'excluded', 'unknown', 'legacy_proxy', 'routed_outbound'];
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic dimension fixture',
+      currentNode: 'Synthetic strategy group', demo: false, historyBases: bases,
+      lastSample: '2026-10-09T19:00:00Z', uploadPerSecond: '0', downloadPerSecond: '0' })),
+    '/api/nodes': (route, request, url) => route.fulfill(json([{ key: 'scope:1', name: url.searchParams.get('basis') || 'Synthetic member' }])),
+    '/api/history': (route, request, url) => {
+      const basis = url.searchParams.get('basis');
+      if (!basis) return route.fulfill(json(history));
+      const missing = basis === 'unknown', upload = basis === 'excluded' || missing ? '0' : '123';
+      return route.fulfill(json({ ...history, basis, upload, download: '0',
+        nodes: missing ? [] : [{ key: 'scope:1', name: basis, upload, download: '0' }],
+        series: missing ? [] : [{ label: '2026-10-09', upload, download: '0' }],
+        records: missing ? [] : [{ ...history.records[0], nodeKey: 'scope:1', nodeName: basis, upload, download: '0' }],
+        recordCount: missing ? 0 : 1 }));
+    },
+    '/api/export': route => route.fulfill({ status: 200, contentType: 'text/csv', body: 'synthetic,basis\n' })
+  });
+  await expect(page.locator('#history-basis')).toHaveValue('local_proxy');
+  await expect(page.locator('#history-basis option')).toHaveCount(7);
+  await page.selectOption('#history-basis', 'business');
+  await expect(page.locator('#total-exact')).toHaveText('123 bytes');
+  await expect(page.locator('#ranking-title')).toHaveText('范围汇总');
+  await expect(page.locator('#ranking .rank-node')).toHaveText('代理业务总量');
+  await expect(page.locator('#records .node-cell')).toHaveText('代理业务总量');
+  await expect(page.locator('#attribution-note')).toContainText('各维度不相加');
+  await expect(page.locator('#billing-exact')).toHaveText('此维度不提供节点倍率估算');
+  await expect(page.locator('#ranking-share')).toBeDisabled();
+  await page.selectOption('#node-filter', 'scope:1');
+  const downloadEvent = page.waitForEvent('download');
+  await page.click('#export-button');
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toContain('v2rayN-local-business-');
+  const exported = calls.filter(call => call.path === '/api/export').at(-1).url;
+  expect(exported.searchParams.get('basis')).toBe('business');
+  expect(exported.searchParams.get('nodeKey')).toBe('scope:1');
+  expect(exported.searchParams.has('nonZeroRecords')).toBe(false);
+  for (const [width, height, theme, basis, suffix] of [
+    [1440, 1100, 'light', 'business', 'desktop'],
+    [390, 844, 'dark', 'excluded', 'mobile'],
+    [320, 844, 'light', 'unknown', 'narrow']
+  ]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    if (!await page.locator('#history-basis').isVisible()) await page.click('#filter-disclosure');
+    await page.selectOption('#history-basis', basis);
+    await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+    if (basis === 'unknown') {
+      await expect(page.locator('#total-value')).toHaveText('—');
+      await expect(page.locator('#ranking')).toContainText('所选范围尚无已保存记录');
+      const empty = page.locator('#records .empty-state p');
+      await expect(empty).toContainText('采集缺口仍单独显示');
+      const box = await empty.boundingBox();
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(width);
+    }
+    else await expect(page.locator('#total-exact')).toHaveText(basis === 'excluded' ? '0 bytes' : '123 bytes');
+    await expect(page.locator('#live-upload')).toHaveText('↑ 0 B/s');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await settledScreenshot(page, `test-results/history-dimensions-${suffix}.png`);
+  }
+  await page.selectOption('#history-basis', 'actual_member');
+  await expect(page.locator('#total-exact')).toHaveText('123 bytes');
+  const selected = calls.filter(call => call.path === '/api/history').at(-1).url.searchParams;
+  expect(selected.get('basis')).toBe('actual_member');
+  expect(selected.has('nodeKey')).toBe(false);
+  expect(selected.get('page')).toBe('0');
+  await page.selectOption('#history-basis', 'local_proxy');
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+  expect(calls.filter(call => call.path === '/api/history').at(-1).url.searchParams.has('basis')).toBe(false);
+});
 test('live proxy rates refresh independently of history and stay readable with a group selected', async ({ page }) => {
   let upload = '1048576', download = '2097152';
   const calls = await mock(page, {

@@ -40,6 +40,123 @@ test('production DOM exchanges fragment once, keeps integer bytes, separates mis
   assert.equal(get('live-upload').textContent, '↑ —'); assert.equal(get('live-download').textContent, '↓ 0 B/s');
   change('unit', 'GiB'); assert.equal(get('total-value').textContent, '15.000 GiB'); assert.equal(get('total-exact').textContent, '16,106,127,360 bytes'); assert.equal(errors.length, 0);
 });
+test('ordinary history dimensions keep directory, filters, pagination and export aligned without adding totals', async t => {
+  const bases = ['local_proxy', 'actual_member', 'business', 'excluded', 'unknown', 'legacy_proxy', 'routed_outbound'];
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, historyBases: bases,
+      uploadPerSecond: '0', downloadPerSecond: '0' }),
+    '/api/nodes': url => Response.json([{ key: `scope:${url.searchParams.get('basis') || 'local_proxy'}`,
+      name: url.searchParams.get('basis') || 'Synthetic A' }]),
+    '/api/history': url => {
+      const basis = url.searchParams.get('basis');
+      if (!basis) return Response.json(history);
+      const missing = basis === 'unknown', upload = basis === 'excluded' || missing ? '0' : '123';
+      return Response.json({ ...history, basis, upload, download: '0',
+        nodes: missing ? [] : [{ key: `scope:${basis}`, name: basis, upload, download: '0' }],
+        records: missing ? [] : [{ ...history.records[0], nodeKey: `scope:${basis}`, nodeName: basis, upload, download: '0' }],
+        series: missing ? [] : [{ label: '2026-10-09', upload, download: '0' }], recordCount: missing ? 0 : 51 });
+    }
+  });
+  assert.ok(get('history-basis'), 'ordinary history has a dimension selector');
+  assert.equal(get('history-basis-control').hidden, false);
+  assert.equal(get('history-basis').value, 'local_proxy');
+  assert.equal(calls.find(c => c.path === '/api/history').query.has('basis'), false);
+  w.URL.createObjectURL = () => 'blob:synthetic-history';
+  w.URL.revokeObjectURL = () => {};
+  const downloads = [];
+  w.HTMLAnchorElement.prototype.click = function () { downloads.push(this.download); };
+  for (const basis of bases.slice(1)) {
+    change('history-basis', basis);
+    await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === basis &&
+      get('summary').getAttribute('aria-busy') === 'false');
+    await until(() => Array.from(get('node-filter').options).some(option => option.value === `scope:${basis}`));
+    assert.equal(calls.filter(c => c.path === '/api/nodes').at(-1).query.get('basis'), basis);
+    const query = calls.filter(c => c.path === '/api/history').at(-1).query;
+    assert.equal(query.get('page'), '0');
+    assert.equal(query.has('nodeKey'), false);
+    assert.ok(get('attribution-note').textContent.includes('不相加'));
+    assert.equal(get('live-upload').textContent, '↑ 0 B/s');
+    if (basis === 'unknown') {
+      assert.equal(get('total-value').textContent, '—');
+      assert.ok(get('chart').textContent.includes('缺失记录不等于零流量'));
+    } else {
+      assert.equal(get('total-exact').textContent, basis === 'excluded' ? '0 bytes' : '123 bytes');
+      change('node-filter', `scope:${basis}`);
+      await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === `scope:${basis}`);
+      get('next-page').click();
+      await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('page') === '1');
+    }
+    const count = calls.filter(c => c.path === '/api/export').length;
+    get('export-button').click();
+    await until(() => calls.filter(c => c.path === '/api/export').length === count + 1);
+    const exported = calls.filter(c => c.path === '/api/export').at(-1).query;
+    assert.equal(exported.get('basis'), basis);
+    assert.equal(exported.has('nonZeroRecords'), false);
+    await until(() => get('export-button').disabled === false);
+    assert.ok(downloads.at(-1).startsWith(`v2rayN-local-${basis}-`));
+  }
+  change('history-basis', 'local_proxy');
+  await until(() => get('total-exact').textContent === '16,106,127,360 bytes');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+});
+test('ordinary dimension stays separate from probe dimensions and the default provider comparison', async t => {
+  const provider = { source: 'Synthetic provider', rawBytes: '100', billedBytes: '100', recordCount: 0, nodes: [], series: [], records: [] };
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, historyBases: ['local_proxy', 'actual_member'],
+      uploadPerSecond: null, downloadPerSecond: null, probes: { historyEnabled: true, state: 'available' } }),
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('history-basis', 'actual_member');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  change('statistics-source', provider.source);
+  await until(() => calls.some(c => c.path === '/api/provider/history') && get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(get('history-basis-control').hidden, true);
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+  assert.equal(calls.filter(c => c.path === '/api/provider/history').at(-1).query.has('basis'), false);
+  change('statistics-source', '');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  assert.equal(get('history-basis').value, 'actual_member');
+  assert.equal(get('history-basis-control').hidden, false);
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'probe_urltest_member');
+  assert.equal(get('history-basis-control').hidden, true);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  assert.equal(get('history-basis').value, 'actual_member');
+});
+test('ordinary dimension changes ignore late history and directory responses', async t => {
+  let finishHistory, finishNodes;
+  const { get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false,
+      historyBases: ['local_proxy', 'business', 'excluded'], uploadPerSecond: null, downloadPerSecond: null }),
+    '/api/history': url => url.searchParams.get('basis') === 'business'
+      ? new Promise(resolve => { finishHistory = () => resolve(Response.json({ ...history, upload: '999', download: '0' })); })
+      : Response.json(history),
+    '/api/nodes': url => url.searchParams.get('basis') === 'business'
+      ? new Promise(resolve => { finishNodes = () => resolve(Response.json([{ key: 'scope:old', name: 'Stale business' }])); })
+      : Response.json([{ key: 'scope:new', name: 'Current dimension' }])
+  });
+  change('history-basis', 'business');
+  await until(() => finishHistory && finishNodes);
+  change('history-basis', 'excluded');
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  finishHistory(); finishNodes();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('history-basis').value, 'excluded');
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  assert.ok(!get('node-filter').textContent.includes('Stale business'));
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.get('basis'), 'excluded');
+});
+test('legacy or older servers keep the ordinary history selector hidden', async t => {
+  const { get } = await fixture(t);
+  assert.ok(get('history-basis-control'));
+  assert.equal(get('history-basis-control').hidden, true);
+});
 test('statistics and probes default to GB and MB and retain independent display units', async t => {
   const { w, calls, get, change, errors } = await fixture(t, {
     '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
