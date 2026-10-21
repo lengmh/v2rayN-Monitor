@@ -12,7 +12,9 @@
 
 修复后对当前真实策略组只读采样 3 批，均为 `connected`、64/64 完整计数、 actual_member、0 个 legacy_proxy。仅写入新建的隔离账本：首批 64 个基线、累计入账为零，后两段累计差与隔离入账逐项一致，合计上传 1,046 bytes／下载 946 bytes，速率可用；配置摘要前后保持。此为真实核心读取及隔离记账证据，当前运行的 Monitor 仍为 `1295f4e`，真实账本未由诊断写入，尚未接入修复包。故障窗口继续保留缺口，不按零值或当前累计回填。
 
-源码批次的精确 CI 和新包核验另续；启用前提醒用户只退出 Monitor，保持当前策略组及核心运行，按原 probe-ledger／v3／目录接回，不迁移 Schema、不改核心、路由或启动项。原始诊断、固定公开源码及隔离验证仅在 `<evidence-root>/v2rayn-monitor-strategy-live-rates-20261021` 的 `strategy-group-diagnostic`／`strategy-group-fix`。S5.6 保持 `in_progress`，组内轮换、旧长连接及核心生命周期的剩余受控验收分别保留。
+源码已提交并推送为 `d61e959c707ce51f29bf10b67228f06f86585418`；精确 Push CI `39596110198` 双平台成功，两平台各 Core457／Server43、前端检查／构建、计划检查及零警告零错误构建通过，Linux 浏览器35／smoke 和 Windows 自包含打包通过。artifact `12343104227` 的内外 SHA256、完整版本及 435 文件摘要已核验，固定候选为 `package-d61e959/candidate-package`，尚未启动；后续状态文档提交不改变该接入目标。
+
+启用前提醒用户只退出 Monitor，保持当前策略组及核心运行，按原 probe-ledger／v3／目录接回，不迁移 Schema、不改核心、路由或启动项。原始诊断、固定公开源码及隔离验证仅在 `<evidence-root>/v2rayn-monitor-strategy-live-rates-20261021` 的 `strategy-group-diagnostic`／`strategy-group-fix`，包核验在 `package-d61e959`。S5.6 保持 `in_progress`，组内轮换、旧长连接及核心生命周期的剩余受控验收分别保留。
 
 ## 2026-10-21：#18 / S5.6 精确 `1295f4e` 已实机接入，速率页面与策略组切换待确认
 
