@@ -141,7 +141,7 @@ test('partial route coverage stays explicit in live status and historical record
       gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'uncollected_outbounds', isOpen: false }] })
   });
   assert.equal(get('collector-state').textContent, '部分采集');
-  assert.ok(get('collector-message').textContent.includes(description));
+  assert.equal(get('collector-message').textContent, description);
   assert.ok(get('settings-collector-status').textContent.includes(description));
   assert.equal(get('status-dot').classList.contains('connected'), false);
   assert.ok(get('quality-notice').textContent.includes('未覆盖范围的流量未知'));
@@ -161,9 +161,27 @@ test('Xray verified outbound coverage remains distinct from internal probe suppo
       probes: { historyEnabled: true, state: 'unsupported', message: 'Xray 尚未拆分内部探测' } })
   });
   assert.equal(get('collector-state').textContent, '正在采集');
-  assert.ok(get('collector-message').textContent.includes(description));
+  assert.equal(get('collector-message').textContent, 'Xray · 3 个代理出站 · 1 个策略组 · 不含直连和阻断');
+  assert.ok(!get('collector-message').textContent.includes('联合采样'));
+  assert.ok(get('settings-collector-status').textContent.includes(description));
+  assert.ok(!get('settings-collector-status').textContent.includes('联合采样'));
   assert.equal(get('status-dot').classList.contains('connected'), true);
   assert.equal(get('probe-state').textContent, '当前核心未支持探测计量');
+});
+test('collector failure keeps the diagnostic visible even with a known scope', async t => {
+  const message = '统计接口暂不可用，请检查 v2rayN 是否运行。';
+  const description = 'Xray 出站可能包含探测，不能与探测量相加或直接相减。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'error', message, currentNode: null, lastSample: null,
+      uploadPerSecond: null, downloadPerSecond: null, demo: false,
+      scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 3, collectedGroups: 1,
+        uncollectedOutbounds: 0, uncollectedGroups: 0, description } })
+  });
+  assert.equal(get('collector-state').textContent, '采集暂不可用');
+  assert.equal(get('collector-message').textContent, `${message} ${description}`);
+  assert.ok(get('settings-collector-status').textContent.includes(message));
+  assert.equal(get('live-upload').textContent, '↑ —');
+  assert.equal(get('live-download').textContent, '↓ —');
 });
 for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`disabling probe history on a collector tick closes ${target} details`, async t => {
   let historyEnabled = true;
@@ -205,7 +223,7 @@ test('Xray partial scope keeps outbound semantics and probe limitation visible',
       probes: { historyEnabled: true, state: 'unsupported', message: '当前 Xray 路径未接入内部探测计量。' } })
   });
   assert.equal(get('collector-state').textContent, '部分采集');
-  assert.ok(get('collector-message').textContent.includes(description));
+  assert.equal(get('collector-message').textContent, description);
   assert.ok(get('settings-collector-status').textContent.includes(description));
   assert.equal(get('probe-state').textContent, '当前核心未支持探测计量');
 });
