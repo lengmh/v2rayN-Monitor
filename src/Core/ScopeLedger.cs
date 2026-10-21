@@ -11,7 +11,7 @@ namespace V2rayNMonitor.Core;
 public sealed class ScopeLedger : IDisposable
 {
     private const long Minute = TimeSpan.TicksPerMinute;
-    private const long ShortInterval = 10 * TimeSpan.TicksPerSecond;
+    internal const long ShortInterval = 10 * TimeSpan.TicksPerSecond;
     private readonly object gate = new();
     private readonly SqliteConnection connection;
     private readonly TrafficDisplayStore? display;
