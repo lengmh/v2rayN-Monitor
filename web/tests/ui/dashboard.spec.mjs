@@ -6,7 +6,7 @@ const history = {
   nodes: [{ key: 'a', name: 'Synthetic · Singapore', upload: '536870912', download: '8589934592' }, { key: 'b', name: 'Synthetic · Tokyo', upload: '268435456', download: '4294967296' }, { key: 'c', name: 'Synthetic · Frankfurt', upload: '268435456', download: '2147483648' }],
   records: [{ start: '2026-10-09T11:00:00Z', end: '2026-10-09T11:01:00Z', nodeKey: 'a', nodeName: 'Synthetic · Singapore', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51
 };
-async function mock(page, overrides = {}) {
+async function mock(page, overrides = {}, controlClock = false) {
   const calls = [];
   await page.route('http://127.0.0.1:4173/', async route => { const response = await route.fetch(); await route.fulfill({ response, headers: { ...response.headers(), 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" } }); });
   await page.route('**/api/**', async route => {
@@ -25,7 +25,8 @@ async function mock(page, overrides = {}) {
     };
     await route.fulfill(json(routes[url.pathname] ?? {}));
   });
-  await page.clock.setFixedTime(new Date('2026-10-09T19:00:00Z'));
+  if (controlClock) await page.clock.install({ time: new Date('2026-10-09T19:00:00Z') });
+  else await page.clock.setFixedTime(new Date('2026-10-09T19:00:00Z'));
   await page.goto('/#one-time-synthetic-token');
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
@@ -260,7 +261,7 @@ test('traffic details remain open across polling and support keyboard dismissal'
   const calls = await mock(page, {
     '/api/history': route => route.fulfill(json({ ...history,
       nodes: history.nodes.map((n, i) => ({ ...n, recoveredUpload: i === 0 ? '123456789' : '0', recoveredDownload: '0' })) }))
-  });
+  }, true);
   const value = page.locator('.rank-value').first(), popup = page.locator('#detail-popover');
   await value.focus();
   await expect(popup).toBeVisible();
@@ -271,6 +272,7 @@ test('traffic details remain open across polling and support keyboard dismissal'
   await expect(popup).toBeVisible();
   const previousValue = await value.elementHandle();
   const before = calls.filter(c => c.path === '/api/history').length;
+  await page.clock.fastForward(30000);
   await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
   await expect.poll(() => previousValue.evaluate(node => node.isConnected)).toBe(false);
   await expect(popup).toBeVisible();
@@ -342,7 +344,7 @@ test('issue23 captured rates, group names and exact copy work across business an
       displayMetadataEnabled: true, display, nodes: [{ ...history.nodes[0], display }], records: [
         { ...history.records[0], display },
         { ...history.records[0], display: { ...display, groups: ['Synthetic second snapshot'] } }] }))
-  });
+  }, true);
   await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
   const groupedName = page.locator('#records .node-cell .has-groups').first();
   await expect(groupedName).toHaveText('Synthetic original 0.5x');
@@ -354,6 +356,7 @@ test('issue23 captured rates, group names and exact copy work across business an
   await groupedName.click();
   const previousGroup = await groupedName.elementHandle();
   const before = calls.filter(c => c.path === '/api/history').length;
+  await page.clock.fastForward(30000);
   await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
   await expect.poll(() => previousGroup.evaluate(node => node.isConnected)).toBe(false);
   await expect(page.locator('#detail-popover .node-group-list')).toHaveText('US-0.5x');
@@ -420,6 +423,35 @@ test('historical and captured group members use the same labels without merging 
   await page.locator('#ranking .has-groups').first().hover();
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
   await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
+});
+test('live proxy rates refresh independently of history and stay readable with a group selected', async ({ page }) => {
+  let upload = '1048576', download = '2097152';
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic grouped collector', demo: false,
+      currentNode: 'Synthetic · strategy group', lastSample: '2026-10-09T19:00:00Z',
+      uploadPerSecond: upload, downloadPerSecond: download,
+      scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 3, collectedGroups: 2,
+        uncollectedOutbounds: 0, uncollectedGroups: 0, description: 'Synthetic independent outbounds; groups are not added again.' } }))
+  }, true);
+  await page.selectOption('#unit', 'GiB');
+  await expect(page.getByRole('group', { name: '已采集代理合计实时速率' })).toContainText('代理合计');
+  await expect(page.locator('#live-upload')).toHaveText('↑ 1.00 MiB/s');
+  const before = calls.filter(call => call.path === '/api/history').length;
+  upload = '2097152'; download = '4194304';
+  await page.clock.fastForward(2000);
+  await expect(page.locator('#live-upload')).toHaveText('↑ 2.00 MiB/s');
+  await expect(page.locator('#live-download')).toHaveText('↓ 4.00 MiB/s');
+  expect(calls.filter(call => call.path === '/api/history')).toHaveLength(before);
+  const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/history');
+  await page.clock.fastForward(28000);
+  await response;
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  expect(calls.filter(call => call.path === '/api/history')).toHaveLength(before + 1);
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/live-rates-${suffix}.png`, fullPage: true, animations: 'disabled' });
+  }
 });
 test('collector strip aligns node and rates without repeating implementation details', async ({ page }) => {
   const name = 'Synthetic · A deliberately long current member name '.repeat(4);
@@ -903,7 +935,7 @@ test('polished mobile disclosure and reduced motion remain accessible', async ({
 test('collector polling preserves filter focus and never replays user motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.setViewportSize({ width: 390, height: 844 });
-  await mock(page);
+  await mock(page, {}, true);
   await page.click('#ranking-share');
   await expect(page.locator('#ranking')).not.toHaveClass(/user-view-change/);
   await page.click('#filter-disclosure');
@@ -914,7 +946,9 @@ test('collector polling preserves filter focus and never replays user motion', a
     const animate = Element.prototype.animate;
     Element.prototype.animate = function (...args) { window.previewAnimationStarts++; return animate.apply(this, args); };
   });
-  await page.waitForResponse(r => new URL(r.url()).pathname === '/api/history', { timeout: 8000 });
+  const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/history', { timeout: 8000 });
+  await page.clock.fastForward(30000);
+  await response;
   await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('#bucket')).toBeFocused();
   await expect(page.locator('#filter-disclosure')).toHaveAttribute('aria-expanded', 'true');

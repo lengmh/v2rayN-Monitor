@@ -55,6 +55,7 @@ let nodesController: AbortController | null = null;
 let nodesContext = '';
 let nodeCatalog: NodeInfo[] | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let settings: Settings = { v2rayNPath: '', timeZoneId: 'UTC', demo: false };
 let period: Period = 'month';
 let anchor = dateInZone(new Date(), 'UTC');
@@ -744,19 +745,38 @@ function pauseRefresh(): void {
   nodesController?.abort(); nodesController = null;
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = null;
+  if (statusTimer) clearTimeout(statusTimer);
+  statusTimer = null;
 }
 function scheduleRefresh(): void {
   if (refreshTimer) clearTimeout(refreshTimer);
+  if (statusTimer) clearTimeout(statusTimer);
   refreshTimer = null;
+  statusTimer = null;
   if (!ready || expired || document.hidden) return;
-  refreshTimer = setTimeout(() => { scheduleRefresh(); void refresh(false, true); }, 5000);
+  const statusTick = (): void => {
+    if (!ready || expired || document.hidden) return;
+    statusTimer = setTimeout(statusTick, 2000);
+    void refreshStatus();
+  };
+  const historyTick = (): void => {
+    if (!ready || expired || document.hidden) return;
+    refreshTimer = setTimeout(historyTick, 30000);
+    void refresh(false, true);
+  };
+  statusTimer = setTimeout(statusTick, 2000);
+  refreshTimer = setTimeout(historyTick, 30000);
 }
 function refreshStatus(): Promise<CollectorStatus | undefined> {
   if (statusRequest) return statusRequest;
   const controller = new AbortController(); statusController = controller;
   statusRequest = api<CollectorStatus>('/api/status', { signal: controller.signal }).then(status => {
     if (controller.signal.aborted || statusController !== controller) return undefined;
-    renderStatus(status); return status;
+    const probeChanged = probeView() && latestStatus !== null &&
+      !!latestStatus.probes?.historyEnabled !== !!status.probes?.historyEnabled;
+    renderStatus(status);
+    if (probeChanged) void refresh(true);
+    return status;
   }).catch(error => {
     if (!controller.signal.aborted && !expired) fail(`暂时无法读取采集状态。${errorText(error)}`);
     return undefined;
@@ -815,7 +835,7 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
         hideGapDetails(); pagination(0);
         el('summary').setAttribute('aria-busy', 'false');
         el<HTMLButtonElement>('export-button').disabled = true;
-        put('refresh-note', '探测未启用 · 5 秒检查');
+        put('refresh-note', '探测未启用 · 2 秒检查');
         return;
       }
       el<HTMLButtonElement>('export-button').disabled = false;
@@ -838,7 +858,7 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
     if (controller.signal.aborted || refreshController !== controller) return;
     if (statisticsSource) renderProviderHistory(history as ProviderHistory); else renderHistory(history as HistoryResult);
     show('global-error', false);
-    put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 5 秒'}`);
+    put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 30 秒'}`);
   } catch (error) {
     if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '连接中断 · 自动重试'); }
   } finally {
