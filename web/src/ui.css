@@ -25,10 +25,10 @@ main { min-width: 0; flex: 1; }
 .collector-strip strong { font-size: 12px; font-weight: 600; }
 .collector-copy { min-width: 0; flex: 1; }
 .collector-strip p { color: var(--muted); font-size: 10px; line-height: 1.5; }
-.current-node { display: flex; flex-direction: column; max-width: 150px; min-width: 0; padding-left: 12px; border-left: 1px solid var(--line); }
-.current-node span { color: var(--muted); font-size: 10px; }
-.current-node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.live-rate { display: grid; gap: 1px; white-space: nowrap; padding-left: 12px; border-left: 1px solid var(--line); color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.current-node { display: flex; align-items: baseline; gap: 8px; max-width: min(50%,480px); min-width: 0; padding-left: 12px; border-left: 1px solid var(--line); }
+.current-node span { flex-shrink: 0; color: var(--muted); font-size: 10px; }
+.current-node strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-rate { display: flex; gap: 12px; white-space: nowrap; padding-left: 12px; border-left: 1px solid var(--line); color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .status-dot { background: var(--warning); margin: 0; }
 .status-dot.connected { background: var(--teal); }
 .status-dot.error { background: var(--error); }
@@ -229,7 +229,6 @@ tbody tr:hover { background: var(--hover); }
   .sidebar nav { gap: 16px; }
   .sidebar-bottom { display: none; }
   .content { padding-inline: 22px; }
-  .current-node { display: none; }
   .collector-strip { flex-basis: 430px; }
   .analysis-grid { grid-template-columns: minmax(0,1.3fr) minmax(0,1fr); }
   .date-navigation strong { min-width: 120px; }
@@ -329,21 +328,13 @@ tbody tr:hover { background: var(--hover); }
 .sidebar { background: var(--page); }
 .content { padding-top: 26px; }
 .page-heading { column-gap: 20px; row-gap: 12px; }
-.page-heading .collector-strip { flex-basis: 100%; order: 4; padding: 8px 0 0; border-top: 1px solid var(--line); }
+.page-heading .collector-strip { flex-basis: 100%; order: 4; flex-wrap: wrap; gap: 6px 12px; padding: 10px 0 0; border-top: 1px solid var(--line); }
 .page-heading .collector-strip.is-partial { padding: 10px 12px; border-top: 0; }
-.collector-copy { flex: 0 1 auto; }
+.collector-copy { display: contents; }
+.collector-strip > .status-dot, #collector-state { flex-shrink: 0; }
+#collector-message { order: 1; flex: 1 0 calc(100% - 20px); margin-left: 20px; overflow-wrap: anywhere; }
 .collector-strip .text-button { margin-left: auto; }
 .collector-strip p, .current-node span, .live-rate { font-size: 11px; }
-@media (min-width: 1201px) {
-  .page-heading .collector-strip { display: grid; grid-template-columns: 8px max-content minmax(0,220px) max-content minmax(0,1fr) max-content; gap: 5px 12px; }
-  .collector-copy { display: contents; }
-  #status-dot { grid-area: 1 / 1; }
-  #collector-state { grid-area: 1 / 2; }
-  #collector-message { grid-area: 2 / 2 / 3 / -1; overflow-wrap: anywhere; }
-  .collector-strip .current-node { grid-area: 1 / 3; max-width: none; }
-  .collector-strip .live-rate { grid-area: 1 / 4; }
-  .collector-strip .text-button { grid-area: 1 / 6; margin-left: 0; }
-}
 .filter-first { padding-block: 12px; }
 .filter-extra { display: contents; }
 .filter-disclosure { display: none; }
@@ -369,8 +360,9 @@ tbody tr:hover { background: var(--hover); }
 @media (max-width: 640px) {
   .content { padding-top: 18px; }
   .page-heading .collector-strip { padding-top: 9px; }
-  .collector-copy { flex: 1 1 60%; }
-  .collector-strip .text-button { margin-left: 0; }
+  .collector-strip .current-node { order: 1; flex-basis: 100%; max-width: 100%; border-left: 0; padding-left: 0; }
+  #collector-message { order: 2; flex-basis: 100%; margin-left: 0; }
+  .collector-strip .text-button { margin-left: auto; }
   .filter-first { gap: 10px 8px; }
   .date-navigation { flex: 1 1 auto; justify-content: space-between; }
   .date-navigation strong { min-width: 112px; }
