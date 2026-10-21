@@ -110,14 +110,15 @@ public static class ScopeCollector
         var catalog = capture.XrayOutbounds ?? throw new ArgumentException("A verified Xray outbound catalog is required.");
         if (snapshot.CoreName != "Xray" || catalog.InstanceId != snapshot.InstanceId || catalog.Generation != snapshot.Generation ||
             catalog.ProcessIdentity != snapshot.ProcessIdentity || snapshot.Generation.Length < 65 || snapshot.Generation[64] != ':' ||
-            !catalog.Candidates.ContainsKey("proxy")) throw new ArgumentException("Outbound catalog and capture identities conflict.");
+            catalog.Candidates.Count == 0 || (!snapshot.SelectedPolicyGroup && !catalog.Candidates.ContainsKey("proxy")))
+            throw new ArgumentException("Outbound catalog and capture identities conflict.");
         var partial = XrayCoverage(catalog).IsPartial;
         var key = Uri.EscapeDataString(snapshot.InstanceId) + "/" + Uri.EscapeDataString(snapshot.NodeId);
         var readings = new List<ScopeReading>();
         foreach (var member in catalog.Candidates.Values.OrderBy(x => x.OutboundTag, StringComparer.Ordinal))
         {
             var tag = member.OutboundTag;
-            var scope = tag == "proxy"
+            var scope = tag == "proxy" && !snapshot.SelectedPolicyGroup
                 ? new MeasurementScope("legacy_proxy", "legacy_node", key, snapshot.NodeName, snapshot.NodeId)
                 : new MeasurementScope("actual_member", "outbound", JsonSerializer.Serialize(new[] { snapshot.Generation[..64], tag }),
                     member.CapturedName is { } name ? $"【{name.GroupLabel}】 {name.OriginalName}" : tag, OutboundTag: tag);

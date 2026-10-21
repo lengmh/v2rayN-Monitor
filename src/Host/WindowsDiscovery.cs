@@ -2,6 +2,7 @@ using CounterSample = V2rayNMonitor.Core.CounterSample;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using System.Management;
 using System.Net;
 using System.Net.Http;
@@ -237,6 +238,7 @@ public sealed class WindowsDiscovery : IDisposable
         else return new(null, "missing_counters", "proxy 计数不可用。", after.Snapshot.NodeName, guard.RequiresBaseline);
         return new(batch, state, after.Snapshot.CoreName == "sing-box"
             ? "实际成员维度；business、excluded、unknown 单独保存，不相加。"
+            : after.Snapshot.SelectedPolicyGroup ? "Xray 策略组联合采样；各独立代理出站分别记账，不叠加组汇总。"
             : after.XrayOutbounds is not null ? "Xray 多出站联合采样；proxy 延续原历史，其他独立出站分别记账。" : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。",
             after.Snapshot.NodeName, guard.RequiresBaseline, probeStatus, after.Snapshot.CoreName == "Xray" ? scope : null);
     }
@@ -336,7 +338,11 @@ public sealed class WindowsDiscovery : IDisposable
         var writtenAt = singbox && statisticsStamp!.WrittenAt > configStamp.WrittenAt ? statisticsStamp.WrittenAt : configStamp.WrittenAt;
         var snapshot = new XraySnapshot(instanceId, selection.IndexId, node, processIdentity, generation, coreStartedAt,
             writtenAt, listenerIdentity, configuration.MetricsEndpoint, configuration.CoreName, configuration.Scope)
-        { XrayProbeExtensionVerified = !singbox && includeProbes && IsVerifiedXrayProbeExtension(core) };
+        {
+            XrayProbeExtensionVerified = !singbox && includeProbes && IsVerifiedXrayProbeExtension(core),
+            SelectedPolicyGroup = configuration.Protocol == "policy-group",
+            PolicyGroupSingleMemberName = configuration.PolicyGroupSingleMemberName
+        };
         if (singbox && memberMode)
         {
             if (!SingboxParser.TryReadMemberCatalog(snapshot, configBytes, out catalog, out _) ||
@@ -390,6 +396,13 @@ public sealed class WindowsDiscovery : IDisposable
         || name.Equals("sing-box.exe", StringComparison.OrdinalIgnoreCase)
         || name.Equals("sing-box-client.exe", StringComparison.OrdinalIgnoreCase);
 
+    private const string ProfileColumns = """
+        IndexId, Remarks, ConfigType, CoreType, Address, Port, Password, Username,
+        Network, ProtoExtra, TransportExtra, StreamSecurity, Sni, Alpn, Fingerprint,
+        PublicKey, ShortId, SpiderX, Mldsa65Verify, AllowInsecure, Cert, CertSha,
+        EchConfigList, VerifyPeerCertByName, Finalmask
+        """;
+
     internal static string ReadProfile(string path, string indexId, byte[] guiBytes, byte[] configBytes,
         out XrayEffectiveConfiguration configuration, byte[]? statisticsBytes = null, bool allowMemberStatistics = false)
     {
@@ -406,13 +419,7 @@ public sealed class WindowsDiscovery : IDisposable
         command.Transaction = transaction;
         // Credentials are used only in this stack frame to check the selected configuration.
         // They are never copied into the monitor's database, public API, or diagnostics.
-        command.CommandText = """
-            SELECT IndexId, Remarks, ConfigType, CoreType, Address, Port, Password, Username,
-                Network, ProtoExtra, TransportExtra, StreamSecurity, Sni, Alpn, Fingerprint,
-                PublicKey, ShortId, SpiderX, Mldsa65Verify, AllowInsecure, Cert, CertSha,
-                EchConfigList, VerifyPeerCertByName, Finalmask
-            FROM ProfileItem WHERE IndexId = $id
-            """;
+        command.CommandText = $"SELECT {ProfileColumns} FROM ProfileItem WHERE IndexId = $id";
         command.Parameters.AddWithValue("$id", indexId);
         int type;
         int? coreType;
@@ -425,6 +432,17 @@ public sealed class WindowsDiscovery : IDisposable
             name = reader.IsDBNull(1) ? "" : reader.GetString(1);
             type = reader.GetInt32(2);
             coreType = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+            if (type == 101)
+            {
+                if (!allowMemberStatistics || coreType is not (null or 2))
+                    throw Fail("unsupported_mode", "策略组需使用 Xray 多范围采集入口；当前内核或采集模式尚未支持。");
+                var extra = reader.IsDBNull(9) ? "{}" : reader.GetString(9);
+                if (reader.Read()) throw Fail("ambiguous_node", "当前节点标识不唯一；暂不采集。");
+                reader.Close();
+                configuration = ReadPolicyGroup(connection, transaction, extra, guiBytes, configBytes);
+                transaction.Commit();
+                return string.IsNullOrWhiteSpace(name) ? "未命名策略组" : name;
+            }
             if (type == 11 && statisticsBytes is null)
                 throw Fail("unsupported_core", "此版本的 AnyTLS 需要 Monitor 统计扩展及回环端点文件；当前流量保持未知。");
             // Classify the selected protocol before parsing Xray-only fields so AnyTLS does
@@ -467,6 +485,95 @@ public sealed class WindowsDiscovery : IDisposable
         // Attribution follows the selected record; it is not proof of core-side uniqueness.
         transaction.Commit(); // Ends a read-only transaction; no profile or setting is changed.
         return string.IsNullOrWhiteSpace(name) ? "未命名节点" : name;
+    }
+
+    private static XrayEffectiveConfiguration ReadPolicyGroup(SqliteConnection connection, SqliteTransaction transaction,
+        string extraJson, byte[] guiBytes, byte[] configBytes)
+    {
+        if (!XrayParser.TryReadPolicyGroupConfiguration(configBytes, out var configuration, out var reason))
+            throw Fail(reason, "无法核实 Xray 策略组配置及统计范围；当前流量保持未知。");
+        try
+        {
+            using var extra = JsonDocument.Parse(extraJson);
+            var root = extra.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().GroupBy(x => x.Name).Any(x => x.Count() != 1))
+                throw new JsonException();
+            string Text(string key) => root.TryGetProperty(key, out var value) && value.ValueKind != JsonValueKind.Null ? value.GetString()! : "";
+            var members = new List<Dictionary<string, string?>>();
+            List<Dictionary<string, string?>> Read(string column, string value)
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = $"SELECT {ProfileColumns} FROM ProfileItem WHERE {column} = $id";
+                command.Parameters.AddWithValue("$id", value);
+                using var reader = command.ExecuteReader();
+                var rows = new List<Dictionary<string, string?>>();
+                while (reader.Read())
+                {
+                    var fields = new Dictionary<string, string?>(StringComparer.Ordinal);
+                    for (var i = 0; i < reader.FieldCount; i++)
+                        fields.Add(reader.GetName(i), reader.IsDBNull(i) ? null : Convert.ToString(reader.GetValue(i), CultureInfo.InvariantCulture));
+                    rows.Add(fields);
+                }
+                return rows;
+            }
+            var subscription = Text("SubChildItems");
+            var filter = Text("Filter");
+            // The pinned generator removes protocols unsupported by the selected Xray core
+            // before assigning member ordinals, even when they belong to this subscription.
+            static bool RunsOnXray(Dictionary<string, string?> member) =>
+                member["ConfigType"] is "1" or "3" or "4" or "5" or "6" or "7" or "9" or "10" or "13" or "101" or "102";
+            if (subscription.Length != 0)
+                foreach (var member in Read("Subid", subscription))
+                {
+                    if (!RunsOnXray(member) || member["ConfigType"] is "101" or "102") continue;
+                    if (string.IsNullOrEmpty(member["Address"]) || !int.TryParse(member["Port"], out var port) || port is < 1 or > 65535) continue;
+                    if (filter.Length != 0 && !System.Text.RegularExpressions.Regex.IsMatch(member["Remarks"] ?? "", filter,
+                        System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromMilliseconds(250))) continue;
+                    members.Add(member);
+                }
+            foreach (var id in Text("ChildItems").ReplaceLineEndings("").Split(',', StringSplitOptions.RemoveEmptyEntries).Distinct(StringComparer.Ordinal))
+            {
+                var rows = Read("IndexId", id);
+                if (rows.Count > 1) throw Fail("ambiguous_node", "策略组成员标识不唯一；暂不采集。");
+                members.AddRange(rows.Where(RunsOnXray));
+            }
+            if (members.Count == 0) throw new JsonException();
+            using var config = JsonDocument.Parse(configBytes);
+            var expectedTags = new List<string>();
+            for (var i = 0; i < members.Count; i++)
+            {
+                var member = members[i];
+                var tag = members.Count == 1 ? "proxy" : $"proxy-{i + 1}-{member["Remarks"]}";
+                if (!XrayParser.MatchesSelectedOutbound(member, guiBytes, configBytes, tag, out reason))
+                    throw Fail(reason, "策略组成员与核心有效连接不一致或尚未支持；本次采样保留为缺口。");
+                expectedTags.Add(tag);
+            }
+            var actualTags = config.RootElement.GetProperty("outbounds").EnumerateArray().Select(x => x.GetProperty("tag").GetString()!)
+                .Where(x => x == "proxy" || x.StartsWith("proxy-", StringComparison.Ordinal)).ToHashSet(StringComparer.Ordinal);
+            if (!actualTags.SetEquals(expectedTags)) throw new JsonException();
+            var balancers = config.RootElement.TryGetProperty("routing", out var routing) && routing.TryGetProperty("balancers", out var groups)
+                ? groups.EnumerateArray().Where(x => x.GetProperty("tag").GetString() == "proxy-balancer").ToArray() : [];
+            if (members.Count > 1)
+            {
+                var load = root.TryGetProperty("MultipleLoad", out var value) && value.ValueKind != JsonValueKind.Null ? value.GetInt32() : 0;
+                var strategy = load switch { 0 => "leastPing", 1 or 4 => "leastLoad", 2 => "random", _ => "roundRobin" };
+                if (balancers.Length != 1 || !balancers[0].GetProperty("selector").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["proxy"]) ||
+                    balancers[0].GetProperty("strategy").GetProperty("type").GetString() != strategy) throw new JsonException();
+                if (strategy == "leastLoad")
+                {
+                    var settings = balancers[0].GetProperty("strategy").GetProperty("settings");
+                    if (settings.GetProperty("expected").GetInt32() != 1 ||
+                        (load == 1 && (settings.GetProperty("tolerance").GetDecimal() != 0.2m || settings.GetProperty("maxRTT").GetString() != "5000ms")))
+                        throw new JsonException();
+                }
+            }
+            else if (balancers.Length != 0) throw new JsonException();
+            return configuration! with { PolicyGroupSingleMemberName = members.Count == 1 ? members[0]["Remarks"] : null };
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException or KeyNotFoundException
+            or ArgumentException or System.Text.RegularExpressions.RegexMatchTimeoutException)
+        { throw Fail("mapping_changed", "策略组定义或成员与核心有效配置不一致；等待重新加载后再采集。"); }
     }
 
     internal static bool GuiFileUnchanged(string path, ReadOnlySpan<byte> capturedBytes, DateTimeOffset writtenAt)
