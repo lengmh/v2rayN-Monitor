@@ -13,8 +13,8 @@
     "branch": "feat/issue18-strategy-live-rates",
     "scope": "S5.6 策略组与多范围实时上下行速率；状态2秒、历史30秒，采集循环不改",
     "implementation_status": "complete",
-    "remaining": "已验收UI本地提交ea8a322，未推送或启用。多范围速率及独立轮询源码、隔离验证完成：Core446/Server43/前端93/Host Release通过，浏览器35项有通过结果（34项首轮，1项时钟适配后与另2项定向复测）。用户已确认本地提交与CI核对；工具审批要求具体远端授权，推送/新CI/启用尚未执行，真实策略组切换、速率实机和接入待续。普通月/年延迟及四个不采用的性能原型保留，派生汇总未实施；完整维度入口、受控切换/核心生命周期保留，PR30仍Draft",
-    "resume_requirement": "核实ea8a322后的本地提交和当前分支，证据仅TempFiles/v2rayn-monitor-strategy-live-rates-20261021。用户需明确允许向lengmh/v2rayN-Monitor的feat/issue18-strategy-live-rates分支上传本批源码/测试/文档后，再推送并核对精确CI，不换工具绕过审批。仅按独立代理身份汇总增量并按实际时间计算速率，不重加汇总/直连/独立探测；首次、缺失、重置、身份及长窗速率未知。未改依赖/CI/Schema/真实账本，未切换节点或运行包。UI已验收不重开，启用前提醒；性能派生汇总/真实迁移另按范围授权，PR35最后处理，PR33不合并"
+    "remaining": "已验收UI ea8a322与速率提交8465503经具体目标授权推送，未启用。首轮精确CI 39567931705的Windows全部通过，Linux前端93/浏览器35/构建/smoke通过，Core445通过及1项既有计时断言失败，Server未运行。零等待误作未记录的诊断问题已复现并最小修复：20000次合成查询含11104次零等待无异常，原断言保留，隔离Core446/Server43再次通过。后续提交逐次核对精确CI；真实策略组切换、速率实机和接入待续。普通月/年延迟及四个不采用的性能原型保留，派生汇总未实施；完整维度入口、受控切换/核心生命周期保留，PR30仍Draft",
+    "resume_requirement": "核实feat/issue18-strategy-live-rates的当前HEAD、远端SHA及该提交双平台CI；具体仓库/分支推送授权已补齐，不重复询问。首轮CI与零等待复现/修复证据仅TempFiles/v2rayn-monitor-strategy-live-rates-20261021/ci-checkpoint。仅按独立代理身份汇总增量并按实际时间计算速率，不重加汇总/直连/独立探测；首次、缺失、重置、身份及长窗速率未知。未改依赖/CI/Schema/真实账本，未切换节点或运行包。UI已验收不重开，启用前提醒；新包接入、真实策略组切换、性能派生汇总/真实迁移另按范围授权，PR35最后处理，PR33不合并"
   },
   "capability_levels": [
     {
