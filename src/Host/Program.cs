@@ -260,6 +260,7 @@ internal sealed class TrayContext : ApplicationContext
     private async Task CollectScopesAsync(WindowsDiscovery discovery, ScopeLedger ledger)
     {
         var basis = "actual_member";
+        ScopeBatch? previous = null;
         while (!stop.IsCancellationRequested)
         {
             try
@@ -269,15 +270,19 @@ internal sealed class TrayContext : ApplicationContext
                 {
                     var result = ScopeCollector.Commit(ledger, batch);
                     discovery.AcknowledgePersistence();
+                    var rates = ScopeCollector.Rates(previous, batch);
+                    previous = batch;
                     var unavailable = result.Scopes.Values.Count(x => x == "unavailable");
                     basis = batch.Readings.Any(x => x.Scope.Basis == "actual_member") ? "actual_member" : "legacy_proxy";
                     var baseline = result.Scopes.Values.All(x => x is "baseline" or "reset");
                     server.SetStatus(new(unavailable != 0 ? "partial" : baseline ? "baseline" : "collecting",
                         reading.Message + (unavailable == 0 ? "" : $" {unavailable} 个范围计数未知，未补零。"),
-                         reading.CurrentNode, batch.At, Scope: reading.Scope, CollectionBasis: basis, Probes: reading.Probes));
+                         reading.CurrentNode, batch.At, rates.Upload, rates.Download,
+                         Scope: reading.Scope, CollectionBasis: basis, Probes: reading.Probes));
                 }
                 else
                 {
+                    previous = null;
                     ledger.RecordGap(DateTimeOffset.UtcNow, reading.State, reading.InvalidateContinuity);
                     discovery.AcknowledgePersistence();
                     server.SetStatus(new(reading.State, reading.Message, reading.CurrentNode,
@@ -288,6 +293,7 @@ internal sealed class TrayContext : ApplicationContext
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
             catch (Exception)
             {
+                previous = null;
                 try
                 {
                     ledger.RecordGap(DateTimeOffset.UtcNow, "collector_error", discovery.RequiresBaseline);

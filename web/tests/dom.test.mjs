@@ -7,10 +7,17 @@ const asset = (await readdir(new URL('../dist/assets/', import.meta.url))).find(
 const script = await readFile(new URL(`../dist/assets/${asset}`, import.meta.url), 'utf8');
 const history = { upload: '1073741824', download: '15032385536', unallocatedUpload: '0', unallocatedDownload: '0', gapCount: 0, series: [{ label: '2026-10-09', upload: '1073741824', download: '15032385536' }], nodes: [{ key: 'a', name: 'Synthetic A', upload: '1073741824', download: '15032385536' }], records: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', nodeKey: 'a', nodeName: 'Synthetic A', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51 };
 async function until(condition, timeout = 1000) { for (let i = 0; i < timeout / 5; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
-async function fixture(t, overrides = {}, savedUnits = {}) {
+async function fixture(t, overrides = {}, savedUnits = {}, timers = null) {
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4173/#synthetic-once', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const w = dom.window, calls = [], errors = [];
+  if (timers) {
+    const originalTimeout = w.setTimeout.bind(w);
+    w.setTimeout = (callback, delay, ...args) => {
+      if (delay === 2000 || delay === 30000) { timers.set(delay, () => callback(...args)); return 0; }
+      return originalTimeout(callback, delay, ...args);
+    };
+  }
   for (const [view, unit] of Object.entries(savedUnits)) w.localStorage.setItem(`v2rayn-monitor-unit-${view}`, unit);
   w.addEventListener('error', event => errors.push(event.error));
   w.AbortSignal = AbortSignal; w.AbortController = AbortController;
@@ -125,7 +132,7 @@ test('changing gap context closes and releases old rows, including disabled prob
   await expand();
   historyEnabled = false;
   w.document.dispatchEvent(new w.Event('visibilitychange'));
-  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查');
+  await until(() => get('refresh-note').textContent === '探测未启用 · 2 秒检查');
   closed();
   w.document.querySelector('.nav-item[data-view=overview]').click();
   await until(() => get('total-value').textContent === '16.106 GB');
@@ -203,7 +210,7 @@ for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`dis
   const historyCalls = calls.filter(call => call.path === '/api/history').length;
 
   historyEnabled = false;
-  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查', 8000);
+  await until(() => get('refresh-note').textContent === '探测未启用 · 2 秒检查', 8000);
   assert.equal(anchor.isConnected, false);
   assert.equal(get('detail-popover').hidden, true);
   assert.equal(anchor.getAttribute('aria-expanded'), 'false');
@@ -417,6 +424,28 @@ test('comparison renders both histories before directories, then switches period
   await until(() => [...get('node-filter').options].some(option => option.value === 'Synthetic A'));
   assert.equal(get('comparison-billed-exact').textContent, '12.5 bytes');
 });
+test('two-second rate updates do not query history before its thirty-second tick', async t => {
+  const timers = new Map();
+  let upload = '1';
+  const { w, calls, get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Synthetic rates', demo: false,
+      currentNode: 'Synthetic group selection', lastSample: null, uploadPerSecond: upload, downloadPerSecond: '0' })
+  }, {}, timers);
+  const historyReads = () => calls.filter(call => call.path === '/api/history').length;
+  const before = historyReads();
+  upload = '2'; timers.get(2000)();
+  await until(() => get('live-upload').textContent === '↑ 2 B/s');
+  assert.equal(get('live-download').textContent, '↓ 0 B/s');
+  assert.equal(historyReads(), before);
+  timers.get(30000)();
+  await until(() => historyReads() === before + 1 && get('summary').getAttribute('aria-busy') === 'false');
+  Object.defineProperty(w.document, 'hidden', { configurable: true, value: true });
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  const count = calls.length;
+  timers.get(2000)(); timers.get(30000)();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls.length, count);
+});
 test('hidden tabs cancel requests and settings ticks refresh status without scanning history', async t => {
   const pending = [];
   let hold = false;
@@ -437,7 +466,7 @@ test('hidden tabs cancel requests and settings ticks refresh status without scan
   hold = false;
   let tick;
   const originalTimeout = w.setTimeout.bind(w);
-  w.setTimeout = (callback, delay, ...args) => delay === 5000 ? (tick = callback, 0) : originalTimeout(callback, delay, ...args);
+  w.setTimeout = (callback, delay, ...args) => delay === 2000 ? (tick = callback, 0) : originalTimeout(callback, delay, ...args);
   w.document.querySelector('.nav-item[data-view=settings]').click();
   Object.defineProperty(w.document, 'hidden', { configurable: true, value: false });
   w.document.dispatchEvent(new w.Event('visibilitychange'));
@@ -650,9 +679,10 @@ test('ranking without recovery keeps the same value target and shows directions 
 });
 
 for (const empty of [false, true]) test(`share group details close when polling returns ${empty ? 'no nodes' : 'only zero totals'}`, async t => {
+  const timers = new Map();
   let result = { ...history, nodes: history.nodes.map(node => ({ ...node,
     display: { originalName: node.name, groups: ['Synthetic initial group'], mergeKey: null } })) };
-  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) });
+  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) }, {}, timers);
   get('ranking-share').click();
   const firstAnchor = get('ranking').querySelector('.has-groups');
   firstAnchor.focus();
@@ -660,10 +690,11 @@ for (const empty of [false, true]) test(`share group details close when polling 
   assert.equal(popup.hidden, false);
   assert.equal(popup.querySelector('li').textContent, 'Synthetic initial group');
 
-  // A normal collector tick must reconnect the same item and refresh its details.
+  // A history tick must reconnect the same item and refresh its details.
   result = { ...result, nodes: result.nodes.map(node => ({ ...node,
     display: { ...node.display, groups: ['Synthetic updated group'] } })) };
-  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group', 8000);
+  timers.get(30000)();
+  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group');
   const previousAnchor = get('ranking').querySelector('.has-groups');
   assert.equal(firstAnchor.isConnected, false);
   assert.equal(popup.hidden, false);
@@ -672,7 +703,8 @@ for (const empty of [false, true]) test(`share group details close when polling 
 
   result = { ...result, upload: '0', download: '0', series: [], records: [], recordCount: 0,
     nodes: empty ? [] : result.nodes.map(node => ({ ...node, upload: '0', download: '0' })) };
-  await until(() => !!get('ranking').querySelector('.empty-state'), 8000);
+  timers.get(30000)();
+  await until(() => !!get('ranking').querySelector('.empty-state'));
   assert.equal(get('ranking').textContent, empty ? '所选范围尚无节点记录' : '所选范围只有零值记录');
   assert.equal(popup.hidden, true);
   assert.equal(previousAnchor.isConnected, false);

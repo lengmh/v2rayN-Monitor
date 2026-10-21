@@ -873,6 +873,88 @@ public sealed class LedgerTests : IDisposable
     private static ScopeQuery ScopeAll(string basis = "actual_member", long? id = null, int page = 0, int size = 50) =>
         new(basis, Epoch.AddYears(-2), Epoch.AddYears(3), "UTC", ScopeId: id, Page: page, PageSize: size);
 
+    [Fact]
+    public void ScopeRatesSumIndependentProxiesWithoutAddingAggregatesDirectOrProbeCounters()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true);
+        var legacy = new MeasurementScope("legacy_proxy", "legacy_node", "instance/node", "Synthetic proxy", "node");
+        ScopeBatch Complete(int second, long a, long b, long proxy, long aggregate) => Batch(second,
+            Reading("a", a, 2 * a), Reading("b", b, b), new(legacy, proxy, proxy),
+            new(new("business", "aggregate", "business", "Synthetic total"), aggregate, aggregate),
+            new(new("excluded", "aggregate", "excluded", "Synthetic direct"), aggregate, aggregate),
+            new(ProbeMember(), aggregate, aggregate));
+        var first = Complete(0, 100, 200, 300, 1000);
+        var second = Complete(2, 120, 230, 310, 9000);
+        ScopeCollector.Commit(ledger, first);
+        ScopeCollector.Commit(ledger, second);
+        Assert.Equal(("30", "40"), ScopeCollector.Rates(first, second));
+        Assert.Equal(("0", "0"), ScopeCollector.Rates(second, second with { At = second.At.AddSeconds(1) }));
+        Assert.Equal("50", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal("10", ledger.Query(ScopeAll("legacy_proxy")).Upload);
+        Assert.Equal("8000", ledger.Query(ScopeAll("probe_urltest_member")).Upload);
+    }
+
+    [Fact]
+    public void ScopeRatesKeepOldConnectionsWhenAGroupChangesSelectionWithoutRenamingIdentities()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        var first = Batch(0, Reading("a", 100), Reading("b", 200));
+        var second = Batch(1,
+            new(Member("a", "Synthetic old member") with { CapturedName = new("Synthetic A", "Synthetic group") }, 110, 0),
+            new(Member("b", "Synthetic selected member") with { CapturedName = new("Synthetic B", "Synthetic group") }, 230, 0));
+        ScopeCollector.Commit(ledger, first);
+        ScopeCollector.Commit(ledger, second);
+        Assert.Equal(("40", "0"), ScopeCollector.Rates(first, second));
+        var history = ledger.Query(ScopeAll());
+        Assert.Equal(2, history.Scopes.Count);
+        Assert.Equal("40", history.Upload);
+        Assert.Equal(new[] { "10", "30" }, history.Scopes.Select(x => x.Upload).Order().ToArray());
+    }
+
+    [Fact]
+    public void ScopeRatesUseActualElapsedTicksAndCanSumMoreThanInt64()
+    {
+        var first = Batch(0, Reading("a", 0, 0), Reading("b", 0, 0));
+        var second = Batch(1.5, Reading("a", 6_000_000_000_000_000_000, 1), Reading("b", 6_000_000_000_000_000_000, 2));
+        Assert.Equal(("8000000000000000000", "2"), ScopeCollector.Rates(first, second));
+    }
+
+    [Theory]
+    [InlineData("first")]
+    [InlineData("instance")]
+    [InlineData("session")]
+    [InlineData("generation")]
+    [InlineData("time")]
+    [InlineData("outage")]
+    [InlineData("reset")]
+    [InlineData("invalidate")]
+    [InlineData("missing")]
+    [InlineData("partial")]
+    [InlineData("removed")]
+    [InlineData("added")]
+    public void ScopeRatesKeepUncertainTransitionsUnknown(string change)
+    {
+        ScopeBatch? first = Batch(0, Reading("a", 100), Reading("b", 200));
+        var second = Batch(1, Reading("a", 110), Reading("b", 230));
+        if (change == "first") first = null;
+        second = change switch
+        {
+            "instance" => second with { InstanceId = "other" },
+            "session" => second with { SessionId = "other" },
+            "generation" => second with { Generation = "other" },
+            "time" => second with { At = Epoch },
+            "outage" => second with { At = Epoch.AddSeconds(11) },
+            "reset" => second with { Readings = [Reading("a", 1), Reading("b", 230)] },
+            "invalidate" => second with { Readings = [Reading("a", 110) with { InvalidateContinuity = true }, Reading("b", 230)] },
+            "missing" => second with { Readings = [new(Member("a"), UnavailableReason: "missing_counter"), Reading("b", 230)] },
+            "partial" => second with { Readings = [Reading("a", 110) with { PartialCoverage = true }, Reading("b", 230)] },
+            "removed" => second with { Readings = [Reading("a", 110)] },
+            "added" => second with { Readings = [Reading("a", 110), Reading("b", 230), Reading("c", 1000)] },
+            _ => second
+        };
+        Assert.Equal(((string?)null, (string?)null), ScopeCollector.Rates(first, second));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
