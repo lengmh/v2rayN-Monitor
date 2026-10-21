@@ -13,8 +13,8 @@
     "branch": "feat/issue18-strategy-live-rates",
     "scope": "S5.6 策略组与多范围实时上下行速率；状态2秒、历史30秒，采集循环不改",
     "implementation_status": "complete",
-    "remaining": "固定接入目标1295f4e，精确Push CI 39569725881双平台成功：各Core446/Server43/前端93，Linux浏览器35/smoke及Windows打包通过。artifact 12331950534内外SHA256/完整版本/435文件核验通过，未启动。只读现场仍为1203170、原probe-ledger及数据目录，未打开真实库或执行备份。用户将在实机接入时介入，当前等待该窗口；接入、真实策略组切换及速率实机待续。普通月/年延迟及四个不采用的性能原型保留，派生汇总未实施；完整维度入口、受控切换/核心生命周期保留，PR30仍Draft",
-    "resume_requirement": "核实当前HEAD和状态提交CI；。固定待接入包1295f4e342a458c931b4c7cbaea0e1a86ed9e435，不因后续状态提交自动换包。证据仅TempFiles/v2rayn-monitor-strategy-live-rates-20261021的ci-checkpoint/package-1295f4e/activation-preparation。等待用户介入并提醒仅退出Monitor、保持代理；退出后重新核实进程/原参数/目录，在原目录mutex下最新备份并独立比较历史/provider/设置及DDL，再按具体接入授权启动候选。未改依赖/CI/Schema/真实账本，未切节点或核心。快捷方式若纳入范围仅备份后更新目标/工作目录/图标，保留参数及登录启动项；回退不自动恢复旧库丢新数据。UI已验收不重开，受控策略组切换另留窗口；PR35最后处理，PR33不合并"
+    "remaining": "固定1295f4e已按原probe-ledger/v3接回，最新锁下备份及13张历史表/2张provider表逐值核对通过。旧范围/分钟/未分时/展示记录、provider采样批次/条及设置保留；实际采样批次/相邻区间/范围累计与入账一致，停机增量完整保存为恢复未分时。唯一进程/回环资源/401、原参数及代理/配置/登录启动项保持通过；联动快捷方式仅备份后更新目标/工作目录/图标。技术接入通过，浏览器连接不可用，速率页面及端到端确认待用户托盘打开后反馈；真实策略组切换和核心生命周期未关闭。普通月/年延迟及不采用的性能原型保留，派生汇总未实施；完整维度入口保留，PR30仍Draft",
+    "resume_requirement": "核实当前HEAD/状态CI及实际运行完整版本1295f4e342a458c931b4c7cbaea0e1a86ed9e435，不能沿用旧PID或把后续状态包自动替换为运行包。实机接入证据仅TempFiles/v2rayn-monitor-strategy-live-rates-20261021/activation-1295f4e；同批package-1295f4e/candidate-package已是运行目录，不按临时垃圾清理。本次Monitor接入和联动快捷方式更新已完成，不重复要求退出重做；保持原数据/参数及登录启动项，回退不自动恢复旧库丢新历史。速率页面/端到端确认等待正常授权会话或用户反馈，不绕过认证；受控策略组切换另需具体窗口，不自行改核心/路由。UI和普通持久记账既有验收不重开；PR35最后处理，PR33不合并"
   },
   "capability_levels": [
     {
