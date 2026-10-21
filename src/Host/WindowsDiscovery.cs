@@ -237,9 +237,10 @@ public sealed class WindowsDiscovery : IDisposable
         }
         else return new(null, "missing_counters", "proxy 计数不可用。", after.Snapshot.NodeName, guard.RequiresBaseline);
         return new(batch, state, after.Snapshot.CoreName == "sing-box"
-            ? "实际成员维度；business、excluded、unknown 单独保存，不相加。"
-            : after.Snapshot.SelectedPolicyGroup ? "Xray 策略组联合采样；各独立代理出站分别记账，不叠加组汇总。"
-            : after.XrayOutbounds is not null ? "Xray 多出站联合采样；proxy 延续原历史，其他独立出站分别记账。" : "Xray proxy 延续 legacy_proxy 口径，不冒称实际成员。",
+            ? "按独立代理成员记账；业务汇总、直连和未知归属分别保存，不相加。"
+            : after.Snapshot.SelectedPolicyGroup || after.XrayOutbounds is not null
+                ? "按 Xray 独立代理出站记账，不叠加策略组汇总。"
+                : "仅统计 Xray proxy 出站，不作为全部代理成员的合计。",
             after.Snapshot.NodeName, guard.RequiresBaseline, probeStatus, after.Snapshot.CoreName == "Xray" ? scope : null);
     }
 

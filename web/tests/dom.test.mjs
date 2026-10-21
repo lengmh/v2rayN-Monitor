@@ -190,6 +190,119 @@ test('collector failure keeps the diagnostic visible even with a known scope', a
   assert.equal(get('live-upload').textContent, '↑ —');
   assert.equal(get('live-download').textContent, '↓ —');
 });
+for (const [state, label] of [['baseline', '正在采样'], ['reset', '正在采样'], ['ready', '已连接']])
+  test(`${state} keeps the collector strip concise while retaining scope details`, async t => {
+    const description = '采集 64 个 Xray 独立代理出站，包含 3 个策略组；排除直连和阻断，内部探测未单独区分。';
+    const { get } = await fixture(t, {
+      '/api/status': () => Response.json({ state, message: 'Xray 策略组联合采样；各独立代理出站分别记账，不叠加组汇总。',
+        currentNode: 'Synthetic group', lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false,
+        scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 64, collectedGroups: 3,
+          uncollectedOutbounds: 0, uncollectedGroups: 0, description } })
+    });
+    assert.equal(get('collector-state').textContent, label);
+    assert.equal(get('collector-message').textContent, 'Xray · 64 个代理出站 · 3 个策略组 · 不含直连和阻断');
+    assert.ok(get('settings-collector-status').textContent.includes(description));
+    assert.ok(!get('settings-collector-status').textContent.includes('联合采样'));
+    assert.ok(get('settings-collector-status').textContent.includes('尚无有效采样'));
+    assert.equal(get('live-upload').textContent, '↑ —');
+    assert.equal(get('live-download').textContent, '↓ —');
+  });
+test('first sampling without scope explains the missing rate rather than exposing baseline jargon', async t => {
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'baseline', message: '已建立采样基线；节点切换后从新基线开始记录。',
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false })
+  });
+  assert.equal(get('collector-state').textContent, '正在采样');
+  assert.equal(get('collector-message').textContent, '正在读取累计流量，连续采样后显示速率。');
+  assert.equal(get('live-upload').textContent, '↑ —');
+});
+for (const state of ['duplicate', 'stale']) test(`${state} waits for a fresh sample without showing an internal state code`, async t => {
+  const message = '等待更新的有效采样，已有历史保留。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state, message, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null })
+  });
+  assert.equal(get('collector-state').textContent, '等待新采样');
+  assert.equal(get('collector-message').textContent, message);
+  assert.equal(get('live-download').textContent, '↓ —');
+});
+test('member collection without scope uses a plain summary and retains its detailed message', async t => {
+  const message = '按独立代理成员记账；业务汇总、直连和未知归属分别保存，不相加。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message, collectionBasis: 'actual_member',
+      lastSample: null, uploadPerSecond: '0', downloadPerSecond: '0', demo: false })
+  });
+  assert.equal(get('collector-message').textContent, '按独立代理成员统计 · 不叠加汇总和直连');
+  assert.ok(get('settings-collector-status').textContent.includes(message));
+  assert.equal(get('live-upload').textContent, '↑ 0 B/s');
+});
+for (const [state, label] of [['error', '采集暂不可用'], ['snapshot_changed', '正在切换配置']])
+  test(`retained partial scope cannot replace the ${state} diagnostic`, async t => {
+    const message = '统计暂不可用，请检查 v2rayN 后重试。';
+    const description = '其他出站未采集，其流量未知。';
+    const { get } = await fixture(t, {
+      '/api/status': () => Response.json({ state, message, demo: false,
+        lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+        scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 2,
+          uncollectedGroups: 1, description } })
+    });
+    assert.equal(get('collector-state').textContent, label);
+    assert.equal(get('collector-message').textContent, `${message} ${description}`);
+    assert.ok(get('settings-collector-status').textContent.includes(message));
+    assert.equal(get('status-dot').classList.contains('partial'), false);
+    assert.equal(get('status-dot').classList.contains('error'), state === 'error');
+    assert.equal(get('live-upload').textContent, '↑ —');
+  });
+test('partial counters retain both the unavailable count and coverage warning', async t => {
+  const message = '4 个范围计数未知，未补零。';
+  const description = '其他出站未采集，其流量未知。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'partial', message, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 2,
+        uncollectedGroups: 1, description } })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.equal(get('collector-message').textContent, `${message} ${description}`);
+  assert.ok(get('status-dot').classList.contains('partial'));
+});
+test('identical status and scope descriptions are not repeated', async t => {
+  const description = '统计接口不可用，请检查 v2rayN。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'error', message: description, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      scope: { basis: 'routed_proxy', isPartial: false, uncollectedOutbounds: 0,
+        uncollectedGroups: 0, description } })
+  });
+  assert.equal(get('collector-message').textContent, description);
+  assert.equal(get('settings-collector-status').textContent.split(description).length - 1, 1);
+});
+test('empty historical trend does not promise that reconnecting will fill old records', async t => {
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, series: [], unbucketedUpload: '1073741824',
+      unbucketedDownload: '0', recoveredUpload: '1073741824', recoveredDownload: '0' })
+  });
+  assert.ok(get('chart').textContent.includes('所选范围没有可分时的记录'));
+  assert.ok(!get('chart').textContent.includes('连接后'));
+  assert.ok(get('chart').textContent.includes('缺失记录不等于零流量'));
+  assert.ok(get('quality-notice').textContent.includes('尚未分配到当前趋势图'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('saved collector outages have readable reasons without changing their history', async t => {
+  const reasons = ['collector_stopped', 'collector_error', 'unsupported_mode'];
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, gapCount: 3, gaps: reasons.map(reason => ({
+      start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', reason, isOpen: false
+    })) })
+  });
+  get('gap-details').open = true;
+  await until(() => get('gap-list').children.length === reasons.length);
+  for (const label of ['采集器已停止', '采集或保存失败', '当时的模式不支持'])
+    assert.ok(get('gap-list').textContent.includes(label));
+  for (const reason of reasons) assert.ok(!get('gap-list').textContent.includes(reason));
+  assert.ok(get('gap-list').textContent.includes('不代表流量全部恢复'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
 for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`disabling probe history on a collector tick closes ${target} details`, async t => {
   let historyEnabled = true;
   const display = { originalName: 'Synthetic probe', groups: ['Synthetic probe group'], mergeKey: null };
@@ -278,7 +391,7 @@ test('probe page keeps basis, filters, export and business navigation separate',
   assert.equal(get('source-controls').hidden, true);
   assert.equal(get('probe-controls').hidden, false);
   assert.ok(get('probe-coverage').textContent.includes('2026-10-01'));
-  assert.ok(get('probe-coverage').textContent.includes('不是精确的首次基线'));
+  assert.ok(get('probe-coverage').textContent.includes('按分钟保存，并非精确的首次采样时间'));
   assert.ok(get('probe-notice').textContent.includes('不能直接换算服务商计费'));
   change('node-filter', 'scope:99');
   await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === 'scope:99');

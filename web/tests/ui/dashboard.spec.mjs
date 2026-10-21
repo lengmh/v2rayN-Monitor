@@ -98,7 +98,7 @@ test('probe view separates dimensions and keeps a readable desktop and mobile la
   await expect(page.locator('#statistics-title')).toHaveText('探测流量');
   await expect(page.locator('#total-exact')).toHaveText('4,096 bytes');
   await expect(page.locator('#probe-state')).toHaveText('探测部分采集');
-  await expect(page.locator('#probe-coverage')).toContainText('不是精确的首次基线');
+  await expect(page.locator('#probe-coverage')).toContainText('按分钟保存，并非精确的首次采样时间');
   await expect(page.locator('#source-controls')).toBeHidden();
   for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
     await page.setViewportSize({ width, height });
@@ -483,6 +483,56 @@ test('collector strip aligns node and rates without repeating implementation det
   await page.getByRole('button', { name: '采集详情 →', exact: true }).click();
   await expect(page.locator('#settings-collector-status')).toContainText(description);
   await expect(page.locator('#settings-collector-status')).not.toContainText('联合采样');
+});
+test('collector copy stays concise through sampling, switching and failures', async ({ page }) => {
+  let state = 'baseline', message = 'Xray 策略组联合采样；各独立代理出站分别记账，不叠加组汇总。';
+  let partial = false, upload = null, download = null;
+  const description = '采集 64 个 Xray 独立代理出站，包含 3 个策略组；不叠加组汇总，排除直连和阻断。内部探测未单独区分。';
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state, message, currentNode: 'Synthetic · strategy group',
+      demo: false, lastSample: null, uploadPerSecond: upload, downloadPerSecond: download,
+      scope: { basis: 'xray_outbound_members', isPartial: partial, collectedOutbounds: 64, collectedGroups: 3,
+        uncollectedOutbounds: partial ? 2 : 0, uncollectedGroups: 0, description } }))
+  }, true);
+  const summary = 'Xray · 64 个代理出站 · 3 个策略组 · 不含直连和阻断';
+  await expect(page.locator('#collector-state')).toHaveText('正在采样');
+  await expect(page.locator('#collector-message')).toHaveText(summary);
+  await expect(page.locator('#live-upload')).toHaveText('↑ —');
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile'], [320, 844, 'light', 'narrow']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/sampling-copy-${suffix}.png`, fullPage: true, animations: 'disabled' });
+  }
+  await page.getByRole('button', { name: '采集详情 →', exact: true }).click();
+  await expect(page.locator('#settings-collector-status')).toContainText(description);
+  await expect(page.locator('#settings-collector-status')).not.toContainText('联合采样');
+  await expect(page.locator('#settings-view')).not.toContainText('基线');
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.screenshot({ path: 'test-results/settings-copy-desktop.png', fullPage: true, animations: 'disabled' });
+  await page.click('.nav-item[data-view=overview]');
+  state = 'collecting'; upload = '0'; download = '0';
+  await page.clock.fastForward(2000);
+  await expect(page.locator('#collector-state')).toHaveText('正在采集');
+  await expect(page.locator('#collector-message')).toHaveText(summary);
+  await expect(page.locator('#live-upload')).toHaveText('↑ 0 B/s');
+  partial = true;
+  for (const [next, label, text] of [
+    ['snapshot_changed', '正在切换配置', '配置已变化，正在等待内核加载。'],
+    ['partial', '部分采集', '4 个范围计数未知，未补零。'],
+    ['error', '采集暂不可用', '统计接口不可用，请检查 v2rayN 后重试。']
+  ]) {
+    state = next; message = text; upload = null; download = null;
+    await page.clock.fastForward(2000);
+    await expect(page.locator('#collector-state')).toHaveText(label);
+    await expect(page.locator('#collector-message')).toContainText(text);
+    await expect(page.locator('#collector-message')).toContainText(description);
+    await expect(page.locator('#live-upload')).toHaveText('↑ —');
+    if (next === 'snapshot_changed') await expect(page.locator('#status-dot')).not.toHaveClass(/partial|error/);
+    else await expect(page.locator('#status-dot')).toHaveClass(next === 'partial' ? 'status-dot partial' : 'status-dot error');
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/collector-error-copy-mobile.png', fullPage: true, animations: 'disabled' });
 });
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
