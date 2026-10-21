@@ -145,28 +145,34 @@ function selectPeriod(next: Period): void {
 }
 function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
-  const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
-  const state = status.scope?.isPartial || status.state === 'partial' ? '部分采集' : states[status.state.toLowerCase()] || status.state;
-  const collecting = ['collecting', 'connected', 'running'].includes(status.state.toLowerCase());
+  const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '已连接', baseline: '正在采样', reset: '正在采样', duplicate: '等待新采样', stale: '等待新采样', collector_stopped: '采集已停止', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
+  const key = status.state.toLowerCase();
+  const active = ['collecting', 'connected', 'running', 'ready', 'baseline', 'reset'].includes(key);
   const scope = status.scope;
-  const details = [status.message || '等待有效采样。', scope?.description].filter(Boolean).join(' ');
-  let message = collecting && scope?.description ? scope.description : details;
-  if (collecting && scope && !scope.isPartial) {
+  const partial = key === 'partial' || (active && !!scope?.isPartial);
+  const state = partial ? '部分采集' : states[key] || status.state;
+  const description = scope?.description?.trim();
+  const details = [...new Set([status.message?.trim(), description].filter(Boolean))].join(' ') || '等待有效采样。';
+  const fullMessage = active && description ? description : details;
+  let message = fullMessage;
+  if (active && !partial) {
     const scopes: Record<string, string> = {
       routed_proxy: '仅统计路由匹配 proxy 的流量',
       xray_outbound_proxy: '仅统计 Xray proxy 出站流量',
-      xray_outbound_members: ['Xray', scope.collectedOutbounds == null ? '独立代理出站' : `${scope.collectedOutbounds} 个代理出站`,
-        scope.collectedGroups ? `${scope.collectedGroups} 个策略组` : '', '不含直连和阻断'].filter(Boolean).join(' · ')
+      xray_outbound_members: ['Xray', scope?.collectedOutbounds == null ? '独立代理出站' : `${scope.collectedOutbounds} 个代理出站`,
+        scope?.collectedGroups ? `${scope.collectedGroups} 个策略组` : '', '不含直连和阻断'].filter(Boolean).join(' · ')
     };
-    message = scopes[scope.basis] || details;
+    message = (scope && scopes[scope.basis]) ||
+      (status.collectionBasis === 'actual_member' ? '按独立代理成员统计 · 不叠加汇总和直连' : '') ||
+      (['baseline', 'reset'].includes(key) ? '正在读取累计流量，连续采样后显示速率。' : fullMessage);
   }
   put('collector-state', state);
   put('collector-message', message);
-  document.querySelector('.collector-strip')?.classList.toggle('is-partial', !!status.scope?.isPartial || status.state === 'partial');
+  document.querySelector('.collector-strip')?.classList.toggle('is-partial', partial);
   put('current-node', status.currentNode || '未确定'); el('current-node').title = status.currentNode || '未确定';
   put('live-upload', `↑ ${rate(status.uploadPerSecond, unit)}`); put('live-download', `↓ ${rate(status.downloadPerSecond, unit)}`);
-  put('settings-collector-status', `${state}。${collecting && scope?.description ? scope.description : details} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
-  el('status-dot').className = `status-dot ${status.scope?.isPartial || status.state === 'partial' ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
+  put('settings-collector-status', `${state}。${fullMessage} 最近采样：${status.lastSample ? timestamp(status.lastSample, settings.timeZoneId) : '尚无有效采样'}`);
+  el('status-dot').className = `status-dot ${partial ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(key) ? 'connected' : ['error', 'unsupported'].includes(key) ? 'error' : ''}`;
   show('demo-notice', status.demo); show('demo-controls', status.demo);
   const probeStates: Record<string, string> = { disabled: '探测历史未启用', waiting: '等待探测采样', unavailable: '探测计数暂不可用', unsupported: '当前核心未支持探测计量', partial: '探测部分采集', available: '探测计数可用' };
   put('probe-state', probeStates[status.probes?.state ?? 'disabled'] ?? '探测状态未知');
@@ -186,7 +192,7 @@ function renderChart(history: HistoryPointInput, provider = false): void {
   const exact = (value: string | bigint): string => provider ? exactProviderTotal(providerUnitsText(BigInt(value))) : exactBytes(value);
   const chart = el('chart'); chart.replaceChildren();
   chart.classList.toggle('empty', !history.series.length);
-  if (!history.series.length) { chart.append(element('p', provider ? '所选日期没有已导入记录。\n请调整范围或导入服务商 CSV。' : '这个区间还没有可分时的记录。\n采集器连接后，新增流量会显示在这里。')); chart.setAttribute('aria-label', '此区间没有可分时记录，缺失不代表零流量'); put('chart-scale', ''); return; }
+  if (!history.series.length) { chart.append(element('p', provider ? '所选日期没有已导入记录。\n请调整范围或导入服务商 CSV。' : '所选范围没有可分时的记录。\n请调整日期或节点；缺失记录不等于零流量。')); chart.setAttribute('aria-label', '此区间没有可分时记录，缺失不代表零流量'); put('chart-scale', ''); return; }
   const max = history.series.reduce((result, p) => { const total = bytes(p.upload) + bytes(p.download); return total > result ? total : result; }, 0n);
   chart.setAttribute('aria-label', `流量趋势，共 ${history.series.length} 个有记录的时间桶；空白时间不代表零流量。`);
   const slots = chartSlots(history.series, range, bucket, settings.timeZoneId);
@@ -357,7 +363,7 @@ function renderGapDetails(): void {
     target.replaceChildren(); displayedGaps = undefined; displayedGapZone = ''; return;
   }
   if (displayedGaps === latestHistory.gaps && displayedGapZone === settings.timeZoneId) return;
-  const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
+  const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化', collector_stopped: '采集器已停止', collector_error: '采集或保存失败', unsupported_mode: '当时的模式不支持' };
   const rows = document.createDocumentFragment();
   for (const gap of latestHistory.gaps ?? []) rows.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
   target.replaceChildren(rows);
@@ -392,12 +398,12 @@ function renderHistory(history: HistoryResult): void {
   const recovered = bytes(history.recoveredUpload ?? '0') + bytes(history.recoveredDownload ?? '0');
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
-  const quality = ['首次采样建立基线，接入前累计不回填；缺失记录不等于零流量。'];
+  const quality = ['首次采样仅记录累计起点，接入前累计不回填；缺失记录不等于零流量。'];
   if (probeView()) {
     quality.push('当前仅为所选 HTTP 探测维度，不与出站累计或服务商计费相加。');
     put('probe-coverage', history.earliestRecord
-      ? `最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}（按分钟显示，不是精确的首次基线）。`
-      : '所选维度及节点尚无已保存的探测区间；首次有效采样只建立基线，不回填此前累计。');
+      ? `最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}（按分钟保存，并非精确的首次采样时间）。`
+      : '所选维度及节点尚无探测记录；首次采样仅记录累计起点，不回填此前累计。');
   }
   if (history.basis === 'actual_member')
     quality.push('当前为实际成员维度，直连和汇总分别保存。');
@@ -826,7 +832,7 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
         for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
         detailPopover.finishRender();
         put('probe-coverage', '尚未启用探测历史；现有业务历史继续保留。');
-        put('quality-notice', '探测量未知，不能记为零。首次接入建立基线，不能追记此前探测流量。');
+        put('quality-notice', '探测量未知，不能记为零。首次接入仅记录累计起点，不能追记此前探测流量。');
         put('quality-summary', '探测历史未启用');
         put('attribution-note', '探测量与业务分别保存。当前实例未启用探测历史，不以业务量推算探测量。');
         el('chart').classList.add('empty');
@@ -860,7 +866,7 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
     show('global-error', false);
     put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 30 秒'}`);
   } catch (error) {
-    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '连接中断 · 自动重试'); }
+    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '更新失败 · 请重试'); }
   } finally {
     updateFilterDisclosure();
     if (refreshController === controller) { refreshController = null; el('summary').setAttribute('aria-busy', 'false'); }
@@ -1085,7 +1091,7 @@ el('settings-form').addEventListener('submit', async event => {
     await post('/api/settings', next); settings = next; anchor = dateInZone(new Date(), settings.timeZoneId);
     el<HTMLSelectElement>('import-zone').value = settings.timeZoneId; invalidateImport();
     updateRange(); page = 0; void refresh(true, true);
-    formResult('settings-result', '设置已保存。采集器会重新检查实例，首次有效采样先建立基线。');
+    formResult('settings-result', '设置已保存，采集器将重新检查连接。');
   } catch (error) { formResult('settings-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('export-button').addEventListener('click', async () => {
@@ -1114,7 +1120,7 @@ el('import-form').addEventListener('submit', async event => {
     el('import-warnings').replaceChildren(...(preview.warnings || []).map(warning => element('li', warning)));
     show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate || preview.warnings.length > 0;
     formResult('import-result', preview.duplicate ? '全部记录已存在，不会重复记账。' : preview.warnings.length ?
-      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : '预览完成。相同来源按重复导出快照比较，保留文件内相同行的出现次数。请确认来源与时区后导入。');
+      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : '预览完成。请核对来源、时区和新增记录后确认导入。');
   } catch (error) { if (revision === importRevision) formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('commit-import').addEventListener('click', async () => {
@@ -1131,7 +1137,7 @@ el('commit-import').addEventListener('click', async () => {
 });
 el('seed-demo').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('seed-demo'); button.disabled = true;
-  try { await post('/api/demo', {}); put('demo-result', '已生成合成记录，请回到本机总览查看。'); nodesContext = ''; await refresh(true, true); }
+  try { await post('/api/demo', {}); put('demo-result', '已生成合成记录，可在「统计」页查看。'); nodesContext = ''; await refresh(true, true); }
   catch (error) { put('demo-result', errorText(error)); } finally { button.disabled = expired; }
 });
 window.addEventListener('pagehide', pauseRefresh);
