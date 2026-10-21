@@ -421,6 +421,37 @@ test('historical and captured group members use the same labels without merging 
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
   await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
 });
+test('collector strip aligns node and rates without repeating implementation details', async ({ page }) => {
+  const name = 'Synthetic · A deliberately long current member name '.repeat(4);
+  const description = '采集 35 个 Xray 独立代理出站，包含 2 个策略组；不叠加策略组，排除直连和阻断。内部探测未单独区分。';
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Xray 多出站联合采样；proxy 延续原历史。',
+      currentNode: name, demo: false, lastSample: null, uploadPerSecond: null, downloadPerSecond: '0',
+      scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 35, collectedGroups: 2,
+        uncollectedOutbounds: 0, uncollectedGroups: 0, description } }))
+  });
+  await expect(page.locator('#collector-message')).toHaveText('Xray · 35 个代理出站 · 2 个策略组 · 不含直连和阻断');
+  await expect(page.locator('#live-upload')).toHaveText('↑ —');
+  await expect(page.locator('#live-download')).toHaveText('↓ 0 B/s');
+  await expect(page.locator('#current-node')).toHaveAttribute('title', name);
+  for (const width of [2089, 1440, 900, 640, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect(page.locator('#current-node')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const up = await page.locator('#live-upload').boundingBox(), down = await page.locator('#live-download').boundingBox();
+    expect(Math.abs(up.y - down.y)).toBeLessThan(2);
+    const label = await page.locator('.current-node > span').boundingBox(), node = await page.locator('#current-node').boundingBox();
+    expect(Math.abs(label.y + label.height - node.y - node.height)).toBeLessThan(3);
+    if (width > 640) {
+      const current = await page.locator('.current-node').boundingBox(), rates = await page.locator('.live-rate').boundingBox();
+      expect(rates.x - current.x - current.width).toBeLessThanOrEqual(16);
+      expect(Math.abs(rates.y - current.y)).toBeLessThan(3);
+    }
+  }
+  await page.getByRole('button', { name: '采集详情 →', exact: true }).click();
+  await expect(page.locator('#settings-collector-status')).toContainText(description);
+  await expect(page.locator('#settings-collector-status')).not.toContainText('联合采样');
+});
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic Xray proxy',

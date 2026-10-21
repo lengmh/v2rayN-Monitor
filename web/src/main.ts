@@ -146,13 +146,25 @@ function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
   const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
   const state = status.scope?.isPartial || status.state === 'partial' ? '部分采集' : states[status.state.toLowerCase()] || status.state;
-  const message = [status.message || '等待有效采样。', status.scope?.description].filter(Boolean).join(' ');
+  const collecting = ['collecting', 'connected', 'running'].includes(status.state.toLowerCase());
+  const scope = status.scope;
+  const details = [status.message || '等待有效采样。', scope?.description].filter(Boolean).join(' ');
+  let message = collecting && scope?.description ? scope.description : details;
+  if (collecting && scope && !scope.isPartial) {
+    const scopes: Record<string, string> = {
+      routed_proxy: '仅统计路由匹配 proxy 的流量',
+      xray_outbound_proxy: '仅统计 Xray proxy 出站流量',
+      xray_outbound_members: ['Xray', scope.collectedOutbounds == null ? '独立代理出站' : `${scope.collectedOutbounds} 个代理出站`,
+        scope.collectedGroups ? `${scope.collectedGroups} 个策略组` : '', '不含直连和阻断'].filter(Boolean).join(' · ')
+    };
+    message = scopes[scope.basis] || details;
+  }
   put('collector-state', state);
   put('collector-message', message);
   document.querySelector('.collector-strip')?.classList.toggle('is-partial', !!status.scope?.isPartial || status.state === 'partial');
   put('current-node', status.currentNode || '未确定'); el('current-node').title = status.currentNode || '未确定';
   put('live-upload', `↑ ${rate(status.uploadPerSecond, unit)}`); put('live-download', `↓ ${rate(status.downloadPerSecond, unit)}`);
-  put('settings-collector-status', `当前状态：${state}。${message} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
+  put('settings-collector-status', `${state}。${collecting && scope?.description ? scope.description : details} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
   el('status-dot').className = `status-dot ${status.scope?.isPartial || status.state === 'partial' ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
   show('demo-notice', status.demo); show('demo-controls', status.demo);
   const probeStates: Record<string, string> = { disabled: '探测历史未启用', waiting: '等待探测采样', unavailable: '探测计数暂不可用', unsupported: '当前核心未支持探测计量', partial: '探测部分采集', available: '探测计数可用' };
@@ -364,8 +376,8 @@ function renderHistory(history: HistoryResult): void {
   attribution.textContent = probeView()
     ? '探测流字节单独保存。成员和总量分别查看，不重复相加；Xray 原出站累计可能包含探测，不能与本页相加或直接相减。'
     : history.basis === 'local_proxy'
-    ? '包含当前账本中的 sing-box 成员、Xray 独立出站和旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。Xray 原出站累计可能包含内部探测，与探测页的流字节不能相加或直接相减。'
-    : '按已核实的节点或出站身份分账，名称和策略组前缀仅用于展示。';
+    ? '合并显示 sing-box 成员、Xray 出站及旧 proxy 历史，切换核心不隐藏记录；同名记录仍按原身份分账。直连、汇总和独立探测不重复计入。Xray 出站可能含探测，与探测页数值不能相加或直接相减。'
+    : '按已核实的节点或出站身份分账，名称和策略组仅用于展示。';
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   renderEstimate(history.display);
   if (history.displayMetadataEnabled === false) put('billing-exact', '倍率快照未启用，原始量正常记录');
@@ -397,7 +409,7 @@ function renderHistory(history: HistoryResult): void {
   if (partial > 0n) quality.push(`另有部分重叠的恢复区间，共 ${formatBytes(partial, unit)}（${exactBytes(partial)}）；本范围内用量未知，未计入合计，不能跨日期相加。`);
   if (history.gapCount) quality.push(`本范围有 ${history.gapCount} 段历史采集间断，当前采集状态见上方。`);
   put('quality-notice', quality.join(' '));
-  put('quality-summary', recovered > 0n ? `已知合计包含 ${formatBytes(recovered, unit)} 恢复量` : history.gapCount ? `本范围有 ${history.gapCount} 段历史采集间断` : '统计口径与数据说明');
+  put('quality-summary', recovered > 0n ? `已知合计包含 ${formatBytes(recovered, unit)} 恢复量` : history.gapCount ? `本范围有 ${history.gapCount} 段历史采集间断` : '统计说明');
   show('gap-details', history.gapCount > 0);
   put('gap-summary', `查看历史间断与覆盖缺口（${history.gapCount} 段）`);
   renderGapDetails();
@@ -449,8 +461,7 @@ function statisticLabels(): void {
   const probe = probeView();
   show('source-controls', !probe); show('probe-controls', probe); show('probe-notice', probe);
   put('statistics-title', probe ? '探测流量' : '流量统计');
-  put('statistics-eyebrow', probe ? 'URLTEST PROBES' : 'TRAFFIC OVERVIEW');
-  put('statistics-subtitle', probe ? '独立查看测活与延迟探测，按实际成员、日期和已知范围排查。' : '按来源和节点查看历史，清楚区分已知流量与采集间断。');
+  put('statistics-subtitle', probe ? '按成员和日期查看探测流量。' : '按节点和日期查看已记录流量。');
   el('records').closest('.records-panel')?.classList.toggle('local-records', !provider);
   const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
   put('provider-metric-caption', comparison ? '对比口径' : '排行与趋势');
@@ -463,7 +474,7 @@ function statisticLabels(): void {
   show('attribution-note', !provider);
   el('summary').classList.toggle('provider-summary', provider);
   show('raw-card', true); show('billed-card', true);
-  put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : '本机内核统计 · 含可确定范围的恢复量');
+  put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : '本机采集 · 含恢复量');
   put('total-title', provider ? '原始量' : probe ? '所选维度探测量' : '区间已知合计');
   put('total-note', provider ? '仅当前来源 · 不与本机流量相加' : probe ? '上传 + 下载 · 与业务分别保存' : '上传 + 下载 · 包含区间内恢复量');
   put('download-title', '下载'); put('upload-title', '上传');
@@ -475,7 +486,7 @@ function statisticLabels(): void {
   put('download-legend', provider ? metric : '下载');
   put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
   put('records-heading', provider ? '服务商记录' : probe ? '探测明细' : '采集明细');
-  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未提供 · 点击数值查看精确值' : '仅显示非零明细 · 点击数值查看精确值 · 仅按采集时倍率快照估算，旧记录保持未知');
+  put('records-caption', provider ? '方向、设备和 IP 未提供 · 点击数值查看精确值' : '仅非零明细 · 点击数值查看精确值 · 按采集时倍率估算，旧记录保持未知');
   put('billing-column', provider ? '计费量' : '估算计费量');
 }
 function comparisonValues(row: ComparisonRow): [string | null, string | null] {
