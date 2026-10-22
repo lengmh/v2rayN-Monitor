@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.IO.Compression;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,6 +17,7 @@ namespace Core.Tests;
 public sealed class ActiveConfigurationTests : IDisposable
 {
     private readonly string directory = Path.Combine(Path.GetTempPath(), "active-config-synthetic-" + Guid.NewGuid().ToString("N"));
+    private readonly List<string> componentStages = [];
     private static readonly DateTimeOffset Start = new(2026, 10, 10, 12, 0, 0, TimeSpan.Zero);
     private string Profiles => Path.Combine(directory, "profiles.db");
     private string History => Path.Combine(directory, "history.db");
@@ -1795,5 +1798,478 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Empty(Directory.GetFiles(directory));
     }
 
-    public void Dispose() { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+    private static readonly Uri ComponentRelease = new(
+        "https://github.com/lengmh/v2rayN-Monitor/releases/download/v0.0.0-synthetic/synthetic-win-x64.zip");
+    private static readonly byte[] SyntheticCoreBytes = Bytes("synthetic core version 1; not an executable");
+    private static readonly byte[] SyntheticLicenseBytes = Bytes("Synthetic fixture license only");
+    private static readonly byte[] ExistingCoreBytes = Bytes("previous installed synthetic core");
+    private static readonly DateTime ExistingCoreWritten = new(2020, 1, 2, 3, 4, 6, DateTimeKind.Utc);
+
+    private static string ComponentDigest(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+
+    private static byte[] ComponentZip(params (string Name, byte[] Content, int Attributes)[] files)
+    {
+        using var output = new MemoryStream();
+        using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+            foreach (var file in files)
+            {
+                var entry = archive.CreateEntry(file.Name, CompressionLevel.NoCompression);
+                entry.ExternalAttributes = file.Attributes;
+                using var content = entry.Open();
+                content.Write(file.Content);
+            }
+        return output.ToArray();
+    }
+
+    private static byte[] ValidComponentZip() => ComponentZip(
+        ("synthetic.exe", SyntheticCoreBytes, 0), ("LICENSE.txt", SyntheticLicenseBytes, 0));
+
+    private static CoreComponentAsset ComponentAsset(byte[] archive) => new(ComponentRelease,
+        archive.Length, ComponentDigest(archive),
+        [
+            new("synthetic.exe", SyntheticCoreBytes.Length, ComponentDigest(SyntheticCoreBytes)),
+            new("LICENSE.txt", SyntheticLicenseBytes.Length, ComponentDigest(SyntheticLicenseBytes))
+        ]);
+
+    private string ExistingComponent()
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "installed-synthetic.exe");
+        File.WriteAllBytes(path, ExistingCoreBytes);
+        File.SetLastWriteTimeUtc(path, ExistingCoreWritten);
+        return path;
+    }
+
+    private void AssertExistingComponentUnchanged(string path)
+    {
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(path));
+        Assert.Equal(ExistingCoreWritten, File.GetLastWriteTimeUtc(path));
+        Assert.Equal(new[] { path }, Directory.GetFiles(directory));
+        Assert.Empty(Directory.GetDirectories(directory));
+    }
+
+    private async Task<CorePreparation> PrepareComponent(CoreComponentAsset? asset,
+        ComponentDownloadHandler handler, string? existingFile = null, CancellationToken token = default,
+        TimeSpan? timeout = null, CoreComponent? component = null)
+    {
+        var result = await CoreComponentDownloads.PrepareAsync(component ?? SyntheticComponent(SyntheticCoreBytes),
+            asset, existingFile, SingboxParser.ClientVersion, "win-x64", handler, token, timeout);
+        if (result.StagingDirectory is { } stage) componentStages.Add(stage);
+        return result;
+    }
+
+    private void AssertComponentFailure(CorePreparation result, CorePreparationState state, string existingFile)
+    {
+        Assert.Equal(state, result.State);
+        Assert.Null(result.FilePath);
+        Assert.Null(result.StagingDirectory);
+        AssertExistingComponentUnchanged(existingFile);
+    }
+
+    private static HttpResponseMessage ComponentResponse(byte[] bytes) => new(HttpStatusCode.OK)
+    {
+        Content = new ByteArrayContent(bytes)
+    };
+
+    private sealed class ComponentDownloadHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
+    {
+        internal List<Uri> Requests { get; } = [];
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.Null(request.Headers.Authorization);
+            Assert.Null(request.Headers.Referrer);
+            Assert.False(request.Headers.Contains("Cookie"));
+            Assert.False(request.Headers.Contains("Proxy-Authorization"));
+            Assert.Null(request.Content);
+            Requests.Add(request.RequestUri!);
+            return Task.FromResult(send(request));
+        }
+    }
+
+    // Non-seekable bodies avoid StreamContent synthesizing a Content-Length header.
+    private sealed class ComponentBodyStream(byte[] bytes, int chunkSize = 65536) : Stream
+    {
+        internal int BytesRead { get; private set; }
+        internal Func<CancellationToken, Task>? BeforeRead { get; init; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => BytesRead; set => throw new NotSupportedException(); }
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (BeforeRead is not null) await BeforeRead(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var count = Math.Min(Math.Min(buffer.Length, chunkSize), bytes.Length - BytesRead);
+            bytes.AsMemory(BytesRead, count).CopyTo(buffer);
+            BytesRead += count;
+            return count;
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task ComponentDownloadProductionCatalogHasNoIndependentPublishedAsset()
+    {
+        var existing = ExistingComponent();
+        foreach (var component in CoreComponents.Catalog)
+        {
+            Assert.Null(CoreComponentDownloads.PublishedAsset(component.Id));
+            using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+            AssertComponentFailure(await PrepareComponent(CoreComponentDownloads.PublishedAsset(component.Id),
+                handler, existing, component: component), CorePreparationState.AssetUnavailable, existing);
+            Assert.Empty(handler.Requests);
+        }
+        var unknown = await CoreComponentDownloads.PrepareAsync("unknown-synthetic-component", existing,
+            SingboxParser.ClientVersion, "win-x64", CancellationToken.None);
+        Assert.Equal(CorePreparationState.UnknownComponent, unknown.State);
+        Assert.Null(unknown.FilePath);
+        AssertExistingComponentUnchanged(existing);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadReusesExactExistingFileWithoutNetworkOrWrites(bool assetAvailable)
+    {
+        Directory.CreateDirectory(directory);
+        var existing = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(existing, SyntheticCoreBytes);
+        File.SetLastWriteTimeUtc(existing, ExistingCoreWritten);
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        var result = await PrepareComponent(assetAvailable ? ComponentAsset(ValidComponentZip()) : null, handler, existing);
+        Assert.Equal(CorePreparationState.ExistingFileMatched, result.State);
+        Assert.Equal(CoreFileState.IdentityMatched, result.FileState);
+        Assert.Equal(existing, result.FilePath);
+        Assert.Null(result.StagingDirectory);
+        Assert.Empty(handler.Requests);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(existing));
+        Assert.Equal(ExistingCoreWritten, File.GetLastWriteTimeUtc(existing));
+        Assert.Equal(new[] { existing }, Directory.GetFiles(directory));
+    }
+
+    [Theory]
+    [InlineData("client", nameof(CoreFileState.UnsupportedClient))]
+    [InlineData("runtime", nameof(CoreFileState.UnsupportedRuntime))]
+    [InlineData("version", nameof(CoreFileState.InvalidDescriptor))]
+    [InlineData("digest", nameof(CoreFileState.InvalidDescriptor))]
+    public async Task ComponentDownloadRejectsUnsupportedTargetsBeforeNetwork(string kind, string fileState)
+    {
+        var existing = ExistingComponent();
+        var component = SyntheticComponent(SyntheticCoreBytes);
+        if (kind == "version") component = component with { Version = "" };
+        if (kind == "digest") component = component with { Sha256 = "untrusted" };
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        var result = await CoreComponentDownloads.PrepareAsync(component, ComponentAsset(ValidComponentZip()),
+            existing, kind == "client" ? "unknown-client" : SingboxParser.ClientVersion,
+            kind == "runtime" ? "linux-x64" : "win-x64", handler, CancellationToken.None);
+        AssertComponentFailure(result, kind is "client" or "runtime"
+            ? CorePreparationState.UnsupportedTarget : CorePreparationState.InvalidDescriptor, existing);
+        Assert.Equal(fileState, result.FileState.ToString());
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadVerifiesFlatAllowlistAndUsesFreshUnauthenticatedRedirectRequests(bool redirect)
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        var cdn = new Uri("https://release-assets.githubusercontent.com/synthetic/asset?signature=synthetic-only");
+        using var handler = new ComponentDownloadHandler(request =>
+        {
+            if (redirect && request.RequestUri == ComponentRelease)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.Found);
+                response.Headers.Location = cdn;
+                response.Headers.TryAddWithoutValidation("Set-Cookie", "synthetic=must-not-be-forwarded; Secure");
+                return response;
+            }
+            return ComponentResponse(archive);
+        });
+        var result = await PrepareComponent(ComponentAsset(archive), handler, existing);
+        Assert.Equal(CorePreparationState.DownloadVerified, result.State);
+        Assert.NotNull(result.StagingDirectory);
+        Assert.Equal(Path.Combine(result.StagingDirectory!, "synthetic.exe"), result.FilePath);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(result.FilePath!));
+        Assert.Equal(SyntheticLicenseBytes, File.ReadAllBytes(Path.Combine(result.StagingDirectory!, "LICENSE.txt")));
+        Assert.Equal(new[] { "LICENSE.txt", "synthetic.exe" },
+            Directory.GetFiles(result.StagingDirectory!).Select(Path.GetFileName).OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Empty(Directory.GetDirectories(result.StagingDirectory!));
+        Assert.Equal(redirect ? new[] { ComponentRelease, cdn } : [ComponentRelease], handler.Requests);
+        AssertExistingComponentUnchanged(existing);
+    }
+
+    [Theory]
+    [InlineData("http://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com/other/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/latest/download/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/latest/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/nested/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.exe")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip?token=synthetic")]
+    [InlineData("https://synthetic:secret@github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com:444/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip#fragment")]
+    [InlineData("https://github.com.synthetic.invalid/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    public async Task ComponentDownloadRejectsNonFixedReleaseSourcesBeforeNetwork(string url)
+    {
+        var existing = ExistingComponent();
+        var asset = ComponentAsset(ValidComponentZip()) with { Url = new Uri(url) };
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        AssertComponentFailure(await PrepareComponent(asset, handler, existing),
+            CorePreparationState.InvalidDescriptor, existing);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("outer-digest")]
+    [InlineData("outer-size")]
+    [InlineData("outer-cap")]
+    [InlineData("no-files")]
+    [InlineData("duplicate-name")]
+    [InlineData("reserved-partial")]
+    [InlineData("nested-allowlist")]
+    [InlineData("file-digest")]
+    [InlineData("file-size")]
+    [InlineData("component-digest")]
+    [InlineData("component-size")]
+    public async Task ComponentDownloadRejectsInvalidAssetIdentitiesBeforeNetwork(string kind)
+    {
+        var existing = ExistingComponent();
+        var asset = ComponentAsset(ValidComponentZip());
+        var files = asset.Files.ToArray();
+        asset = kind switch
+        {
+            "outer-digest" => asset with { Sha256 = "not-a-digest" },
+            "outer-size" => asset with { Bytes = 0 },
+            "outer-cap" => asset with { Bytes = 256L * 1024 * 1024 + 1 },
+            "no-files" => asset with { Files = [] },
+            "duplicate-name" => asset with { Files = [.. files, files[1] with { Name = "license.TXT" }] },
+            "reserved-partial" => asset with { Files = [.. files, files[1] with { Name = "download.partial" }] },
+            "nested-allowlist" => asset with { Files = [files[0], files[1] with { Name = "nested/LICENSE.txt" }] },
+            "file-digest" => asset with { Files = [files[0], files[1] with { Sha256 = "invalid" }] },
+            "file-size" => asset with { Files = [files[0], files[1] with { Bytes = 0 }] },
+            "component-digest" => asset with { Files = [files[0] with { Sha256 = ComponentDigest(Bytes("wrong version")) }, files[1]] },
+            _ => asset with { Files = [files[0] with { Bytes = files[0].Bytes + 1 }, files[1]] }
+        };
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        AssertComponentFailure(await PrepareComponent(asset, handler, existing),
+            CorePreparationState.InvalidDescriptor, existing);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("http://release-assets.githubusercontent.com/synthetic.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/other.zip")]
+    [InlineData("https://objects.githubusercontent.com/synthetic.zip")]
+    [InlineData("https://release-assets.githubusercontent.com.synthetic.invalid/synthetic.zip")]
+    [InlineData("https://synthetic:secret@release-assets.githubusercontent.com/synthetic.zip")]
+    [InlineData("https://release-assets.githubusercontent.com:444/synthetic.zip")]
+    [InlineData("https://release-assets.githubusercontent.com/synthetic.zip#fragment")]
+    [InlineData("/relative-asset.zip")]
+    [InlineData("missing")]
+    [InlineData("loop")]
+    public async Task ComponentDownloadRejectsUntrustedOrUnboundedRedirects(string target)
+    {
+        var existing = ExistingComponent();
+        using var handler = new ComponentDownloadHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Found);
+            if (target != "missing") response.Headers.Location = new Uri(target == "loop"
+                ? "https://release-assets.githubusercontent.com/synthetic.zip" : target, UriKind.RelativeOrAbsolute);
+            return response;
+        });
+        AssertComponentFailure(await PrepareComponent(ComponentAsset(ValidComponentZip()), handler, existing),
+            CorePreparationState.DownloadFailed, existing);
+        Assert.Equal(target == "loop" ? 4 : 1, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("404", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("500", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("partial-response", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("request-error", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("content-encoding", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("content-length", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("truncated", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("outer-digest", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("not-a-zip", nameof(CorePreparationState.InvalidArchive))]
+    public async Task ComponentDownloadRejectsHttpAndArchiveCorruptionWithoutTouchingInstallation(string kind, string state)
+    {
+        var existing = ExistingComponent();
+        var archive = kind == "not-a-zip" ? Bytes("synthetic invalid ZIP") : ValidComponentZip();
+        var asset = ComponentAsset(archive);
+        using var handler = new ComponentDownloadHandler(_ =>
+        {
+            if (kind == "request-error") throw new HttpRequestException("Synthetic HTTP failure");
+            var body = kind == "truncated" ? archive[..^1] : archive.ToArray();
+            if (kind == "outer-digest") body[0] ^= 1;
+            var response = ComponentResponse(body);
+            if (kind is "404" or "500") response.StatusCode = (HttpStatusCode)int.Parse(kind, CultureInfo.InvariantCulture);
+            if (kind == "partial-response") response.StatusCode = HttpStatusCode.PartialContent;
+            if (kind == "content-encoding") response.Content.Headers.ContentEncoding.Add("gzip");
+            if (kind == "content-length") response.Content.Headers.ContentLength = archive.Length + 1;
+            if (kind == "truncated") response.Content.Headers.ContentLength = archive.Length;
+            return response;
+        });
+        var result = await PrepareComponent(asset, handler, existing);
+        AssertComponentFailure(result, Enum.Parse<CorePreparationState>(state), existing);
+        Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("extra")]
+    [InlineData("missing")]
+    [InlineData("duplicate")]
+    [InlineData("case-alias")]
+    [InlineData("traversal")]
+    [InlineData("absolute")]
+    [InlineData("installed-absolute")]
+    [InlineData("backslash")]
+    [InlineData("nested")]
+    [InlineData("alternate-stream")]
+    [InlineData("symlink")]
+    [InlineData("reparse-point")]
+    [InlineData("directory")]
+    [InlineData("wrong-version")]
+    [InlineData("short-file")]
+    [InlineData("long-file")]
+    [InlineData("sidecar-digest")]
+    public async Task ComponentDownloadRejectsUnlistedPathsLinksAndWrongFilesEvenWithValidOuterDigest(string kind)
+    {
+        var existing = ExistingComponent();
+        var core = SyntheticCoreBytes.ToArray();
+        if (kind == "wrong-version") core[23] ^= 1; // Same size, different file identity.
+        if (kind == "short-file") core = core[..^1];
+        if (kind == "long-file") core = [.. core, (byte)'!'];
+        var name = kind switch
+        {
+            "traversal" => "../synthetic.exe",
+            "absolute" => "/synthetic.exe",
+            "installed-absolute" => existing,
+            "backslash" => @"..\synthetic.exe",
+            "nested" => "nested/synthetic.exe",
+            "alternate-stream" => "synthetic.exe:stream",
+            _ => "synthetic.exe"
+        };
+        var attributes = kind switch
+        {
+            "symlink" => unchecked((int)0xA1FF0000),
+            "reparse-point" => (int)FileAttributes.ReparsePoint,
+            "directory" => (int)FileAttributes.Directory,
+            _ => 0
+        };
+        var license = SyntheticLicenseBytes.ToArray();
+        if (kind == "sidecar-digest") license[0] ^= 1;
+        var files = new List<(string Name, byte[] Content, int Attributes)> { (name, core, attributes) };
+        if (kind != "missing") files.Add(("LICENSE.txt", license, 0));
+        if (kind == "extra") files.Add(("unlisted.exe", Bytes("synthetic unlisted file"), 0));
+        if (kind == "duplicate") files[1] = files[0];
+        if (kind == "case-alias") files[1] = ("SYNTHETIC.EXE", core, 0);
+        var archive = ComponentZip(files.ToArray());
+        using var handler = new ComponentDownloadHandler(_ => ComponentResponse(archive));
+        AssertComponentFailure(await PrepareComponent(ComponentAsset(archive), handler, existing),
+            CorePreparationState.InvalidArchive, existing);
+        Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadBoundsStreamingBodyWithAbsentOrMisleadingContentLength(bool advertisedLength)
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        var oversized = new byte[archive.Length + 2 * 1024 * 1024];
+        archive.CopyTo(oversized, 0);
+        using var body = new ComponentBodyStream(oversized);
+        using var handler = new ComponentDownloadHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(body) };
+            if (advertisedLength) response.Content.Headers.ContentLength = archive.Length;
+            else Assert.Null(response.Content.Headers.ContentLength);
+            return response;
+        });
+        AssertComponentFailure(await PrepareComponent(ComponentAsset(archive), handler, existing),
+            CorePreparationState.InvalidArchive, existing);
+        Assert.InRange(body.BytesRead, archive.Length + 1, archive.Length + 65536);
+        Assert.True(body.BytesRead < oversized.Length);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadCancellationAndDeadlineInterruptAnAlreadyStartedBody(bool timeout)
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        using var cancellation = new CancellationTokenSource();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var interrupted = false;
+        ComponentBodyStream? body = null;
+        body = new ComponentBodyStream(archive, chunkSize: 8)
+        {
+            BeforeRead = async token =>
+            {
+                if (body!.BytesRead == 0) return;
+                blocked.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException) { interrupted = true; throw; }
+            }
+        };
+        using var stream = body;
+        using var handler = new ComponentDownloadHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream)
+        });
+        var preparation = PrepareComponent(ComponentAsset(archive), handler, existing, cancellation.Token,
+            timeout ? TimeSpan.FromMilliseconds(500) : TimeSpan.FromSeconds(10));
+        await blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (!timeout) cancellation.Cancel();
+        var result = await preparation.WaitAsync(TimeSpan.FromSeconds(5));
+        AssertComponentFailure(result, timeout ? CorePreparationState.TimedOut : CorePreparationState.Cancelled, existing);
+        Assert.Equal(timeout, !cancellation.IsCancellationRequested);
+        Assert.True(interrupted);
+        Assert.InRange(stream.BytesRead, 1, archive.Length - 1);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task ComponentDownloadRetriesUseIndependentStagingAndDoNotDamageOtherPreparations()
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        using (var failedHandler = new ComponentDownloadHandler(_ => ComponentResponse(Bytes("synthetic corrupt download"))))
+            AssertComponentFailure(await PrepareComponent(ComponentAsset(archive), failedHandler, existing),
+                CorePreparationState.InvalidArchive, existing);
+        using var firstHandler = new ComponentDownloadHandler(_ => ComponentResponse(archive));
+        var first = await PrepareComponent(ComponentAsset(archive), firstHandler, existing);
+        Assert.Equal(CorePreparationState.DownloadVerified, first.State);
+        using var retryHandler = new ComponentDownloadHandler(_ => ComponentResponse(archive));
+        var retry = await PrepareComponent(ComponentAsset(archive), retryHandler, existing);
+        Assert.Equal(CorePreparationState.DownloadVerified, retry.State);
+        Assert.NotEqual(first.StagingDirectory, retry.StagingDirectory);
+        Assert.NotEqual(first.FilePath, retry.FilePath);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(first.FilePath!));
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(retry.FilePath!));
+        AssertExistingComponentUnchanged(existing);
+    }
+
+    public void Dispose()
+    {
+        foreach (var stage in componentStages)
+        {
+            Assert.Equal(Path.TrimEndingDirectorySeparator(Path.GetTempPath()), Path.GetDirectoryName(stage));
+            Assert.StartsWith("v2rayn-monitor-component-", Path.GetFileName(stage));
+            if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true);
+        }
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
 }

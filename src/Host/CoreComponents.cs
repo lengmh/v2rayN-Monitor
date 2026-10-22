@@ -42,12 +42,7 @@ internal static class CoreComponents
     internal static CoreFileCheck VerifyFile(CoreComponent component, string filePath,
         string clientVersion, string targetRuntime)
     {
-        if (string.IsNullOrWhiteSpace(component.Version) || string.IsNullOrWhiteSpace(component.ClientVersion) ||
-            string.IsNullOrWhiteSpace(component.Runtime) || component.Sha256 is not { Length: 64 } digest ||
-            !digest.All(char.IsAsciiHexDigit) || component.ExpectedBytes is <= 0)
-            return new(CoreFileState.InvalidDescriptor);
-        if (clientVersion != component.ClientVersion) return new(CoreFileState.UnsupportedClient);
-        if (targetRuntime != component.Runtime) return new(CoreFileState.UnsupportedRuntime);
+        if (ValidateTarget(component, clientVersion, targetRuntime) is { } invalid) return new(invalid);
         try
         {
             using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -58,12 +53,23 @@ internal static class CoreComponents
                 return new(CoreFileState.SizeMismatch, length);
             var actual = Convert.ToHexString(SHA256.HashData(file));
             if (file.Length != length) return new(CoreFileState.Unreadable);
-            return new(actual.Equals(digest, StringComparison.OrdinalIgnoreCase)
+            return new(actual.Equals(component.Sha256, StringComparison.OrdinalIgnoreCase)
                 ? CoreFileState.IdentityMatched : CoreFileState.DigestMismatch, length);
         }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
         { return new(CoreFileState.Missing); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         { return new(CoreFileState.Unreadable); }
+    }
+
+    internal static CoreFileState? ValidateTarget(CoreComponent component, string clientVersion, string targetRuntime)
+    {
+        if (string.IsNullOrWhiteSpace(component.Version) || string.IsNullOrWhiteSpace(component.ClientVersion) ||
+            string.IsNullOrWhiteSpace(component.Runtime) || component.Sha256 is not { Length: 64 } digest ||
+            !digest.All(char.IsAsciiHexDigit) || component.ExpectedBytes is <= 0)
+            return CoreFileState.InvalidDescriptor;
+        if (clientVersion != component.ClientVersion) return CoreFileState.UnsupportedClient;
+        if (targetRuntime != component.Runtime) return CoreFileState.UnsupportedRuntime;
+        return null;
     }
 }
