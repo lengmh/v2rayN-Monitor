@@ -8,13 +8,13 @@
   },
   "plan_date": "2026-10-09",
   "active_checkpoint": {
-    "issue": 24,
-    "status": "done",
-    "branch": "feat/v2rayn-linked-launch",
-    "scope": "PR #25 联动启动按用户本轮整体确认验收收口；仅补文档，产品源码与精确验收提交 0b2d3e7 一致",
+    "issue": 23,
+    "status": "in_progress",
+    "branch": "feat/issue23-ui-polish-v2",
+    "scope": "PR30补齐既有UI与零等待诊断修正；策略组/速率/历史入口留独立分支，不改实机",
     "implementation_status": "complete",
-    "remaining": "合并收口范围已确定；收口提交与合并后 main 的精确 CI 分别核对。固定目录部署另行执行；冷启动、仅 Monitor 运行、UAC 等未新增逐项实测记录，S4.1 原门槛保留",
-    "resume_requirement": "沿用当前 v3、原数据目录及已通过的 采样批次/范围实机证据，不重开普通统计验收或自行搬迁数据；先处理 PR #30，再处理仍为 planned 的 Issue #34 / PR #35，PR #33 不合并；启用新预览前仍提醒"
+    "remaining": "保留ea8a322原UI提交，仅提取1295f4e的ScopeLedger零等待诊断修正；隔离Core431/Server43/前端92/浏览器34、Release零警告零错误及计划/diff通过；精确Push/PR CI推送后另核，再做独立规范/需求审查，PR仍Draft。原0993a4b及采集/速率/文案/历史入口验收复用；不是本PR独立包启用证据。S5.6剩余受控轮换/旧长连接/生命周期仍待窗口，不因本次PR整合关闭；策略组分支后续17提交不整体塞入PR30。",
+    "resume_requirement": "先核对本分支准确HEAD、远端PR30 head/base及本批精确CI，保留原提交、不强推。主工作区的策略组分支起点20b5b63；本批在TempFiles/v2rayn-monitor-pr30-integration-20261022/candidate-pr30隔离处理。CI完成后独立审查；必要整合再同步策略组分支，避免重复补丁，独立PR创建/合并按具体范围授权。不启用本批包，不操作真实数据/客户端/核心/路由或启动项，不要求退出Monitor；PR35最后，PR33不合并。"
   },
   "capability_levels": [
     {
