@@ -874,6 +874,381 @@ public sealed class LedgerTests : IDisposable
         new(basis, Epoch.AddYears(-2), Epoch.AddYears(3), "UTC", ScopeId: id, Page: page, PageSize: size);
 
     [Fact]
+    public void ScopeRatesSumIndependentProxiesWithoutAddingAggregatesDirectOrProbeCounters()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true);
+        var legacy = new MeasurementScope("legacy_proxy", "legacy_node", "instance/node", "Synthetic proxy", "node");
+        ScopeBatch Complete(int second, long a, long b, long proxy, long aggregate) => Batch(second,
+            Reading("a", a, 2 * a), Reading("b", b, b), new(legacy, proxy, proxy),
+            new(new("business", "aggregate", "business", "Synthetic total"), aggregate, aggregate),
+            new(new("excluded", "aggregate", "excluded", "Synthetic direct"), aggregate, aggregate),
+            new(ProbeMember(), aggregate, aggregate));
+        var first = Complete(0, 100, 200, 300, 1000);
+        var second = Complete(2, 120, 230, 310, 9000);
+        ScopeCollector.Commit(ledger, first);
+        ScopeCollector.Commit(ledger, second);
+        Assert.Equal(("30", "40"), ScopeCollector.Rates(first, second));
+        Assert.Equal(("0", "0"), ScopeCollector.Rates(second, second with { At = second.At.AddSeconds(1) }));
+        Assert.Equal("50", ledger.Query(ScopeAll()).Upload);
+        Assert.Equal("10", ledger.Query(ScopeAll("legacy_proxy")).Upload);
+        Assert.Equal("8000", ledger.Query(ScopeAll("probe_urltest_member")).Upload);
+    }
+
+    [Fact]
+    public void ScopeRatesKeepOldConnectionsWhenAGroupChangesSelectionWithoutRenamingIdentities()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database);
+        var first = Batch(0, Reading("a", 100), Reading("b", 200));
+        var second = Batch(1,
+            new(Member("a", "Synthetic old member") with { CapturedName = new("Synthetic A", "Synthetic group") }, 110, 0),
+            new(Member("b", "Synthetic selected member") with { CapturedName = new("Synthetic B", "Synthetic group") }, 230, 0));
+        ScopeCollector.Commit(ledger, first);
+        ScopeCollector.Commit(ledger, second);
+        Assert.Equal(("40", "0"), ScopeCollector.Rates(first, second));
+        var history = ledger.Query(ScopeAll());
+        Assert.Equal(2, history.Scopes.Count);
+        Assert.Equal("40", history.Upload);
+        Assert.Equal(new[] { "10", "30" }, history.Scopes.Select(x => x.Upload).Order().ToArray());
+    }
+
+    [Fact]
+    public void ScopeRatesUseActualElapsedTicksAndCanSumMoreThanInt64()
+    {
+        var first = Batch(0, Reading("a", 0, 0), Reading("b", 0, 0));
+        var second = Batch(1.5, Reading("a", 6_000_000_000_000_000_000, 1), Reading("b", 6_000_000_000_000_000_000, 2));
+        Assert.Equal(("8000000000000000000", "2"), ScopeCollector.Rates(first, second));
+    }
+
+    [Theory]
+    [InlineData("first")]
+    [InlineData("instance")]
+    [InlineData("session")]
+    [InlineData("generation")]
+    [InlineData("time")]
+    [InlineData("outage")]
+    [InlineData("reset")]
+    [InlineData("invalidate")]
+    [InlineData("missing")]
+    [InlineData("partial")]
+    [InlineData("removed")]
+    [InlineData("added")]
+    public void ScopeRatesKeepUncertainTransitionsUnknown(string change)
+    {
+        ScopeBatch? first = Batch(0, Reading("a", 100), Reading("b", 200));
+        var second = Batch(1, Reading("a", 110), Reading("b", 230));
+        if (change == "first") first = null;
+        second = change switch
+        {
+            "instance" => second with { InstanceId = "other" },
+            "session" => second with { SessionId = "other" },
+            "generation" => second with { Generation = "other" },
+            "time" => second with { At = Epoch },
+            "outage" => second with { At = Epoch.AddSeconds(11) },
+            "reset" => second with { Readings = [Reading("a", 1), Reading("b", 230)] },
+            "invalidate" => second with { Readings = [Reading("a", 110) with { InvalidateContinuity = true }, Reading("b", 230)] },
+            "missing" => second with { Readings = [new(Member("a"), UnavailableReason: "missing_counter"), Reading("b", 230)] },
+            "partial" => second with { Readings = [Reading("a", 110) with { PartialCoverage = true }, Reading("b", 230)] },
+            "removed" => second with { Readings = [Reading("a", 110)] },
+            "added" => second with { Readings = [Reading("a", 110), Reading("b", 230), Reading("c", 1000)] },
+            _ => second
+        };
+        Assert.Equal(((string?)null, (string?)null), ScopeCollector.Rates(first, second));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HistoryCancellationBeforeAndWhileWaitingLeavesTheLedgerUsable(bool scopes)
+    {
+        using IDisposable ledger = scopes ? ScopeLedger.CreateNew(Database) : new Ledger(Database);
+        var gate = ledger.GetType().GetField("gate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(ledger)!;
+        using var cancellation = new CancellationTokenSource();
+        Action query = () =>
+        {
+            if (ledger is ScopeLedger scope) scope.Query(ScopeAll(), cancellation.Token);
+            else ((Ledger)ledger).Query(All(), cancellation.Token);
+        };
+        var before = HistorySnapshot(Database, includeSchema: false);
+        using var started = new ManualResetEventSlim();
+        Monitor.Enter(gate);
+        try
+        {
+            Exception? error = null;
+            var pending = new Thread(() =>
+            {
+                started.Set();
+                try { query(); }
+                catch (Exception ex) { error = ex; }
+            });
+            pending.Start();
+            Assert.True(started.Wait(TimeSpan.FromSeconds(2)));
+            cancellation.CancelAfter(75);
+            // Cancellation must complete before the writer releases its gate.
+            Assert.True(pending.Join(TimeSpan.FromSeconds(2)));
+            Assert.IsType<OperationCanceledException>(error);
+        }
+        finally { Monitor.Exit(gate); }
+        Assert.Throws<OperationCanceledException>(query);
+        Assert.Equal(before, HistorySnapshot(Database, includeSchema: false));
+        if (ledger is ScopeLedger scopeLedger)
+        {
+            scopeLedger.Accept(Batch(0, Reading("a", 0)));
+            scopeLedger.Accept(Batch(1, Reading("a", 7)));
+            Assert.Equal("7", scopeLedger.Query(ScopeAll()).Upload);
+        }
+        else
+        {
+            ((Ledger)ledger).Accept(Sample(0, 0));
+            ((Ledger)ledger).Accept(Sample(1, 7));
+            Assert.Equal("7", ((Ledger)ledger).Query(All()).Upload);
+        }
+    }
+
+    [Fact]
+    public void ScopeScanCancellationReleasesTransactionAndAllowsSubsequentCollection()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true);
+        ledger.Accept(Batch(0, Reading("a", 0), Reading("b", 0)));
+        ledger.Accept(Batch(1, Reading("a", 5), Reading("b", 7)));
+        var before = HistorySnapshot(Database, includeSchema: false);
+        var connection = (SqliteConnection)typeof(ScopeLedger).GetField("connection",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(ledger)!;
+        using var cancellation = new CancellationTokenSource();
+        var scanned = 0;
+        connection.CreateFunction<long, long>("cancel_scan", value =>
+        {
+            if (++scanned == 2) cancellation.Cancel();
+            return value;
+        });
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                ALTER TABLE scope_minutes RENAME TO synthetic_scan_minutes;
+                CREATE VIEW scope_minutes AS SELECT start_ticks,scope_id,cancel_scan(upload) AS upload,
+                    download,approximate,synthetic FROM synthetic_scan_minutes;
+                """;
+            command.ExecuteNonQuery();
+        }
+        ScopeQueryMetrics? metrics = null;
+        Assert.Throws<OperationCanceledException>(() => ledger.Query(ScopeAll(), cancellation.Token, value => metrics = value));
+        Assert.True(scanned >= 2);
+        Assert.NotNull(metrics);
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "DROP VIEW scope_minutes; ALTER TABLE synthetic_scan_minutes RENAME TO scope_minutes;";
+            command.ExecuteNonQuery();
+        }
+        Assert.Equal(before, HistorySnapshot(Database, includeSchema: false));
+        Assert.Equal("12", ledger.Query(ScopeAll()).Upload);
+        ledger.Accept(Batch(2, Reading("a", 8), Reading("b", 9)));
+        Assert.Equal("17", ledger.Query(ScopeAll()).Upload);
+    }
+
+    [Theory]
+    [InlineData("actual_member")]
+    [InlineData("probe_urltest_member")]
+    public void ScopeIdsFilterRawRowsAndMetadataWithoutChangingHistoricalProjection(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        var original = new MeasurementScope(basis, "index_id", "a", "Synthetic fallback", "a", "fixture-a")
+            { CapturedName = new("Synthetic zebra 0.5x", "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic alpha 2x", "Synthetic group") };
+        var other = original with { IdentityValue = "b", NodeId = "b", OutboundTag = "fixture-b" };
+        foreach (var second in new[] { 0, 1, 2, 3, 61 })
+            ledger.Accept(new("instance", "process-1", "config-1", Epoch.AddSeconds(second),
+                [new(second < 2 ? original : renamed, second * 10, 0), new(other, second * 100, 0)], []));
+        RunSql($"INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin) VALUES({Epoch.UtcTicks},{Epoch.AddSeconds(1).UtcTicks},NULL,'synthetic_legacy',0,'legacy');");
+        var id = ledger.GetScopes(basis).Single(x => x.Scope.NodeId == "a").Id;
+        var otherId = ledger.GetScopes(basis).Single(x => x.Scope.NodeId == "b").Id;
+        var query = ScopeAll(basis, size: 1);
+        ScopeQueryMetrics? allMetrics = null, selectedMetrics = null, emptyMetrics = null;
+        ledger.Query(query, observer: value => allMetrics = value);
+        foreach (var name in new string?[] { null, "Synthetic zebra 0.5x", "Synthetic alpha 2x" })
+        foreach (var bucket in new[] { "hour", "day" })
+        foreach (var page in new[] { 0, 1 })
+        {
+            var selected = query with { ScopeName = name, Bucket = bucket, Page = page, NonZeroRecords = true };
+            var expected = ledger.Query(selected with { ScopeId = id });
+            var actual = ledger.Query(selected with { ScopeIds = [id] }, observer: value => selectedMetrics = value);
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected), System.Text.Json.JsonSerializer.Serialize(actual));
+        }
+        Assert.True(selectedMetrics!.RowsRead < allMetrics!.RowsRead);
+        Assert.True(selectedMetrics.MetadataRowsRead < allMetrics.MetadataRowsRead);
+        Assert.Equal("5", ledger.Query(query with { ScopeIds = [id], ScopeName = "Synthetic zebra 0.5x" }).Display!.EstimatedBilledBytes);
+        Assert.Equal(new[] { "Synthetic zebra 0.5x", "Synthetic alpha 2x", "Synthetic fallback" },
+            ledger.Query(query with { ScopeIds = [id], PageSize = 50 }).Records
+                .Where(x => x.Quality == "measured").Select(x => x.Name).ToArray());
+        var empty = ledger.Query(query with { ScopeIds = [] }, observer: value => emptyMetrics = value);
+        Assert.Equal("0", empty.Upload);
+        Assert.Empty(empty.Records);
+        Assert.Null(Assert.Single(empty.Gaps).ScopeId);
+        Assert.Equal(0, emptyMetrics!.RowsRead);
+        Assert.Equal(0, emptyMetrics.MetadataRowsRead);
+        Assert.Empty(ledger.Query(query with { ScopeId = id, ScopeIds = [otherId] }).Records);
+        Assert.True(selectedMetrics.Total >= selectedMetrics.LockWait + selectedMetrics.LockHeld + selectedMetrics.Aggregation);
+    }
+
+    [Theory]
+    [InlineData("local_proxy")]
+    [InlineData("probe_urltest_member")]
+    public void HistoricalNameCandidatesKeepIndependentIdentitiesFallbacksAndGapOnlyScopes(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        var memberBasis = basis == "local_proxy" ? "actual_member" : basis;
+        const string name = "Synthetic target 0.5x";
+        var original = Member("a", "Synthetic configured A") with { Basis = memberBasis, CapturedName = new(name, "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic renamed 2x", "Synthetic other group") };
+        var sameName = Member("b", "Synthetic configured B") with { Basis = memberBasis, CapturedName = new(name) };
+        var gapOnly = Member("c", name) with { Basis = memberBasis };
+        var historical = Member("d", "【Synthetic old】 1-" + name) with
+            { Basis = memberBasis, OutboundTag = "123-proxy-Synthetic old-1-" + name };
+        var unrelated = Member("e", "Synthetic unrelated") with { Basis = memberBasis, CapturedName = new("Synthetic unrelated 1x") };
+        ledger.Accept(Batch(0, new(original, 0, 0), new(sameName, 0, 0), new(gapOnly, 0, 0),
+            new(historical, 0, 0), new(unrelated, 0, 0)));
+        var gapId = ledger.GetScopes(memberBasis).Single(x => x.Scope.IdentityValue == "c").Id;
+        foreach (var second in new[] { 1, 2, 3, 61 })
+            ledger.Accept(Batch(second, new(second < 2 ? original : renamed, second * 10, 0),
+                new(sameName, second * 20, 0), new(historical, second * 30, 0), new(unrelated, second * 40, 0))
+                with { RetiredScopeIds = [gapId] });
+        var scopes = ledger.GetScopes(memberBasis);
+        var unrelatedId = scopes.Single(x => x.Scope.IdentityValue == "e").Id;
+        RunSql($"""
+            INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin) VALUES
+                ({Epoch.UtcTicks},{Epoch.AddSeconds(1).UtcTicks},{gapId},'snapshot_changed',0,'collector'),
+                ({Epoch.UtcTicks},{Epoch.AddSeconds(1).UtcTicks},NULL,'synthetic_legacy',0,'legacy');
+            """);
+        var query = ScopeAll(basis, size: 1) with { ScopeName = name };
+        var expected = ledger.Export(query).ToArray();
+        var result = ledger.Query(query);
+        Assert.Equal(3, result.Scopes.Count);
+        Assert.Contains(result.Gaps, x => x.ScopeId == gapId);
+        Assert.Contains(result.Gaps, x => x.ScopeId is null);
+        Assert.DoesNotContain(result.Gaps, x => x.ScopeId == unrelatedId);
+        Assert.Equal(expected.Aggregate(BigInteger.Zero, (sum, row) => sum + BigInteger.Parse(row.Upload)).ToString(CultureInfo.InvariantCulture), result.Upload);
+        foreach (var page in new[] { 0, 1, 2, 99 })
+        {
+            var actual = ledger.Query(query with { Page = page });
+            Assert.Equal(expected.Length, actual.RecordCount);
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected.Skip(page).Take(1)),
+                System.Text.Json.JsonSerializer.Serialize(actual.Records));
+        }
+        var capturedId = scopes.Single(x => x.Scope.IdentityValue == "b").Id;
+        Assert.Single(ledger.Query(query with { ScopeId = capturedId, ScopeIds = [capturedId] }).Scopes);
+        Assert.Empty(ledger.Query(query with { ScopeId = capturedId, ScopeIds = [unrelatedId] }).Scopes);
+        Assert.Empty(ledger.Query(query with { ScopeIds = [] }).Scopes);
+        ScopeQueryMetrics? allMetrics = null, namedMetrics = null;
+        ledger.Query(query with { ScopeName = null }, observer: value => allMetrics = value);
+        ledger.Query(query, observer: value => namedMetrics = value);
+        Assert.True(namedMetrics!.RowsRead < allMetrics!.RowsRead);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NamedProbeCandidatesKeepEarliestCapturedNameOutsideTheQueryWindow(bool metadata)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: metadata);
+        const string oldName = "Synthetic old probe 0.5x";
+        var probe = Member("a", metadata ? "Synthetic fallback" : oldName) with
+            { Basis = "probe_urltest_member", CapturedName = new(oldName) };
+        var renamed = probe with { CapturedName = new("Synthetic new probe 2x") };
+        ledger.Accept(Batch(0, new ScopeReading(probe, 0, 0)));
+        ledger.Accept(Batch(1, new ScopeReading(probe, 10, 0)));
+        ledger.Accept(Batch(2, new ScopeReading(renamed, 20, 0)));
+        ledger.Accept(Batch(3, new ScopeReading(renamed, 30, 0)));
+        var query = ScopeAll("probe_urltest_member") with
+            { ScopeName = oldName, Start = Epoch.AddHours(2), End = Epoch.AddHours(3) };
+        var result = ledger.Query(query);
+        Assert.Empty(result.Records);
+        Assert.Equal(Epoch.ToString("O", CultureInfo.InvariantCulture), result.EarliestRecord);
+        Assert.Null(ledger.Query(query with { ScopeIds = [] }).EarliestRecord);
+        Assert.Null(ledger.Query(query with { ScopeName = "Synthetic absent" }).EarliestRecord);
+    }
+
+    [Theory]
+    [InlineData("actual_member")]
+    [InlineData("probe_urltest_member")]
+    public void ScopeQueryPreservesExactEstimatesAndExportOrderAcrossZeroPartsAndPages(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        const long large = 9007199254740993;
+        const string preciseName = "Synthetic 1.0000000000000000000000000001x";
+        var original = Member("a", "Synthetic fallback") with { Basis = basis, CapturedName = new(preciseName, "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic 0x", "Synthetic other group") };
+        var idle = Member("b", "Synthetic idle fallback") with { Basis = basis, CapturedName = new("Synthetic idle 1x") };
+        ledger.Accept(Batch(0, new(original, 0, 0), new(idle, 0, 0)));
+        ledger.Accept(Batch(1, new(original, large, large), new(idle, 0, 0)));
+        ledger.Accept(Batch(2, new(renamed, large + 7, large + 11), new(idle, 0, 0)));
+        ledger.Accept(Batch(3, new(renamed, large + 20, large + 28), new(idle, 0, 0)));
+        ledger.Accept(Batch(31, new(renamed, large + 120, large + 128), new(idle, 0, 0)));
+        var query = ScopeAll(basis, size: 1);
+        var all = ledger.Query(query);
+        Assert.Equal("18014398509481986.0000000000018014398509481986", all.Display!.EstimatedBilledBytes);
+        Assert.Equal("partial", all.Display.RateStatus);
+        Assert.True(BigInteger.Parse(all.Display.EstimateUnknownBytes) > 0);
+        foreach (var name in new string?[] { null, preciseName, "Synthetic 0x", "Synthetic idle 1x" })
+        foreach (var nonZero in new[] { false, true })
+        {
+            var selected = query with { ScopeName = name, NonZeroRecords = nonZero };
+            var expected = ledger.Export(selected)
+                .Where(x => !nonZero || x.Upload != "0" || x.Download != "0").ToArray();
+            foreach (var page in new[] { 0, 1, 2, 99 })
+            {
+                var actual = ledger.Query(selected with { Page = page });
+                Assert.Equal(expected.Length, actual.RecordCount);
+                Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected.Skip(page).Take(1)),
+                    System.Text.Json.JsonSerializer.Serialize(actual.Records));
+            }
+        }
+        var idleResult = ledger.Query(query with { ScopeName = "Synthetic idle 1x" });
+        Assert.Equal("known", idleResult.Display!.RateStatus);
+        Assert.Equal("0", idleResult.Display.EstimatedBilledBytes);
+        Assert.Single(idleResult.Scopes);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScopeQueryValidatesDisplayEvidenceEvenOutsideTheRequestedPage(bool invalidRate)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true);
+        var member = Member() with { CapturedName = new("Synthetic 1x") };
+        ledger.Accept(Batch(0, new ScopeReading(member, 0, 0)));
+        ledger.Accept(Batch(1, new ScopeReading(member, 10, 0)));
+        RunSql(invalidRate
+            ? """UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.Rate','invalid');"""
+            : "UPDATE ui_display_records SET upload=11;");
+        Assert.Throws<InvalidOperationException>(() => ledger.Query(ScopeAll(page: 99, size: 1)));
+    }
+
+    [Fact]
+    public void LocalProxyBroadDisplayReadMatchesScopedReadsForHistoricalPartsAndPages()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        var original = Member("a", "Synthetic fallback") with { CapturedName = new("Synthetic zebra 0.5x", "Synthetic group") };
+        var renamed = original with { CapturedName = new("Synthetic alpha 2x", "Synthetic group") };
+        var other = Member("b", "Synthetic other") with { CapturedName = new("Synthetic other 1x") };
+        var probe = original with { Basis = "probe_urltest_member" };
+        foreach (var second in new[] { 0, 1, 2, 3, 61 })
+            ledger.Accept(Batch(second, new(second < 2 ? original : renamed, second * 10, 0),
+                new(other, second * 100, 0), new(probe, second * 1000, 0)));
+        var ids = ledger.GetScopes("local_proxy").Select(x => x.Id).ToArray();
+        Assert.Equal(2, ids.Length);
+        foreach (var name in new string?[] { null, "Synthetic zebra 0.5x", "Synthetic alpha 2x" })
+        foreach (var page in new[] { 0, 1, 2 })
+        {
+            var query = ScopeAll("local_proxy", page: page, size: 1) with { ScopeName = name, NonZeroRecords = true };
+            var broad = ledger.Query(query);
+            var indexed = ledger.Query(query with { ScopeIds = ids });
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(indexed), System.Text.Json.JsonSerializer.Serialize(broad));
+        }
+        var all = ledger.Query(ScopeAll("local_proxy"));
+        Assert.Equal("6710", all.Upload);
+        Assert.Equal(new[] { "Synthetic zebra 0.5x", "Synthetic alpha 2x", "Synthetic fallback" },
+            all.Records.Where(x => x.ScopeId == ids[0] && x.Quality == "measured").Select(x => x.Name).ToArray());
+    }
+
+    [Fact]
     public void ScopeNonZeroDetailsFilterBeforePagingWithoutChangingTotalsGapsOrExport()
     {
         using var ledger = ScopeLedger.CreateNew(Database);
@@ -1117,6 +1492,38 @@ public sealed class LedgerTests : IDisposable
         Assert.Throws<ArgumentOutOfRangeException>(() => ledger.Query(ScopeAll(page: -1)));
     }
 
+    [Theory]
+    [InlineData("actual_member")]
+    [InlineData("probe_urltest_member")]
+    public void ScopeCoverageLookupPreservesIdentityIntervalEdgesAndRecoveryFlags(string basis)
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true);
+        var a = Member("a") with { Basis = basis };
+        var b = Member("b") with { Basis = basis };
+        ledger.Accept(Batch(0, new(a, 0, 0), new(b, 0, 0)));
+        ledger.Accept(Batch(1, new(a, 10, 0), new(b, 20, 0)));
+        ledger.Accept(Batch(61, new(a, 70, 0), new(b, 80, 0)));
+        var scopes = ledger.GetScopes(basis);
+        var aid = scopes.Single(x => x.Scope.IdentityValue == "a").Id;
+        var bid = scopes.Single(x => x.Scope.IdentityValue == "b").Id;
+        RunSql($"""
+            INSERT INTO scope_gaps(start_ticks,end_ticks,scope_id,reason,is_open,origin) VALUES
+                ({Epoch.AddSeconds(60).UtcTicks},{Epoch.AddSeconds(61).UtcTicks},{aid},'uncollected_outbounds',0,'collector'),
+                ({Epoch.AddSeconds(61).UtcTicks},{Epoch.AddSeconds(62).UtcTicks},{bid},'uncollected_outbounds',0,'collector'),
+                ({Epoch.UtcTicks},{Epoch.AddSeconds(60).UtcTicks},{aid},'snapshot_changed',0,'collector');
+            """);
+        var query = ScopeAll(basis);
+        var result = ledger.Query(query);
+        Assert.Equal("150", result.Upload);
+        Assert.Single(result.Records, x => x.PartialCoverage && x.ScopeId == aid && x.Quality == "recovered-contained");
+        Assert.All(result.Records.Where(x => x.ScopeId == bid || x.Quality == "measured"), x => Assert.False(x.PartialCoverage));
+        Assert.Equal(result.Records.Select(x => x.PartialCoverage), ledger.Export(query).Select(x => x.PartialCoverage));
+        var partial = ledger.Query(query with { ScopeId = aid, Start = Epoch.AddSeconds(30), End = Epoch.AddSeconds(61) });
+        Assert.Equal("0", partial.Upload);
+        Assert.Equal("60", partial.PartialUpload);
+        Assert.True(Assert.Single(partial.Records).PartialCoverage);
+    }
+
     [Fact]
     public void ScopeBoundaryResetAndExplicitInvalidationNeverRecoverUncertainCumulativeBytes()
     {
@@ -1280,6 +1687,194 @@ public sealed class LedgerTests : IDisposable
         Assert.Contains(migrated.Query(ScopeAll("legacy_proxy")).Gaps, x => x.Origin == "legacy" && x.IsOpen);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScopeMigrationMapsFreshOrInitializedDisplayMetadataWithoutReinterpretingHistory(bool initialize)
+    {
+        const string name = "Synthetic 0.5x";
+        using (var old = new Ledger(Database, includeDisplayMetadata: !initialize))
+        {
+            old.Accept(Sample(0, 100, 200, name: name));
+            old.Accept(Sample(1, 110, 204, name: name));
+        }
+        if (initialize) ScopeLedgerMigration.InitializeDisplay(Database, Path.Combine(directory, "before-display.db"));
+        using (var old = new Ledger(Database))
+        {
+            old.Accept(Sample(2, 120, 208, name: name));
+            old.Accept(Sample(3, 130, 212, name: name));
+            old.Accept(Sample(20, 150, 220, name: name));
+            old.Accept(Sample(0, 0, instance: "other", node: "unknown", name: "Synthetic unknown"));
+            old.Accept(Sample(1, 7, instance: "other", node: "unknown", name: "Synthetic unknown"));
+        }
+        // A saved rate from before the default-1 policy must remain unknown after either upgrade.
+        RunSql("""
+            UPDATE ui_display_cursors SET snapshot=json_set(snapshot,'$.Rate',NULL) WHERE entity_key='other/unknown';
+            UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.Rate',NULL) WHERE entity_key='other/unknown';
+            """);
+        var before = HistorySnapshot(Database);
+        var displayBefore = DisplaySnapshot(Database);
+        HistoryResult expected;
+        using (var old = new Ledger(Database)) expected = old.Query(All());
+        var backup = Path.Combine(directory, "before-v2.db");
+        Assert.Equal(2, ScopeLedgerMigration.Migrate(Database, backup).LegacyScopes);
+        Assert.Equal(before, HistorySnapshot(backup));
+        Assert.Equal(displayBefore, DisplaySnapshot(Database, mapLegacyKeys: true));
+        using (var migrated = new ScopeLedger(Database))
+        {
+            Assert.True(migrated.SupportsDisplayMetadata);
+            var actual = migrated.Query(ScopeAll("legacy_proxy"));
+            Assert.Equal(expected.Upload, actual.Upload);
+            Assert.Equal(expected.Download, actual.Download);
+            Assert.Equal(expected.RecoveredUpload, actual.RecoveredUpload);
+            Assert.Equal(expected.RecoveredDownload, actual.RecoveredDownload);
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected.Display),
+                System.Text.Json.JsonSerializer.Serialize(actual.Display));
+            Assert.Equal(initialize ? "7" : "21", actual.Display!.EstimatedBilledBytes);
+            Assert.Equal(initialize ? "63" : "35", actual.Display.EstimateUnknownBytes);
+            var unknown = migrated.Query(ScopeAll("legacy_proxy") with { ScopeName = "Synthetic unknown" });
+            Assert.Null(unknown.Display!.EstimatedBilledBytes);
+            Assert.Equal("7", unknown.Display.EstimateUnknownBytes);
+            Assert.Null(Assert.Single(migrated.Export(ScopeAll("legacy_proxy")),
+                x => x.Quality == "recovered-contained").Display!.EstimatedBilledBytes);
+        }
+
+        var v2Rows = HistorySnapshot(Database, includeSchema: false);
+        var v2Display = DisplaySnapshot(Database);
+        ScopeLedgerMigration.MigrateProbes(Database, Path.Combine(directory, "before-v3.db"));
+        Assert.Equal(v2Rows, HistorySnapshot(Database, includeSchema: false));
+        Assert.Equal(v2Display, DisplaySnapshot(Database));
+        using var upgraded = new ScopeLedger(Database);
+        Assert.True(upgraded.SupportsProbes);
+        Assert.True(upgraded.SupportsDisplayMetadata);
+        var legacy = new MeasurementScope("legacy_proxy", "legacy_node", "instance/node", name, "node");
+        upgraded.Accept(Batch(21, new ScopeReading(legacy, 200, 300)));
+        Assert.Equal(expected.Upload, upgraded.Query(ScopeAll("legacy_proxy")).Upload);
+        upgraded.Accept(Batch(22, new ScopeReading(legacy, 210, 304)));
+        var continued = upgraded.Query(ScopeAll("legacy_proxy"));
+        Assert.Equal("67", continued.Upload);
+        Assert.Equal(initialize ? "14" : "28", continued.Display!.EstimatedBilledBytes);
+        Assert.Equal(initialize ? "63" : "35", continued.Display.EstimateUnknownBytes);
+    }
+
+    [Theory]
+    [InlineData(1, "CREATE INDEX unexpected_display ON ui_display_records(start_ticks);")]
+    [InlineData(2, "CREATE INDEX unexpected_display ON ui_display_records(start_ticks);")]
+    [InlineData(1, "DROP TABLE ui_display_records;")]
+    [InlineData(2, "DROP TABLE ui_display_records;")]
+    [InlineData(1, "ALTER TABLE ui_display_cursors ADD COLUMN unexpected TEXT;")]
+    [InlineData(2, "ALTER TABLE ui_display_cursors ADD COLUMN unexpected TEXT;")]
+    [InlineData(1, "CREATE TRIGGER unexpected_display AFTER INSERT ON ui_display_records BEGIN SELECT 1; END;")]
+    [InlineData(2, "CREATE TRIGGER unexpected_display AFTER INSERT ON ui_display_records BEGIN SELECT 1; END;")]
+    [InlineData(1, "UPDATE ui_display_cursors SET entity_key='missing';")]
+    [InlineData(1, "UPDATE ui_display_records SET entity_key='missing';")]
+    public void MigrationRejectsMalformedDisplayExtensionsBeforeCreatingBackup(int version, string mutation)
+    {
+        CreateDisplayMigrationFixture(version);
+        RunSql(mutation);
+        var before = File.ReadAllBytes(Database);
+        var backup = Path.Combine(directory, "rejected-display.db");
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            if (version == 1) ScopeLedgerMigration.Migrate(Database, backup);
+            else ScopeLedgerMigration.MigrateProbes(Database, backup);
+        });
+        Assert.False(File.Exists(backup));
+        Assert.Equal(before, File.ReadAllBytes(Database));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MigrationRollsBackDisplayMutationTogetherWithSchemaAndVersion(int version)
+    {
+        CreateDisplayMigrationFixture(version);
+        var before = HistorySnapshot(Database);
+        ApplyDisplayUpgradeForTest(version, "UPDATE ui_display_records SET upload=upload+1;");
+        Assert.Equal(before, HistorySnapshot(Database));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MigrationRejectsDisplayChangesAfterBackupWithoutDiscardingThem(int version)
+    {
+        CreateDisplayMigrationFixture(version);
+        ApplyDisplayUpgradeForTest(version, "", changeAfterBackup: true);
+        var backup = Path.Combine(directory, "display-transaction-backup.db");
+        Assert.NotEqual(DisplaySnapshot(backup), DisplaySnapshot(Database));
+        using var db = new SqliteConnection($"Data Source={Database};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = "PRAGMA user_version;";
+        Assert.Equal((long)version, command.ExecuteScalar());
+        command.CommandText = "SELECT json_extract(snapshot,'$.GroupLabel') FROM ui_display_records;";
+        Assert.Equal("Synthetic changed group", command.ExecuteScalar());
+    }
+
+    private void CreateDisplayMigrationFixture(int version)
+    {
+        if (version == 1)
+        {
+            using var ledger = new Ledger(Database, includeDisplayMetadata: true);
+            ledger.Accept(Sample(0, 0));
+            ledger.Accept(Sample(1, 10));
+        }
+        else
+        {
+            using var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true);
+            ledger.Accept(Batch(0, Reading("a", 0)));
+            ledger.Accept(Batch(1, Reading("a", 10)));
+        }
+    }
+
+    private void ApplyDisplayUpgradeForTest(int version, string injectedSql, bool changeAfterBackup = false)
+    {
+        using var source = new SqliteConnection($"Data Source={Database};Pooling=False");
+        source.Open();
+        using var backup = new SqliteConnection($"Data Source={Path.Combine(directory, "display-transaction-backup.db")};Pooling=False");
+        backup.Open();
+        source.BackupDatabase(backup);
+        using (var command = source.CreateCommand())
+        {
+            command.CommandText = $"PRAGMA foreign_keys={(version == 1 ? "ON" : "OFF")};" +
+                (changeAfterBackup ? "UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.GroupLabel','Synthetic changed group');" : "");
+            command.ExecuteNonQuery();
+        }
+        using var stream = typeof(ScopeLedger).Assembly.GetManifestResourceStream($"V2rayNMonitor.Core.ScopeLedgerV{version + 1}.sql")!;
+        using var reader = new StreamReader(stream);
+        var apply = typeof(ScopeLedgerMigration).GetMethod(version == 1 ? "Apply" : "ApplyProbes",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            apply.Invoke(null, [source, backup, reader.ReadToEnd() + "\n" + injectedSql]));
+    }
+
+    // Compare every stored UI field and DDL. Only the v1 entity key may change, through the exact scope mapping.
+    private static string DisplaySnapshot(string path, bool mapLegacyKeys = false)
+    {
+        using var db = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        db.Open();
+        var key = mapLegacyKeys ? "s.node_key" : "u.entity_key";
+        var join = mapLegacyKeys ? " LEFT JOIN measurement_scopes s ON u.entity_key='scope:'||s.scope_id" : "";
+        var queries = new[]
+        {
+            $"SELECT {key},u.at_ticks,u.snapshot FROM ui_display_cursors u{join} ORDER BY 1;",
+            $"SELECT {key},u.kind,u.start_ticks,u.end_ticks,u.snapshot,u.upload,u.download FROM ui_display_records u{join} ORDER BY 1,2,3,4,5;",
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('ui_display_cursors','ui_display_records') ORDER BY type,name;"
+        };
+        var rows = new List<object?[]>();
+        for (var index = 0; index < queries.Length; index++)
+        {
+            using var command = db.CreateCommand();
+            command.CommandText = queries[index];
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                rows.Add([index, .. Enumerable.Range(0, reader.FieldCount)
+                    .Select(i => reader.IsDBNull(i) ? null : reader.GetValue(i))]);
+        }
+        return System.Text.Json.JsonSerializer.Serialize(rows);
+    }
+
     [Fact]
     public void ScopeMigrationSupportsEmptyV1AndDoesNotReplaceExistingBackupOrAcceptV2()
     {
@@ -1302,6 +1897,7 @@ public sealed class LedgerTests : IDisposable
     [InlineData("INSERT INTO gaps VALUES(999,0,1,'orphan','synthetic',0);")]
     [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
     [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    [InlineData("CREATE INDEX unexpected_history ON minutes(upload);")]
     public void ScopeMigrationPreflightRejectsUnsupportedHistoryBeforeCreatingBackup(string mutation)
     {
         using (var old = new Ledger(Database)) old.Accept(Sample(0, 10));
@@ -1524,6 +2120,44 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Fact]
+    public void ProbeMigrationPreservesMemberDisplayGroupsNullSnapshotsAndSamplingContinuity()
+    {
+        var member = Member() with { CapturedName = new("Synthetic raw 0.5x", "Synthetic group 2x") };
+        var total = new MeasurementScope("business", "aggregate", "business", "Synthetic total");
+        TrafficDisplay expected;
+        using (var ledger = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true))
+        {
+            ledger.Accept(Batch(0, new(member, 0, 0), new(total, 0, 0)));
+            ledger.Accept(Batch(1, new(member, 10, 0), new(total, 10, 0)));
+            ledger.Accept(Batch(20, new(member, 50, 0), new(total, 50, 0)));
+            expected = ledger.Query(ScopeAll()).Display!;
+        }
+        var before = HistorySnapshot(Database);
+        var rowsBefore = HistorySnapshot(Database, includeSchema: false);
+        var displayBefore = DisplaySnapshot(Database);
+        var backup = Path.Combine(directory, "before-probes-display.db");
+        Assert.Equal(2, ScopeLedgerMigration.MigrateProbes(Database, backup).PreservedScopes);
+        Assert.Equal(before, HistorySnapshot(backup));
+        Assert.Equal(rowsBefore, HistorySnapshot(Database, includeSchema: false));
+        Assert.Equal(displayBefore, DisplaySnapshot(Database));
+        using var upgraded = new ScopeLedger(Database);
+        Assert.True(upgraded.SupportsProbes);
+        Assert.True(upgraded.SupportsDisplayMetadata);
+        Assert.Equal(System.Text.Json.JsonSerializer.Serialize(expected),
+            System.Text.Json.JsonSerializer.Serialize(upgraded.Query(ScopeAll()).Display));
+        var captured = Assert.Single(upgraded.Export(ScopeAll()), x => x.Display!.Rate == "0.5");
+        Assert.Equal("Synthetic raw 0.5x", captured.Display!.OriginalName);
+        Assert.Equal("Synthetic group 2x", Assert.Single(captured.Display.Groups));
+        Assert.NotNull(captured.Display.MergeKey);
+        Assert.Null(upgraded.Query(ScopeAll("business")).Display!.EstimatedBilledBytes);
+        upgraded.Accept(Batch(21, new(member, 60, 0), new(total, 60, 0), new(ProbeMember(), 100, 0)));
+        Assert.Equal("60", upgraded.Query(ScopeAll()).Upload);
+        Assert.Equal("10", upgraded.Query(ScopeAll()).Display!.EstimatedBilledBytes);
+        Assert.Equal("40", upgraded.Query(ScopeAll()).Display!.EstimateUnknownBytes);
+        Assert.Equal("0", upgraded.Query(ScopeAll("probe_urltest_member")).Upload);
+    }
+
+    [Fact]
     public void ProbeMigrationSupportsEmptyV2AndRefusesExistingBackupV1ProviderOrV3()
     {
         using (ScopeLedger.CreateNew(Database)) { }
@@ -1549,6 +2183,7 @@ public sealed class LedgerTests : IDisposable
     [Theory]
     [InlineData("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")]
     [InlineData("CREATE TABLE import_batches(synthetic TEXT);")]
+    [InlineData("CREATE INDEX unexpected_history ON minutes(upload);")]
     [InlineData("DROP INDEX scope_gap_open;")]
     public void ProbeMigrationRejectsUnsupportedV2BeforeCreatingBackup(string mutation)
     {
