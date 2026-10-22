@@ -16,23 +16,33 @@ internal enum CoreInstallState
 {
     Ready, AlreadyMatched, InstalledPendingReload, Restored, AlreadyRestored, FailedRestored,
     UnknownTarget, UnsupportedTarget, InvalidCandidate, UnsafePath, CoreRunning, PlanChanged,
-    FileBusy, PermissionDenied, Cancelled, StorageFailed, RecoveryRequired
+    FileBusy, PermissionDenied, Cancelled, StorageFailed, RecoveryRequired, InvalidConfiguration, PortUnavailable
 }
 internal sealed record CoreInstallPreparation(CoreInstallState State, CoreInstallPlan? Plan = null);
 internal sealed record CoreInstallResult(CoreInstallState State, Guid? OperationId = null);
 internal sealed record CoreInstallJournal(Guid OperationId, string ComponentId, string Version,
-    CoreFileIdentity Client, CoreFileIdentity Installed, CoreFileIdentity? Previous, string State);
+    CoreFileIdentity Client, CoreFileIdentity Installed, CoreFileIdentity? Previous, string State,
+    string? InstalledFileId = null);
 internal enum CoreInstallCheckpoint { BackupVerified, BeforeReplace, AfterReplace }
 
 // No UI/API caller yet. Paths and process observations are owned by the Host, never by a page.
-// One core file only; sidecar, configuration and ledger handling belong to separate stages.
+// One fixed file per transaction. Sidecar uses the same transaction with additional offline guards.
 internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreInstallObservation> capture,
     Action<CoreInstallCheckpoint>? checkpoint = null)
 {
     private const long MaximumFileBytes = 256L * 1024 * 1024;
     private const string BackupFolder = ".monitor-core-backups";
     private sealed record Target(string Path, ProcessInfo Client, CoreFileIdentity ClientFile);
-    private sealed class Rejected(CoreInstallState state) : Exception { internal CoreInstallState State => state; }
+    internal sealed class Rejected(CoreInstallState state) : Exception { internal CoreInstallState State => state; }
+    private CoreSidecarBinding? sidecar;
+    private string Payload(string name) => name + (sidecar is null ? ".exe" : ".json");
+
+    internal static CoreComponentInstaller ForSidecar(CoreComponent approvedCore, Func<CoreInstallObservation> capture,
+        V2rayNMonitor.Core.XraySnapshot baseline, SidecarPlan confirmed, Action<CoreInstallCheckpoint>? checkpoint = null)
+    {
+        var binding = new CoreSidecarBinding(approvedCore, baseline, confirmed);
+        return new(binding.Component, capture, checkpoint) { sidecar = binding };
+    }
 
     [SupportedOSPlatform("windows")]
     internal static CoreComponentInstaller? ForWindows(string componentId, string clientPath, string dataRoot)
@@ -54,11 +64,15 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
             var target = await ReadTargetAsync(token);
             using var previous = OpenExisting(target.Path, FileShare.Read);
             var identity = previous is null ? null : await IdentifyAsync(previous, token);
+            sidecar?.ValidatePrevious(previous);
+            if (sidecar is not null && identity?.Sha256 != sidecar.Confirmed.PreviousHash)
+                return new(CoreInstallState.PlanChanged);
             if (MatchesComponent(identity)) return new(CoreInstallState.AlreadyMatched);
             PlainPath(candidatePath, directory: false);
             if ((await CoreComponents.VerifyFileAsync(component, candidatePath, component.ClientVersion,
                 component.Runtime, token)).State != CoreFileState.IdentityMatched)
                 return new(CoreInstallState.InvalidCandidate);
+            using var port = sidecar?.ReservePort(sidecar.Confirmed.Json);
             return new(CoreInstallState.Ready, new(Path.GetFullPath(candidatePath), target.Path,
                 target.Client.Pid, target.Client.StartedAt!.Value, target.ClientFile, identity));
         }
@@ -81,7 +95,10 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
             // Deny new readers/writers (including a new loader), but permit the atomic replacement.
             original = OpenExisting(target.Path, FileShare.Delete);
             var old = original is null ? null : await IdentifyAsync(original, token);
+            sidecar?.ValidatePrevious(original);
             if (old != plan.Previous) throw new Rejected(CoreInstallState.PlanChanged);
+            if (sidecar is not null && old?.Sha256 != sidecar.Confirmed.PreviousHash)
+                throw new Rejected(CoreInstallState.PlanChanged);
             if (MatchesComponent(old)) return new(CoreInstallState.AlreadyMatched);
             PlainPath(plan.CandidatePath, directory: false);
             using var candidate = new FileStream(plan.CandidatePath, FileMode.Open, FileAccess.Read, FileShare.Read,
@@ -95,11 +112,11 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
             WriteJournal(target.Path, journal);
             if (original is not null)
             {
-                await CopyAsync(original, Path.Combine(folder, "previous.exe"), token);
-                if (await IdentifyFileAsync(Path.Combine(folder, "previous.exe"), token) != old)
+                await CopyAsync(original, Path.Combine(folder, Payload("previous")), token);
+                if (await IdentifyFileAsync(Path.Combine(folder, Payload("previous")), token) != old)
                     throw new IOException("Backup verification failed.");
             }
-            var staged = Path.Combine(folder, "candidate.exe");
+            var staged = Path.Combine(folder, Payload("candidate"));
             await CopyAsync(candidate, staged, token);
             if (await IdentifyFileAsync(staged, token) != journal.Installed)
                 throw new IOException("Staged file changed.");
@@ -113,11 +130,15 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
                 throw new Rejected(CoreInstallState.InvalidCandidate);
             if (original is not null && !await SameFileAtPathAsync(original, target.Path, old!, token))
                 throw new Rejected(CoreInstallState.PlanChanged);
-            using var checkedBackup = old is null ? null : new FileStream(Path.Combine(folder, "previous.exe"),
+            using var checkedBackup = old is null ? null : new FileStream(Path.Combine(folder, Payload("previous")),
                 FileMode.Open, FileAccess.Read, FileShare.Read);
             if (checkedBackup is not null && await IdentifyAsync(checkedBackup, token) != old)
                 throw new Rejected(CoreInstallState.PlanChanged);
+            using var inputs = sidecar is null ? null : await sidecar.AcquireAsync(target.Path, exclusiveCore: true, token);
+            if (sidecar is not null) RequirePlan(plan, await ReadTargetAsync(token, sidecarInputsHeld: true));
+            using var port = sidecar?.ReservePort(sidecar.Confirmed.Json);
             token.ThrowIfCancellationRequested();
+            if (OperatingSystem.IsWindows()) journal = journal with { InstalledFileId = FileId(staged) };
             WriteJournal(target.Path, journal with { State = "Replacing" });
             attempted = true;
             if (original is null) File.Move(staged, target.Path); // Never overwrite a concurrently created file.
@@ -126,7 +147,8 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
             original?.Dispose(); original = null;
             // Once replaced, finish verification/recovery even if the caller cancels.
             checkpoint?.Invoke(CoreInstallCheckpoint.AfterReplace);
-            if (await IdentifyFileAsync(target.Path, CancellationToken.None) != journal.Installed)
+            if (await IdentifyFileAsync(target.Path, CancellationToken.None) != journal.Installed ||
+                (OperatingSystem.IsWindows() && FileId(target.Path) != journal.InstalledFileId))
                 throw new IOException("Installed file changed.");
             WriteJournal(target.Path, journal with { State = "InstalledPendingReload" });
             return new(CoreInstallState.InstalledPendingReload, operation);
@@ -183,7 +205,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
             if (journal is null || journal.OperationId != operationId || journal.ComponentId != component.Id ||
                 journal.Version != component.Version || journal.Client != target.ClientFile ||
                 !MatchesComponent(journal.Installed) || !ValidIdentity(journal.Previous) ||
-                (journal.Previous is null && Path.Exists(Path.Combine(BackupPath(target.Path, operationId), "previous.exe"))))
+                (journal.Previous is null && Path.Exists(Path.Combine(BackupPath(target.Path, operationId), Payload("previous")))))
                 throw new Rejected(CoreInstallState.PlanChanged);
             input.Dispose();
             return new(await RestoreLockedAsync(journal, token), operationId);
@@ -203,17 +225,20 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
             return CoreInstallState.AlreadyRestored;
         }
         if (identity != journal.Installed) throw new Rejected(CoreInstallState.PlanChanged);
+        if (OperatingSystem.IsWindows() &&
+            (journal.InstalledFileId is null || journal.InstalledFileId != FileId(target.Path)))
+            throw new Rejected(CoreInstallState.PlanChanged);
         var folder = BackupPath(target.Path, journal.OperationId);
         PlainPath(folder, directory: true);
         string? staged = null;
         if (journal.Previous is not null)
         {
-            var backup = Path.Combine(folder, "previous.exe");
+            var backup = Path.Combine(folder, Payload("previous"));
             PlainPath(backup, directory: false);
             using var source = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.Read);
             if (await IdentifyAsync(source, token) != journal.Previous)
                 throw new Rejected(CoreInstallState.PlanChanged);
-            staged = Path.Combine(folder, "restore-" + Guid.NewGuid().ToString("N") + ".exe");
+            staged = Path.Combine(folder, Payload("restore-" + Guid.NewGuid().ToString("N")));
             await CopyAsync(source, staged, token);
             if (await IdentifyFileAsync(staged, token) != journal.Previous)
                 throw new IOException("Restore staging changed.");
@@ -223,6 +248,10 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         PlainPath(target.Path, directory: false);
         if (!await SameFileAtPathAsync(current!, target.Path, journal.Installed, token))
             throw new Rejected(CoreInstallState.PlanChanged);
+        using var inputs = sidecar is null ? null : await sidecar.AcquireAsync(target.Path, exclusiveCore: true, token);
+        if (sidecar is not null && !SameTarget(target, await ReadTargetAsync(token, sidecarInputsHeld: true)))
+            throw new Rejected(CoreInstallState.PlanChanged);
+        using var port = sidecar is null || staged is null ? null : sidecar.ReservePort(File.ReadAllText(staged));
         token.ThrowIfCancellationRequested();
         WriteJournal(target.Path, journal with { State = "Restoring" });
         try
@@ -230,7 +259,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
             if (staged is null)
             {
                 // Preserve the new file while restoring the original absence; do not delete it.
-                File.Move(target.Path, Path.Combine(folder, "removed-" + Guid.NewGuid().ToString("N") + ".exe"));
+                File.Move(target.Path, Path.Combine(folder, Payload("removed-" + Guid.NewGuid().ToString("N"))));
             }
             else File.Replace(staged, target.Path, null);
             current?.Dispose();
@@ -242,7 +271,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         catch (Exception e) when (Expected(e)) { return CoreInstallState.RecoveryRequired; }
     }
 
-    private async Task<Target> ReadTargetAsync(CancellationToken token)
+    private async Task<Target> ReadTargetAsync(CancellationToken token, bool sidecarInputsHeld = false)
     {
         token.ThrowIfCancellationRequested();
         var observed = capture();
@@ -262,6 +291,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         var relative = component.Id switch
         {
             "sing-box-statistics" when component.FileName == "sing-box-client.exe" => Path.Combine("bin", "sing_box", "sing-box-client.exe"),
+            "sing-box-sidecar" when sidecar is not null => Path.Combine("bin", "sing_box", "sing-box-client.exe"),
             "xray-probes" when component.FileName == "xray.exe" => Path.Combine("bin", "xray", "xray.exe"),
             _ => throw new Rejected(CoreInstallState.UnsupportedTarget)
         };
@@ -269,6 +299,10 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         PlainPath(Path.GetDirectoryName(target)!, directory: true);
         PlainPath(target, directory: false, allowMissing: true);
         if (observed.Processes.Any(x => ProcessBinding.SamePath(x.ExecutablePath, target)))
+            throw new Rejected(CoreInstallState.CoreRunning);
+        if (sidecar is not null && observed.Processes.Any(x =>
+            x.Name.Equals("sing-box.exe", StringComparison.OrdinalIgnoreCase) ||
+            x.Name.Equals("sing-box-client.exe", StringComparison.OrdinalIgnoreCase)))
             throw new Rejected(CoreInstallState.CoreRunning);
         if (OperatingSystem.IsWindows() && File.Exists(target))
         {
@@ -279,11 +313,20 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
                 if (targetIdentity == processIdentity) throw new Rejected(CoreInstallState.CoreRunning);
             }
         }
+        if (sidecar is not null)
+        {
+            target = Path.Combine(Path.GetDirectoryName(target)!, "monitor-stats.json");
+            PlainPath(target, directory: false, allowMissing: true);
+            if (!sidecarInputsHeld)
+            {
+                using var inputs = await sidecar.AcquireAsync(target, exclusiveCore: false, token);
+            }
+        }
         return new(target, parents[0], (await IdentifyFileAsync(observed.ClientPath, token))!);
     }
 
     // The old handle permits atomic replacement, so recheck that the path still names that file.
-    private static async Task<bool> SameFileAtPathAsync(FileStream held, string path,
+    internal static async Task<bool> SameFileAtPathAsync(FileStream held, string path,
         CoreFileIdentity expected, CancellationToken token)
     {
         if (!OperatingSystem.IsWindows()) return await IdentifyFileAsync(path, token) == expected;
@@ -300,6 +343,11 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         if (file.IsInvalid || !GetFileInformationByHandle(file, out var identity))
             throw new Rejected(CoreInstallState.UnknownTarget);
         return (identity.Volume, identity.IndexHigh, identity.IndexLow);
+    }
+    private static string FileId(string path)
+    {
+        var id = PhysicalIdentity(path);
+        return $"{id.Volume:X8}:{id.High:X8}:{id.Low:X8}";
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -346,7 +394,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         }
         return await IdentifyAsync(file, token);
     }
-    private static async Task<CoreFileIdentity> IdentifyAsync(Stream file, CancellationToken token)
+    internal static async Task<CoreFileIdentity> IdentifyAsync(Stream file, CancellationToken token)
     {
         var size = file.Length;
         if (size is < 0 or > MaximumFileBytes) throw new Rejected(CoreInstallState.InvalidCandidate);
@@ -405,7 +453,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         try { WriteJournal(target, journal); }
         catch (Exception e) when (Expected(e)) { /* Retain the last durable state and all backup files. */ }
     }
-    private static void PlainPath(string path, bool directory, bool allowMissing = false)
+    internal static void PlainPath(string path, bool directory, bool allowMissing = false)
     {
         if (!Path.IsPathFullyQualified(path) || (OperatingSystem.IsWindows() &&
             (path.StartsWith(@"\\", StringComparison.Ordinal) || path.Skip(2).Contains(':'))))
@@ -431,6 +479,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         Rejected r => r.State,
         OperationCanceledException => CoreInstallState.Cancelled,
         UnauthorizedAccessException => CoreInstallState.PermissionDenied,
+        System.Net.Sockets.SocketException => CoreInstallState.PortUnavailable,
         // Windows uses HRESULT sharing/lock violations; .NET Unix keeps the raw flock errno.
         IOException io when (OperatingSystem.IsWindows() && (io.HResult & 0xffff) is 32 or 33) ||
             (OperatingSystem.IsLinux() && io.HResult == 11) => CoreInstallState.FileBusy,
