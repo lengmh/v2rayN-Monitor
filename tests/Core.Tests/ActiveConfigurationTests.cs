@@ -1888,14 +1888,14 @@ public sealed class ActiveConfigurationTests : IDisposable
     }
 
     // Non-seekable bodies avoid StreamContent synthesizing a Content-Length header.
-    private sealed class ComponentBodyStream(byte[] bytes, int chunkSize = 65536) : Stream
+    private sealed class ComponentBodyStream(byte[] bytes, int chunkSize = 65536, bool knownLength = false) : Stream
     {
         internal int BytesRead { get; private set; }
         internal Func<CancellationToken, Task>? BeforeRead { get; init; }
         public override bool CanRead => true;
         public override bool CanSeek => false;
         public override bool CanWrite => false;
-        public override long Length => throw new NotSupportedException();
+        public override long Length => knownLength ? bytes.Length : throw new NotSupportedException();
         public override long Position { get => BytesRead; set => throw new NotSupportedException(); }
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
@@ -2241,6 +2241,43 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Single(handler.Requests);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentFileHashCancellationInterruptsAnAlreadyStartedRead(bool timeout)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ComponentBodyStream? stream = null;
+        stream = new ComponentBodyStream(SyntheticCoreBytes, chunkSize: 8, knownLength: true)
+        {
+            BeforeRead = async token =>
+            {
+                if (stream!.BytesRead == 0) return;
+                blocked.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+        };
+        using var input = stream;
+        if (timeout) cancellation.CancelAfter(TimeSpan.FromMilliseconds(500));
+        var verification = CoreComponents.VerifyStreamAsync(SyntheticComponent(SyntheticCoreBytes), input, cancellation.Token);
+        await blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (!timeout) cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => verification.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.InRange(input.BytesRead, 1, SyntheticCoreBytes.Length - 1);
+    }
+
+    [Fact]
+    public async Task ComponentFileAsyncVerificationHonorsCancellationBeforeOpeningTheFile()
+    {
+        var existing = ExistingComponent();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CoreComponents.VerifyFileAsync(
+            SyntheticComponent(SyntheticCoreBytes), existing, SingboxParser.ClientVersion, "win-x64", cancellation.Token));
+        AssertExistingComponentUnchanged(existing);
+    }
+
     [Fact]
     public async Task ComponentDownloadRetriesUseIndependentStagingAndDoNotDamageOtherPreparations()
     {
@@ -2268,7 +2305,16 @@ public sealed class ActiveConfigurationTests : IDisposable
         {
             Assert.Equal(Path.TrimEndingDirectorySeparator(Path.GetTempPath()), Path.GetDirectoryName(stage));
             Assert.StartsWith("v2rayn-monitor-component-", Path.GetFileName(stage));
-            if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true);
+            if (Directory.Exists(stage))
+            {
+                Assert.False((File.GetAttributes(stage) & FileAttributes.ReparsePoint) != 0);
+                foreach (var file in Directory.GetFiles(stage))
+                {
+                    Assert.False((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0);
+                    File.Delete(file);
+                }
+                Directory.Delete(stage);
+            }
         }
         if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
     }

@@ -31,6 +31,9 @@ COMPONENTS = {
         "license": "GPL-3.0-or-later",
         "provenance": "build-provenance.json",
         "patches": ["monitor.patch", "member-stats.patch", "member-sidecar.patch", "probe-stats.patch"],
+        "required_tests": ["TestMonitorStatsEndpoint", "TestMonitorMemberBinding",
+                           "TestMonitorMemberConcurrentIndependentConnections", "TestMonitorMembersDisabledPreservesOriginalCounters",
+                           "TestMonitorMemberSidecar", "TestMonitorURLTestSeparateCounters", "TestMonitorURLTestDisabledAndConcurrent"],
     },
     "xray-probes": {
         "extension": "xray",
@@ -44,6 +47,8 @@ COMPONENTS = {
         "license": "MPL-2.0",
         "provenance": "provenance.json",
         "patches": ["probe-stats.patch"],
+        "required_tests": ["TestMonitorProbeCountersKeepConnectionTagAndPartialErrors",
+                           "TestMonitorProbeExcludedUnknownConcurrentAndDisabled"],
     },
 }
 
@@ -66,6 +71,16 @@ def require_hash(data: bytes, expected: str, label: str) -> None:
         raise ValueError(f"Identity mismatch: {label}")
 
 
+def source_file(archive: tarfile.TarFile, name: str) -> bytes:
+    member = archive.getmember(name)
+    if not member.isfile() or not 0 < member.size <= 1024 * 1024:
+        raise ValueError(f"Invalid upstream file: {name}")
+    stream = archive.extractfile(member)
+    if stream is None:
+        raise ValueError(f"Missing upstream file: {name}")
+    return stream.read()
+
+
 def prepare(component_id: str, build_root: Path, output: Path) -> dict:
     spec = COMPONENTS[component_id]
     extension = ROOT / "extensions" / spec["extension"]
@@ -84,6 +99,8 @@ def prepare(component_id: str, build_root: Path, output: Path) -> dict:
         ("sourceUrl", f"https://codeload.github.com/{spec['source_project']}/tar.gz/{spec['revision']}"),
         ("sourceArchiveSha256", spec["archive_sha256"]),
         ("coreSha256", sha256(binary)),
+        ("goVersion", "go version go1.26.8 windows/amd64"),
+        ("requiredTests", spec["required_tests"]),
         ("testsPassed", True),
         ("dependencyManifestsUnchanged", True),
     ):
@@ -98,6 +115,30 @@ def prepare(component_id: str, build_root: Path, output: Path) -> dict:
     elif not re.match(r"^Xray 26\.7\.28 .*monitor-test\.1 ", provenance.get("version", "")):
         raise ValueError("Provenance version mismatch")
 
+    # Build parameters come from the digest-verified fixed source, not from arbitrary provenance.
+    with tarfile.open(fileobj=io.BytesIO(source), mode="r:gz") as archive:
+        prefix = ("sing-box-" if spec["extension"] == "sing-box" else "Xray-core-") + spec["revision"] + "/"
+        license_bytes = source_file(archive, prefix + "LICENSE")
+        if spec["extension"] == "sing-box":
+            tags = source_file(archive, prefix + "release/DEFAULT_BUILD_TAGS_WINDOWS").decode().strip() + ",with_v2ray_api"
+            flags = source_file(archive, prefix + "release/LDFLAGS").decode().strip()
+            flags += f" -s -w -X github.com/sagernet/sing-box/constant.Version={spec['version']}"
+            if provenance.get("tags") != tags:
+                raise ValueError("Provenance tags mismatch")
+            if not re.fullmatch(r"[a-fA-F0-9]{40}", str(provenance.get("monitorCommit", ""))):
+                raise ValueError("Missing or invalid Monitor build commit")
+        else:
+            flags = "-s -w -X github.com/xtls/xray-core/core.build=monitor-test.1"
+            if provenance.get("sourceIdentityMatchesInstalledCore") is not False:
+                raise ValueError("Xray source identity boundary missing")
+        if provenance.get("buildFlags") != flags:
+            raise ValueError("Provenance build flags mismatch")
+    # Local builds have both CI fields explicitly null; CI builds must identify both commit and run.
+    if "ciHeadCommit" not in provenance or "ciRunId" not in provenance:
+        raise ValueError("Missing build origin fields")
+    if (provenance["ciHeadCommit"] is None) != (provenance["ciRunId"] is None):
+        raise ValueError("Incomplete CI build identity")
+
     files = {spec["binary"]: binary, Path(spec["archive"]).name: source}
     if spec["extension"] == "sing-box":
         files["NOTICE.txt"] = read_file(extension / "LICENSE")
@@ -111,16 +152,7 @@ def prepare(component_id: str, build_root: Path, output: Path) -> dict:
             path = extension / name if name == "probe-stats.go" else build_root / "artifacts" / name
             files[name] = read_file(path)
             require_hash(files[name], provenance[key], name)
-    # Read just the license from the digest-verified source archive; never extract archive paths.
-    with tarfile.open(fileobj=io.BytesIO(source), mode="r:gz") as archive:
-        name = ("sing-box-" if spec["extension"] == "sing-box" else "Xray-core-") + spec["revision"] + "/LICENSE"
-        member = archive.getmember(name)
-        if not member.isfile() or not 0 < member.size <= 1024 * 1024:
-            raise ValueError("Invalid upstream license")
-        stream = archive.extractfile(member)
-        if stream is None:
-            raise ValueError("Missing upstream license")
-        files["LICENSE"] = stream.read()
+    files["LICENSE"] = license_bytes
     for name in ("README.md", "build-ci.ps1"):
         files[name] = read_file(extension / name)
     # Keep build facts, not arbitrary extra fields from a local provenance file.
