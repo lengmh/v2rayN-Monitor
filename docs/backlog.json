@@ -11,9 +11,9 @@
     "issue": 16,
     "status": "in_progress",
     "branch": "feat/issue16-batch-revoke-and-drilldown",
-    "scope": "#16/S6.4批次引用/撤销/原CSV归档与S3.3下钻；S5.9独立组件发布另批，实机启用/合并留下一轮",
-    "implementation_status": "partial",
-    "remaining": "#16/S3.3精确CI、独立审查及Draft PR回读；S5.9发布/真实下载另批；#15/#18真实受控窗口待确认；安装器原生实机及合并留下一轮",
+    "scope": "本轮1/2/3与#16/S6.4、S3.3源码验收完成；PR35/38保留Draft，实机启用/合并留下一轮",
+    "implementation_status": "verified",
+    "remaining": "本次状态提交精确CI；#15/#18真实受控窗口待确认；安装器第4/5项及新功能实际接入留下一轮",
     "resume_requirement": "核对最新HEAD与精确CI；原生最终确认绑定目标，退出Monitor并完整销毁目录mutex后再预检和二次确认单步迁移。新包未启用，真实安装/账本/配置/启动项未动。PR35保持Draft、PR33不合并"
   },
   "capability_levels": [
@@ -355,7 +355,7 @@
       "depends_on": [
         "S3.2"
       ],
-      "status": "in_progress",
+      "status": "done",
       "work": "统一页面实现时间切换、前后周期、自定义范围、节点和分组筛选。展示上传、下载、合计趋势及节点排行；可查看某一节点跨周期变化。将日期范围选择与分桶粒度分开，不仅提供四个快捷按钮。",
       "outputs": [
         "周期趋势页面",
@@ -363,7 +363,7 @@
       ],
       "acceptance": "各筛选组合与同口径查询结果一致；年视图点击月份、月视图点击日期可下钻；不把未覆盖时段的缺口算成零后作误导性比较。",
       "stop_rule": "先完成一套清楚可用的图表，不做主题市场、复杂仪表盘布局编辑器。",
-      "implementation_note": "2026-10-22确认原点击下钻尚缺。2026-10-23本批补齐本机/服务商/对照/探测的年图月桶到月、月图日桶到日，使用当前时区并保留来源/口径/过滤，零可点缺失不可点，键盘/过时图保护/纽约DST有回归。前端134/完整浏览器49通过，精确CI和独立审查待核，未启用运行包。"
+      "implementation_note": "2026-10-23补齐本机/服务商/对照/探测的年图月桶到月、月图日桶到日，使用当前时区并保留来源/口径/过滤，零可点缺失不可点，键盘/过时图保护/纽约DST有回归。前端134/完整浏览器49、9e5bcba精确Push39849460608/PR39849689733双平台及独立审查通过，源码验收done；Draft PR38未合并，运行包未启用。"
     },
     {
       "id": "S3.4",
@@ -625,7 +625,7 @@
         "S5.6"
       ],
       "status": "in_progress",
-      "work": "A1至D2完成对应隔离验证及审查；D3接入首次sidecar可信准备、短期计划/原生确认和只读运行核验。Core50/Server58/前端127/浏览器9及Host Release通过，精确CI/审查另核。独立组件候选补齐许可正文，发布/固定记录/真实下载为后续范围，尚待执行；实机及合并留下一轮。",
+      "work": "A1至D3及E隔离集成完成；1425c74精确主CI39847678237/扩展CI39847678301及独立审查通过。独立预发布v0.2.0-preview.2-components.1已发布两份固定核心组件，公开ZIP重下载/逐文件核对和生产C#真实HTTPS两项DownloadVerified通过。安装器实机启用与合并收口留下一轮，S5.9仍in_progress。",
       "outputs": [
         "固定兼容记录、独立组件资产与下载校验",
         "目标预检、备份安装与恢复",
@@ -698,7 +698,7 @@
       "depends_on": [
         "S6.3"
       ],
-      "status": "in_progress",
+      "status": "done",
       "work": "完整批次occurrence引用、撤销预览/token重验/事务保护、零增量及重导语义已实现；旧库仅显式原生确认及新备份后启用，旧批次不猜引用。原File本地归档默认关闭，由浏览器显式另存，成功关闭后才报告已保存。源码与隔离验证完成，真实库未升级。",
       "outputs": [
         "导入历史与批次撤销",
@@ -707,7 +707,10 @@
       ],
       "acceptance": "撤销前能确认影响范围；撤销某批次不误删其他批次共享记录或本机历史，失败不半撤销。原文件归档由用户选择且只保存在本地；不使用 CSV 时本机功能不受影响。三天导出限制不产生强制任务。",
       "stop_rule": "功能到此为止，除非有真实需求再增加服务商扩展。",
-      "implementation_note": "2026-10-23已按docs/proposals/provider-batch-references.md实施；fresh Rebuild后Provider Core67/Server68、前端134/完整浏览器49及Host Release通过，包含A100+B80重叠20新增后撤A留B100、旧库备份/逐值保留、token、回滚、取消和原File/BOM归档门槛。精确CI和独立审查待核；真实库升级及启用未执行，Draft PR独立于安装器PR35。"
+      "implementation_note": "2026-10-23按docs/proposals/provider-batch-references.md实施；fresh Rebuild后Provider Core67/Server68、前端134/完整浏览器49及Host Release通过，包含A100+B80重叠20新增后撤A留B100、旧库/token/回滚/取消和原File/BOM归档。9e5bcba精确Push39849460608/PR39849689733双平台及独立审查通过；另用历史备份隔离复制升级，采样批次行两原表逐值/DDL和新备份一致、原备份SHA不变。源码验收done，Draft PR38未合并，真实库升级及运行包启用未执行。",
+      "issue": 16,
+      "pull_request": 38,
+      "proposal": "docs/proposals/provider-batch-references.md"
     },
     {
       "id": "S7.1",
