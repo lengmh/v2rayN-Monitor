@@ -30,7 +30,8 @@ export interface HistoryResult {
   earliestRecord?: string | null;
 }
 export interface ImportPreview { hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime: string | null; lastTime: string | null; duplicate: boolean; warnings: string[]; newRowCount: number; skippedRowCount: number; newRawBytes: string; newBilledBytes: string }
-export interface ImportBatch { source: string; hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime?: string; lastTime?: string; importedAt?: string; timeZoneId?: string }
+export interface ImportBatch { source: string; hash: string; rowCount: number; rawBytes: string; billedBytes: string; firstTime?: string; lastTime?: string; importedAt?: string; timeZoneId?: string; referencesComplete?: boolean; fileRowCount?: number | null; fileRawBytes?: string | null; fileBilledBytes?: string | null }
+export interface ProviderRevokePreview { source: string; hash: string; token: string; canRevoke: boolean; reason: string | null; rowCount: number | null; deletedRowCount: number | null; retainedRowCount: number | null; deletedRawBytes: string | null; deletedBilledBytes: string | null; retainedRawBytes: string | null; retainedBilledBytes: string | null }
 export interface ProviderHistory {
   source: string; rawBytes: string; billedBytes: string; recordCount: number;
   series: { label: string; rawBytes: string; billedBytes: string }[];

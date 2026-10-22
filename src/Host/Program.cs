@@ -158,7 +158,13 @@ internal sealed class TrayContext : ApplicationContext
             useScopeLedger: scopeMode, useProbeLedger: probeMode,
             inspectCoreCapabilities: demo ? null : CoreCapabilityInspector.InspectWindowsAsync,
             coreAction: actions is null ? null : actions.ExecuteAsync,
-            invalidateCoreActions: actions is null ? null : actions.Invalidate).GetAwaiter().GetResult();
+            invalidateCoreActions: actions is null ? null : actions.Invalidate,
+            confirmProviderTracking: demo ? null : (prompt, token) => NativeCoreConfirmation.ShowAsync(confirmationDispatcher,
+                new("确认启用服务商 CSV 批次引用",
+                    $"服务商账本：{prompt.DatabasePath}\n本次新备份：{prompt.BackupPath}\n\n" +
+                    "本次只为服务商账本启用批次引用；旧表及旧记录逐值保留，不推断旧批次引用，旧批次仍不能撤销。\n" +
+                    "升级期间服务商导入和撤销暂停；本机采集继续。不修改本机流量历史、代理核心、配置或启动项。\n" +
+                    "确认后仅执行这一次备份升级，不自动恢复旧备份。"), token)).GetAwaiter().GetResult();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开统计页面", null, (_, _) => Open());
         menu.Items.Add("选择 v2rayN 数据目录…", null, (_, _) => ChooseDirectory());
