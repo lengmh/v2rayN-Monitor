@@ -11,10 +11,10 @@
     "issue": 18,
     "status": "in_progress",
     "branch": "feat/issue18-strategy-live-rates",
-    "scope": "#18/S5.6受控轮换只读准备完成；当前无RoutingService，真实组内轮换/旧长连接仍待窗口；原0993a4b及采集/速率/文案验收复用",
+    "scope": "PR30最小UI/诊断补充及独立审查完成；#18保留历史同步共同基线且源码不变，原0993a4b验收复用",
     "implementation_status": "complete",
-    "remaining": "5d6102f的精确Push CI39707570848双平台通过，固定0993a4b及原采集/速率/文案/历史入口验收复用。2026-10-22新现场为固定proxy加两组leastLoad，原生只读connected，actual_member与legacy_proxy计数完整；不是此前成员选中组窗口。实际CLI有api bi/bo，但无api/RoutingService；固定客户端95f68d9源码确认普通GUI改选会停启核心，不能替代同代次旧TCP跨组内轮换。标准客户端配置生成方式增加控制服务尚未隔离验证，真实测试NOT_RUN；本轮未打开真实Monitor账本、修改配置或发送控制RPC。最短条件验收和恢复原override要求见docs/proposals/controlled-switch-acceptance.md。S5.6仍in_progress，组内轮换/旧长连接/核心生命周期分别待窗口。公开PR30仍Draft且未纳入当前分支后续已验收改动，下一建议先准备整合差异及精确CI，远端更新/合并另按授权；PR35最后，PR33不合并",
-    "resume_requirement": "先核实当前HEAD和本批文档提交精确CI；不自动启用该提交产物。固定0993a4bf13609d854f199cec75d8193ce095d5f0及原probe-ledger/v3接入已经验收，不重复退出、部署或页面确认；原采集/速率/文案/历史入口复用。运行目录与备份仍按v2rayn-monitor-history-bases-20261022/activation-0993a4b记录保护，同批package-0993a4b/candidate-package不得作垃圾清理。本批只读证据在v2rayn-monitor-controlled-switch-readiness-20261022，以native-confirmation-safe.json规范化API字段为准；下一次真实操作重核版本/PID/配置，不沿用29或成员的旧窗口。受控流程先隔离验证标准配置生成方式，再取得配置/必要重载/指定组及测试流量/恢复的具体窗口；不直接改生成文件，不转未支持的整份配置来源，不为补矩阵中断代理，原override须精确恢复。缺失不补零，不恢复旧数据库丢新历史。下一建议先准备当前已验收分支与PR30整合差异，核实准确head/base及CI，远端分支更新与合并按具体授权；PR35最后，PR33不合并"
+    "remaining": "PR30头04450f7，精确Push39720164225与PR39720167953四个平台任务通过；独立Standards/Spec根据原始需求和代码复核后未发现阻断代码问题。已批准的灰底缺失占位与底层null不变，PR说明精确为锁等待/SQL行间/聚合协作取消，未实现原生step抢占。策略组分支从20b5b63合入PR30共同基线，只改变STATUS/计划/backlog三个文档，文档/合并身份通过，精确合并CI推送后另核。原0993a4b的采集/速率/文案/历史入口验收复用，不部署或要求退出Monitor。S5.6仍in_progress，组内轮换/旧长连接NOT_RUN、核心生命周期另留窗口；本轮不启用控制服务或操作实机。",
+    "resume_requirement": "先核实两个分支HEAD、本批合并精确CI及PR30仍Draft；PR30固定04450f7和两组精确CI已通过，独立双轴报告/证据在TempFiles/v2rayn-monitor-pr30-integration-20261022，原首报发现经明确需求和取消承诺复核撤回，不据此改动已验收UI或增加原生中断。策略组分支保留20b5b63原历史合入PR30共同基线；除三个文档外文件保持，不自动启用新CI包。不自动创建/合并/发布其他PR，下一步核对策略组独立Draft PR的具体范围；PR35最后，PR33不合并。固定0993a4b及原probe-ledger/v3数据不动，S5.6受控轮换/旧长连接/生命周期继续另留窗口。"
   },
   "capability_levels": [
     {
