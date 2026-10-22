@@ -22,6 +22,9 @@ public sealed class MonitorServer : IAsyncDisposable
     private readonly string dataDir;
     private readonly bool demo;
     private readonly object settingsGate = new();
+    private readonly SemaphoreSlim capabilityGate = new(1, 1);
+    private readonly Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities;
+    private long settingsRevision;
     private AppSettings settings;
     private CollectorStatus status;
     private readonly ConcurrentDictionary<string, DateTimeOffset> launches = new();
@@ -39,8 +42,10 @@ public sealed class MonitorServer : IAsyncDisposable
         : new(false, "disabled", "此实例未启用探测历史。接入需配套核心和显式 v3 账本；当前业务采集不受影响。");
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    private MonitorServer(string directory, bool demoMode, bool useScopeLedger, bool useProbeLedger)
+    private MonitorServer(string directory, bool demoMode, bool useScopeLedger, bool useProbeLedger,
+        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities)
     {
+        this.inspectCoreCapabilities = inspectCoreCapabilities;
         dataDir = directory; demo = demoMode; Directory.CreateDirectory(directory);
         var zone = TimeZoneInfo.Local.Id;
         if (TimeZoneInfo.TryConvertWindowsIdToIanaId(zone, out var iana)) zone = iana;
@@ -68,13 +73,15 @@ public sealed class MonitorServer : IAsyncDisposable
         if (demo) { Ledger.SeedDemo(DateTimeOffset.UtcNow); status = new("demo", "合成演示数据，不连接真实代理。", Demo: true); }
     }
     public static Task<MonitorServer> StartAsync(string directory, string webRoot, bool demo = false, CancellationToken ct = default,
-        bool useScopeLedger = false, bool useProbeLedger = false)
+        bool useScopeLedger = false, bool useProbeLedger = false,
+        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities = null)
         // The WinForms tray joins this task synchronously; nested framework awaits must not
         // inherit its UI synchronization context (the same applies to Kestrel shutdown).
-        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger), ct);
-    private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger, bool useProbeLedger)
+        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger, inspectCoreCapabilities), ct);
+    private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger, bool useProbeLedger,
+        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities)
     {
-        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger);
+        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger, inspectCoreCapabilities);
         try { await server.StartWebAsync(webRoot, ct).ConfigureAwait(false); return server; }
         catch { await server.DisposeAsync().ConfigureAwait(false); throw; }
     }
@@ -96,6 +103,7 @@ public sealed class MonitorServer : IAsyncDisposable
             var next = value with { Demo = demo, V2rayNPath = value.V2rayNPath.Trim() };
             var target = Path.Combine(dataDir, "settings.json"); var temp = target + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(next, Json)); File.Move(temp, target, true); settings = next;
+            settingsRevision++;
         }
     }
     private async Task StartWebAsync(string webRoot, CancellationToken ct)
@@ -157,6 +165,7 @@ public sealed class MonitorServer : IAsyncDisposable
         });
         app.MapGet("/api/settings", () => Settings);
         app.MapPost("/api/settings", (AppSettings value) => { UpdateSettings(value); return Results.Ok(Settings); });
+        app.MapGet("/api/core-capabilities", (Func<HttpContext, Task<IResult>>)InspectCoreCapabilitiesAsync);
         app.MapGet("/api/timezones", () => TimeZoneInfo.GetSystemTimeZones().Select(z => new { id = TimeZoneInfo.TryConvertWindowsIdToIanaId(z.Id, out var iana) ? iana : z.Id, name = z.DisplayName }).DistinctBy(z => z.id));
         app.MapGet("/api/nodes", (HttpRequest request) =>
         {
@@ -277,6 +286,35 @@ public sealed class MonitorServer : IAsyncDisposable
             DisplayMetadataEnabled = result.DisplayMetadataEnabled
         };
     }
+    private async Task<IResult> InspectCoreCapabilitiesAsync(HttpContext context)
+    {
+        if (context.Request.Query.Count != 0) return Results.BadRequest(new { error = "此检查不接受路径或组件参数。" });
+        if (!await capabilityGate.WaitAsync(0, context.RequestAborted))
+            return Results.Conflict(new { error = "配套核心检查正在进行，请稍后重试。" });
+        try
+        {
+            string selected;
+            long revision;
+            lock (settingsGate) { selected = settings.V2rayNPath; revision = settingsRevision; }
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, Stopping);
+            deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            var inspection = demo ? new CoreCapabilityInspection("demo", []) :
+                string.IsNullOrWhiteSpace(selected) ? new("not_selected", []) :
+                inspectCoreCapabilities is null ? new("unavailable", []) :
+                await inspectCoreCapabilities(selected, deadline.Token).ConfigureAwait(false);
+            lock (settingsGate)
+                if (revision != settingsRevision) return Results.Conflict(new { error = "设置已变化，请重新检查配套核心。" });
+            var current = Volatile.Read(ref status);
+            var version = Scopes is null ? 1 : Scopes.SupportsProbes ? 3 : 2;
+            return Results.Ok(new CoreCapabilitiesResponse(inspection.TargetState, version,
+                version == 3 ? "--probe-ledger" : version == 2 ? "--scope-ledger" : "",
+                current.State, current.LastSample, current.CollectionBasis, current.Probes?.State ?? "disabled", inspection.Components));
+        }
+        catch (OperationCanceledException) when (!context.RequestAborted.IsCancellationRequested)
+        { return Results.Json(new { error = "配套核心检查超时或采集器正在退出，请稍后重试。" }, statusCode: 503); }
+        finally { capabilityGate.Release(); }
+    }
+
     private QuerySpec ParseQuery(HttpRequest request)
     {
         var q = request.Query;
