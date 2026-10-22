@@ -2398,6 +2398,184 @@ public sealed class ActiveConfigurationTests : IDisposable
         AssertExistingComponentUnchanged(existing);
     }
 
+    private sealed record SidecarFixture(InstallFixture Files, XraySnapshot Baseline, SidecarPlan Plan,
+        string Target, string Candidate, byte[] Previous, IPEndPoint Endpoint)
+    {
+        internal CoreComponentInstaller Installer() => CoreComponentInstaller.ForSidecar(Files.Component,
+            () => Files.Observation, Baseline, Plan, point => Files.Fault?.Invoke(point));
+    }
+
+    private SidecarFixture SidecarInstallation(bool existing = true, bool appData = false)
+    {
+        var files = Installation(appData: appData);
+        File.WriteAllBytes(files.Target, SyntheticCoreBytes);
+        Directory.CreateDirectory(Path.Combine(files.DataRoot, "binConfigs"));
+        Directory.CreateDirectory(Path.Combine(files.DataRoot, "guiConfigs"));
+        File.WriteAllText(Path.Combine(files.DataRoot, "binConfigs", "config.json"), AnyTlsConfiguration);
+        File.WriteAllText(Path.Combine(files.DataRoot, "guiConfigs", "guiNConfig.json"), Gui);
+        CreateProfiles(AnyTlsProfile());
+        File.Copy(Profiles, Path.Combine(files.DataRoot, "guiConfigs", "guiNDB.db"));
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        listener.Stop();
+        var previous = JsonSerializer.SerializeToUtf8Bytes(new { listen = endpoint.ToString() });
+        var target = Path.Combine(Path.GetDirectoryName(files.Target)!, "monitor-stats.json");
+        if (existing) File.WriteAllBytes(target, previous);
+        else File.Delete(target); // Only this test's synthetic fixture.
+        var baseline = MemberSnapshot(AnyTlsConfiguration) with
+        { InstanceId = XrayParser.Hash(Path.GetFullPath(files.DataRoot).ToUpperInvariant()) };
+        var prepared = CoreCapabilityPreparation.PrepareSidecar(baseline, Bytes(AnyTlsConfiguration),
+            existing ? previous : (ReadOnlyMemory<byte>?)null, endpoint.ToString());
+        var plan = Assert.IsType<SidecarPlan>(prepared.Plan);
+        var candidate = Path.Combine(files.Root, "sidecar-candidate.json");
+        File.WriteAllText(candidate, plan.Json);
+        return new(files, baseline, plan, target, candidate, previous, endpoint);
+    }
+
+    private static async Task<CoreInstallPlan> SidecarReady(SidecarFixture fixture, CoreComponentInstaller service)
+    {
+        var prepared = await service.PrepareAsync(fixture.Candidate, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Ready, prepared.State);
+        return Assert.IsType<CoreInstallPlan>(prepared.Plan);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task SidecarInstallBacksUpAndRestoresOnlyTheFixedSidecar(bool existing, bool appData)
+    {
+        var f = SidecarInstallation(existing, appData);
+        var preserved = Directory.GetFiles(f.Files.Root, "*", SearchOption.AllDirectories)
+            .Where(path => path != f.Target).ToDictionary(path => path, File.ReadAllBytes);
+        var service = f.Installer();
+        var result = await service.InstallAsync(await SidecarReady(f, service), CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, result.State);
+        Assert.Equal(f.Plan.Json, File.ReadAllText(f.Target));
+        var id = Assert.IsType<Guid>(result.OperationId);
+        if (existing) Assert.Equal(f.Previous, File.ReadAllBytes(Path.Combine(f.Files.Backup(id), "previous.json")));
+        using (var listener = new System.Net.Sockets.TcpListener(f.Endpoint))
+        { listener.Start(); listener.Stop(); } // Reservation is released; no core was started.
+        f.Files.Observation = f.Files.Observation with
+        { Processes = [f.Files.Observation.Processes[0] with { Pid = 303, StartedAt = Start.AddMinutes(1) }] };
+        Assert.Equal(CoreInstallState.Restored, (await f.Installer().RestoreAsync(id, CancellationToken.None)).State);
+        Assert.Equal(existing, File.Exists(f.Target));
+        if (existing) Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+        else Assert.Single(Directory.GetFiles(f.Files.Backup(id), "removed-*.json"));
+        Assert.Equal(CoreInstallState.AlreadyRestored, (await f.Installer().RestoreAsync(id, CancellationToken.None)).State);
+        foreach (var (path, bytes) in preserved) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    [Theory]
+    [InlineData("core", nameof(CoreInstallState.InvalidCandidate))]
+    [InlineData("config", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("selection", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("profile", nameof(CoreInstallState.InvalidConfiguration))]
+    [InlineData("sidecar", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("unknown-field", nameof(CoreInstallState.InvalidConfiguration))]
+    [InlineData("running", nameof(CoreInstallState.CoreRunning))]
+    public async Task SidecarInstallRevalidatesOfflineInputsBeforeWriting(string mutation, string expected)
+    {
+        var f = SidecarInstallation();
+        var service = f.Installer();
+        var plan = await SidecarReady(f, service);
+        switch (mutation)
+        {
+            case "core": File.AppendAllText(f.Files.Target, "changed"); break;
+            case "config": File.AppendAllText(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), " "); break;
+            case "selection": File.WriteAllText(Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNConfig.json"), Gui.Replace("\"A\"", "\"B\"")); break;
+            case "profile":
+                using (var db = new SqliteConnection($"Data Source={Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNDB.db")};Pooling=False"))
+                {
+                    db.Open(); using var command = db.CreateCommand();
+                    command.CommandText = "UPDATE ProfileItem SET Password='changed'"; command.ExecuteNonQuery();
+                }
+                break;
+            case "sidecar": File.AppendAllText(f.Target, " "); break;
+            case "unknown-field": File.WriteAllText(f.Target, "{\"listen\":\"127.0.0.1:1\",\"future\":true}"); break;
+            case "running": f.Files.Running(); break;
+        }
+        var before = File.ReadAllBytes(f.Target);
+        Assert.Equal(Enum.Parse<CoreInstallState>(expected), (await service.InstallAsync(plan, CancellationToken.None)).State);
+        Assert.Equal(before, File.ReadAllBytes(f.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SidecarInstallReservesPortAgainAtCommit(bool occupyAfterPreparation)
+    {
+        var f = SidecarInstallation();
+        var service = f.Installer();
+        using var listener = new System.Net.Sockets.TcpListener(f.Endpoint);
+        if (!occupyAfterPreparation)
+        {
+            listener.Start();
+            Assert.Equal(CoreInstallState.PortUnavailable, (await service.PrepareAsync(f.Candidate, CancellationToken.None)).State);
+        }
+        else
+        {
+            var plan = await SidecarReady(f, service);
+            f.Files.Fault = point => { if (point == CoreInstallCheckpoint.BeforeReplace) listener.Start(); };
+            Assert.Equal(CoreInstallState.PortUnavailable, (await service.InstallAsync(plan, CancellationToken.None)).State);
+        }
+        Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SidecarInstallFailureRestoresAndDoesNotOverwriteLaterChanges(bool laterChange)
+    {
+        var f = SidecarInstallation();
+        var service = f.Installer();
+        var plan = await SidecarReady(f, service);
+        f.Files.Fault = point =>
+        {
+            if (point != CoreInstallCheckpoint.AfterReplace) return;
+            if (laterChange) File.WriteAllText(f.Target, "a later edit");
+            throw new IOException("Synthetic post-replace failure");
+        };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(laterChange ? CoreInstallState.RecoveryRequired : CoreInstallState.FailedRestored, result.State);
+        if (laterChange) Assert.Equal("a later edit", File.ReadAllText(f.Target));
+        else Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallRestoreRejectsSameBytesFromANewerFile(bool sidecar)
+    {
+        if (!OperatingSystem.IsWindows()) return; // Physical Windows file identity is the production boundary.
+        CoreComponentInstaller service;
+        CoreInstallPlan plan;
+        string target;
+        if (sidecar)
+        {
+            var f = SidecarInstallation();
+            service = f.Installer();
+            plan = await SidecarReady(f, service);
+            target = f.Target;
+        }
+        else
+        {
+            var f = Installation();
+            service = f.Installer();
+            plan = await Ready(service, f);
+            target = f.Target;
+        }
+        var installed = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var bytes = File.ReadAllBytes(target);
+        var replacement = target + ".synthetic-newer";
+        File.WriteAllBytes(replacement, bytes);
+        File.Move(replacement, target, overwrite: true);
+        Assert.Equal(CoreInstallState.PlanChanged,
+            (await service.RestoreAsync(installed.OperationId!.Value, CancellationToken.None)).State);
+        Assert.Equal(bytes, File.ReadAllBytes(target));
+    }
+
     private sealed class InstallFixture
     {
         internal readonly string Root, ClientPath, DataRoot, Candidate, Target;

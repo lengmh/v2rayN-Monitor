@@ -31,7 +31,7 @@ internal static class Program
             return;
         }
         // One writer per data directory, including launches with alternate command-line spellings.
-        var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
+        var identity = OfflineLedgerUpgrade.DirectoryIdentity(root);
         using var mutex = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created);
         // Every participant keeps both handles alive. Readiness cannot outlive this owner
         // and be mistaken for a later owner of the same data directory.

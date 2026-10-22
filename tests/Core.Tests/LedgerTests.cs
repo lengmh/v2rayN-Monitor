@@ -1851,6 +1851,256 @@ public sealed class LedgerTests : IDisposable
         Assert.True(result.SupportsDisplayMetadata);
         Assert.Equal("10", result.Query(ScopeAll(version == 1 ? "legacy_proxy" : "actual_member")).Upload);
     }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void CapabilityLedgerUpgradeRunsOnlyOneAuthorizedStepWithFreshBackupAndPreservesAdjacentData(int version)
+    {
+        CreateDisplayMigrationFixture(version);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var provider = Path.Combine(directory, "provider.db");
+        using (var imports = new ProviderImports(provider))
+            imports.Commit(new("Synthetic provider", "UTC",
+                "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic node,0.125,9007199254740993,1125899906842624.125,synthetic,2024-02-28 23:59:00\n"));
+        var settings = Path.Combine(directory, "settings.json");
+        File.WriteAllText(settings, "{\"synthetic\":true,\"theme\":\"dark\"}");
+        var providerBefore = File.ReadAllBytes(provider);
+        var settingsBefore = File.ReadAllBytes(settings);
+        var original = HistorySnapshot(path);
+        var display = DisplaySnapshot(path);
+        var step = version == 1 ? V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope : V2rayNMonitor.Host.LedgerUpgradeStep.Probes;
+        var prepared = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, step);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.Prepared, prepared.State);
+        Assert.NotNull(prepared.Plan);
+        var denied = V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(prepared.Plan, authorized: false);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.AuthorizationRequired, denied.State);
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+        Assert.Equal(original, HistorySnapshot(path));
+        var upgraded = V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(prepared.Plan, authorized: true);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.Upgraded, upgraded.State);
+        Assert.Equal(version + 1, upgraded.ObservedVersion);
+        Assert.Equal(original, HistorySnapshot(upgraded.BackupPath!));
+        Assert.Equal(display, DisplaySnapshot(path, mapLegacyKeys: version == 1));
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.PlanChanged,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(prepared.Plan, authorized: true).State);
+        if (version == 1)
+        {
+            // A v1 plan never silently runs its second step or reuses the first backup.
+            using (var ledger = new ScopeLedger(path)) Assert.False(ledger.SupportsProbes);
+            var next = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, V2rayNMonitor.Host.LedgerUpgradeStep.Probes);
+            var beforeProbes = HistorySnapshot(path);
+            var probes = V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(next.Plan!, authorized: true);
+            Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.Upgraded, probes.State);
+            Assert.NotEqual(upgraded.BackupPath, probes.BackupPath);
+            Assert.Equal(beforeProbes, HistorySnapshot(probes.BackupPath!));
+            Assert.Equal(original, HistorySnapshot(upgraded.BackupPath!));
+        }
+        Assert.Equal(providerBefore, File.ReadAllBytes(provider));
+        Assert.Equal(settingsBefore, File.ReadAllBytes(settings));
+        using var result = new ScopeLedger(path);
+        Assert.True(result.SupportsProbes);
+        Assert.True(result.SupportsDisplayMetadata);
+        Assert.Equal("10", result.Query(ScopeAll(version == 1 ? "legacy_proxy" : "actual_member")).Upload);
+    }
+
+    [Theory]
+    [InlineData(1, "PRAGMA user_version=2;")]
+    [InlineData(2, "DROP INDEX scope_gap_open;")]
+    [InlineData(1, "CREATE TABLE unexpected(synthetic TEXT);")]
+    public void CapabilityLedgerUpgradeChecksRealSchemaBeforeCreatingBackup(int version, string mutation)
+    {
+        CreateDisplayMigrationFixture(version);
+        RunSql(mutation);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var original = HistorySnapshot(path);
+        // Preparation is only a bound-input proposal; schema acceptance belongs to execution.
+        var step = version == 2 || mutation.Contains("user_version", StringComparison.Ordinal)
+            ? V2rayNMonitor.Host.LedgerUpgradeStep.Probes : V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope;
+        var prepared = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, step);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.Prepared, prepared.State);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.UnsupportedLedger,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(prepared.Plan!, authorized: true).State);
+        Assert.Equal(original, HistorySnapshot(path));
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Fact]
+    public void CapabilityLedgerUpgradeRejectsMissingHistoryWrongStepAndV3WithoutCreatingOrDowngrading()
+    {
+        var missing = Path.Combine(directory, "does-not-exist");
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.InvalidTarget,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(missing, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope).State);
+        Assert.False(Directory.Exists(missing));
+        Directory.CreateDirectory(directory);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.InvalidTarget,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope).State);
+        Assert.Empty(Directory.GetFiles(directory));
+        using (ScopeLedger.CreateNew(Path.Combine(directory, "history.db"), includeProbes: true)) { }
+        var before = HistorySnapshot(Path.Combine(directory, "history.db"));
+        foreach (var step in Enum.GetValues<V2rayNMonitor.Host.LedgerUpgradeStep>())
+            Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.UnsupportedLedger,
+                V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, step).State);
+        Assert.Equal(before, HistorySnapshot(Path.Combine(directory, "history.db")));
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Fact]
+    public void CapabilityLedgerUpgradeUsesTheExactMonitorDirectoryMutexWithoutRecursiveAcquisition()
+    {
+        CreateDisplayMigrationFixture(1);
+        File.Move(Database, Path.Combine(directory, "history.db"));
+        var plan = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope).Plan!;
+        var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
+        Assert.Equal(@"Local\V2rayNMonitor-" + identity, V2rayNMonitor.Host.OfflineLedgerUpgrade.DirectoryMutexName(directory));
+        using (var monitor = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created))
+        {
+            Assert.True(created);
+            try
+            {
+                // Same-thread ownership must not be accepted through the recursive mutex API.
+                Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.WriterActive,
+                    V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, plan.Step).State);
+                Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.WriterActive,
+                    V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(plan, authorized: true).State);
+            }
+            finally { monitor.ReleaseMutex(); }
+        }
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.Upgraded,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(plan, authorized: true).State);
+    }
+
+    [Fact]
+    public void CapabilityLedgerUpgradeRejectsSqliteWriterAndPreservesItsUncommittedTransaction()
+    {
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var plan = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope).Plan!;
+        using (var writer = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            writer.Open();
+            using var command = writer.CreateCommand();
+            command.CommandText = "BEGIN IMMEDIATE;";
+            command.ExecuteNonQuery();
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.WriterActive,
+                V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(plan, authorized: true).State);
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(10), "A busy writer must not cause unbounded waiting.");
+            command.CommandText = "SELECT COUNT(*) FROM nodes;";
+            Assert.Equal(1L, command.ExecuteScalar());
+            command.CommandText = "ROLLBACK;";
+            command.ExecuteNonQuery();
+        }
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void CapabilityLedgerUpgradeKeepsSqliteOwnershipThroughBackupAndMigration(int version)
+    {
+        CreateDisplayMigrationFixture(version);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var before = HistorySnapshot(path);
+        var step = version == 1 ? V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope : V2rayNMonitor.Host.LedgerUpgradeStep.Probes;
+        var plan = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, step).Plan!;
+        var attempted = false;
+        var result = V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(plan, authorized: true, ownershipAcquired: () =>
+        {
+            attempted = true;
+            using var other = new SqliteConnection($"Data Source={path};Pooling=False;Default Timeout=1");
+            other.Open();
+            using var write = other.CreateCommand();
+            write.CommandText = "UPDATE nodes SET name='unconfirmed newer data';";
+            var error = Assert.Throws<SqliteException>(() => write.ExecuteNonQuery());
+            Assert.Contains(error.SqliteErrorCode, new[] { 5, 6 });
+        });
+        Assert.True(attempted);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.Upgraded, result.State);
+        Assert.Equal(before, HistorySnapshot(result.BackupPath!));
+    }
+
+    [Fact]
+    public void CapabilityLedgerUpgradeRejectsStaleCommittedWalAndDoesNotRestoreAnOlderHistory()
+    {
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        using var writer = new SqliteConnection($"Data Source={path};Pooling=False");
+        writer.Open();
+        using var command = writer.CreateCommand();
+        command.CommandText = "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;";
+        command.ExecuteNonQuery();
+        var plan = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope).Plan!;
+        command.CommandText = "UPDATE nodes SET name='Synthetic new history';";
+        command.ExecuteNonQuery();
+        var changed = HistorySnapshot(path);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.PlanChanged,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(plan, authorized: true).State);
+        Assert.Equal(changed, HistorySnapshot(path));
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Fact]
+    public void CapabilityLedgerUpgradeRejectsLockedFileAndDirectoryLink()
+    {
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var plan = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope).Plan!;
+        using (var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.InvalidTarget,
+                V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(plan, authorized: true).State);
+        if (!OperatingSystem.IsWindows())
+        {
+            // Windows directory links require privileges; its existing installer tests cover junctions.
+            var alias = Path.Combine(directory, "synthetic-link");
+            Directory.CreateSymbolicLink(alias, directory);
+            Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.InvalidTarget,
+                V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(alias, plan.Step).State);
+        }
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Fact]
+    public void CapabilityLedgerUpgradeRejectsWindowsHardLinkAliasesForHistoryAndWal()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var plan = V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope).Plan!;
+        var alias = Path.Combine(directory, "history-alias.db");
+        Assert.True(CreateLedgerHardLink(alias, path, IntPtr.Zero));
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.InvalidTarget,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(directory, plan.Step).State);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.InvalidTarget,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Execute(plan, authorized: true).State);
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+
+        var walDirectory = Path.Combine(directory, "wal-alias");
+        Directory.CreateDirectory(walDirectory);
+        var otherHistory = Path.Combine(walDirectory, "history.db");
+        using (new Ledger(otherHistory)) { }
+        var untrusted = Path.Combine(directory, "synthetic-external-wal");
+        File.WriteAllText(untrusted, "Synthetic untrusted file");
+        Assert.True(CreateLedgerHardLink(otherHistory + "-wal", untrusted, IntPtr.Zero));
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.InvalidTarget,
+            V2rayNMonitor.Host.OfflineLedgerUpgrade.Prepare(walDirectory, plan.Step).State);
+        Assert.Equal("Synthetic untrusted file", File.ReadAllText(untrusted));
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW",
+        CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CreateLedgerHardLink(string link, string existing, IntPtr security);
+
     private void CreateDisplayMigrationFixture(int version)
     {
         if (version == 1)
