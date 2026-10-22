@@ -109,7 +109,7 @@ internal static class CoreCapabilityInspector
         new(state, components.Select(x => Row(x, "not_checked")).ToArray());
     private static CoreComponentFileStatus Row(CoreComponent component, string state) =>
         new(component.Id, component.Id == "sing-box-statistics" ? "sing-box 统计支持" : "Xray 探测扩展",
-            component.Version, state, "asset_unavailable", component.License);
+            component.Version, state, CoreComponentDownloads.PublishedAsset(component.Id) is null ? "asset_unavailable" : "available", component.License);
     private static bool Expected(Exception error) => error is CoreComponentInstaller.Rejected or IOException or
         UnauthorizedAccessException or ArgumentException or NotSupportedException or
         System.Management.ManagementException or System.ComponentModel.Win32Exception;
