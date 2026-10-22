@@ -812,6 +812,105 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal("missing_counter", result.Members.UnavailableMembers["missing"]);
     }
 
+    private static string PreparationConfiguration => MemberConfiguration.Replace("\"password\":", "\"server_port\":443,\"password\":", StringComparison.Ordinal);
+
+    [Fact]
+    public void CapabilityPreparationUsesOnlyIndependentMembersAndDoesNotExposeCredentials()
+    {
+        var config = PreparationConfiguration;
+        var result = CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(config), Bytes(config), null, "127.0.0.1:10814");
+        Assert.Equal(SidecarPreparationState.Prepared, result.State);
+        Assert.True(SingboxParser.TryReadMemberStatisticsSettings(Bytes(result.Plan!.Json), out _, out var members));
+        Assert.Equal(new[] { "other", "proxy" }, members);
+        Assert.DoesNotContain("Synthetic-Credential", JsonSerializer.Serialize(result));
+        Assert.DoesNotContain("node.synthetic.invalid", JsonSerializer.Serialize(result));
+        Assert.True(CoreCapabilityPreparation.IsCurrent(result.Plan, MemberSnapshot(config), Bytes(config), null));
+    }
+
+    [Theory]
+    [InlineData("0.0.0.0:10814")]
+    [InlineData("localhost:10814")]
+    [InlineData("127.0.0.1:0")]
+    [InlineData("127.0.0.1:10814/path")]
+    public void CapabilityPreparationRejectsNonNumericOrNonLoopbackEndpoint(string listen)
+    {
+        var config = PreparationConfiguration;
+        var result = CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(config), Bytes(config), null, listen);
+        Assert.Equal(SidecarPreparationState.InvalidEndpoint, result.State);
+        Assert.Null(result.Plan);
+    }
+
+    [Theory]
+    [InlineData("{\"listen\":\"127.0.0.1:10814\",\"future\":{\"keep\":true}}")]
+    [InlineData("{\"listen\":\"127.0.0.1:10814\",\"listen\":\"127.0.0.1:10815\"}")]
+    [InlineData("")]
+    [InlineData("[]")]
+    public void CapabilityPreparationPreservesUnsupportedExistingBytes(string text)
+    {
+        var previous = Bytes(text);
+        var config = PreparationConfiguration;
+        var result = CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(config), Bytes(config), previous, "127.0.0.1:10814");
+        Assert.Equal(SidecarPreparationState.UnsupportedExistingSidecar, result.State);
+        Assert.Null(result.Plan);
+        Assert.Equal(Bytes(text), previous);
+    }
+
+    [Fact]
+    public void CapabilityPreparationDistinguishesConfirmationFromSemanticNoOp()
+    {
+        var config = PreparationConfiguration;
+        var snapshot = MemberSnapshot(config);
+        var old = Bytes("{\"listen\":\"127.0.0.1:10814\"}");
+        var change = CoreCapabilityPreparation.PrepareSidecar(snapshot, Bytes(config), old, "127.0.0.1:10814");
+        Assert.Equal(SidecarPreparationState.ConfirmationRequired, change.State);
+        var same = Bytes("{\"monitor_members\":[\"proxy\",\"other\"], \"listen\":\"127.0.0.1:10814\"}");
+        Assert.Equal(SidecarPreparationState.AlreadyMatched,
+            CoreCapabilityPreparation.PrepareSidecar(snapshot, Bytes(config), same, "127.0.0.1:10814").State);
+        Assert.Equal(SidecarPreparationState.ConfirmationRequired,
+            CoreCapabilityPreparation.PrepareSidecar(snapshot, Bytes(config), same, "[::1]:10814").State);
+        Assert.True(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config), old));
+        Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config), null));
+        Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config), same));
+        Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config + " "), old));
+        foreach (var altered in new[] { snapshot with { InstanceId = "other" }, snapshot with { NodeId = "B" },
+            snapshot with { ProcessIdentity = "restarted" }, snapshot with { Generation = "changed" }, snapshot with { CoreName = "Xray" } })
+            Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, altered, Bytes(config), old));
+    }
+
+    [Fact]
+    public void CapabilityPreparationRequiresVerifiedAnyTlsAnchorAndMatchingGeneration()
+    {
+        var config = PreparationConfiguration;
+        var snapshot = MemberSnapshot(config);
+        foreach (var altered in new[] { snapshot with { NodeId = "" }, snapshot with { ProcessIdentity = "" },
+            snapshot with { Generation = "changed" }, snapshot with { CoreName = "Xray" } })
+            Assert.Equal(SidecarPreparationState.InvalidConfiguration,
+                CoreCapabilityPreparation.PrepareSidecar(altered, Bytes(config), null, "127.0.0.1:10814").State);
+        Assert.Equal(SidecarPreparationState.InvalidConfiguration,
+            CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(), Bytes(MemberConfiguration), null, "127.0.0.1:10814").State);
+    }
+
+    [Theory]
+    [InlineData(1, false, "--scope-ledger", 1)]
+    [InlineData(1, true, "--probe-ledger", 2)]
+    [InlineData(2, false, "--scope-ledger", 0)]
+    [InlineData(2, true, "--probe-ledger", 1)]
+    [InlineData(3, false, "--probe-ledger", 0)]
+    [InlineData(3, true, "--probe-ledger", 0)]
+    public void CapabilityPreparationKeepsV3AndOrdersExplicitUpgradeSteps(int version, bool probes, string flag, int count)
+    {
+        var result = CoreCapabilityPreparation.PrepareLedger(version, probes);
+        Assert.Equal(flag, result.StartupFlag);
+        Assert.Equal(count, result.Steps.Count);
+        if (version == 1) Assert.Equal(LedgerUpgradeStep.MultiScope, result.Steps[0]);
+        if (probes && version < 3) Assert.Equal(LedgerUpgradeStep.Probes, result.Steps[^1]);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(4)]
+    public void CapabilityPreparationRejectsUnknownLedgerVersions(int version)
+        => Assert.Throws<ArgumentOutOfRangeException>(() => CoreCapabilityPreparation.PrepareLedger(version, true));
     private const string MemberConfiguration = """
         {"inbounds":[{"type":"mixed","tag":"in"}],"outbounds":[
         {"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},

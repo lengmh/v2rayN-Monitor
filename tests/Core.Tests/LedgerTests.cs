@@ -1812,6 +1812,45 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("Synthetic changed group", command.ExecuteScalar());
     }
 
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(1, true)]
+    [InlineData(2, false)]
+    [InlineData(2, true)]
+    [InlineData(3, false)]
+    [InlineData(3, true)]
+    public void CapabilityPreparationSequencePreservesIsolatedLedgerAndAdjacentData(int version, bool probes)
+    {
+        CreateDisplayMigrationFixture(version);
+        if (version == 3) ScopeLedgerMigration.MigrateProbes(Database, Path.Combine(directory, "fixture-v2.db"));
+        var display = DisplaySnapshot(Database);
+        var original = HistorySnapshot(Database);
+        var provider = Path.Combine(directory, "provider.db");
+        using (var imports = new ProviderImports(provider))
+            imports.Commit(new("Synthetic provider", "UTC",
+                "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic node,0.125,9007199254740993,1125899906842624.125,synthetic,2024-02-28 23:59:00\n"));
+        var settings = Path.Combine(directory, "settings.json");
+        File.WriteAllText(settings, "{\"synthetic\":true,\"theme\":\"dark\"}");
+        var providerBefore = File.ReadAllBytes(provider);
+        var settingsBefore = File.ReadAllBytes(settings);
+        var plan = V2rayNMonitor.Host.CoreCapabilityPreparation.PrepareLedger(version, probes);
+        foreach (var step in plan.Steps)
+        {
+            var backup = Path.Combine(directory, "planned-" + step + ".db");
+            var before = HistorySnapshot(Database);
+            if (step == V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope) ScopeLedgerMigration.Migrate(Database, backup);
+            else ScopeLedgerMigration.MigrateProbes(Database, backup);
+            Assert.Equal(before, HistorySnapshot(backup));
+        }
+        if (plan.Steps.Count == 0) Assert.Equal(original, HistorySnapshot(Database));
+        Assert.Equal(display, DisplaySnapshot(Database, mapLegacyKeys: version == 1));
+        Assert.Equal(providerBefore, File.ReadAllBytes(provider));
+        Assert.Equal(settingsBefore, File.ReadAllBytes(settings));
+        using var result = new ScopeLedger(Database);
+        Assert.Equal(probes || version == 3, result.SupportsProbes);
+        Assert.True(result.SupportsDisplayMetadata);
+        Assert.Equal("10", result.Query(ScopeAll(version == 1 ? "legacy_proxy" : "actual_member")).Upload);
+    }
     private void CreateDisplayMigrationFixture(int version)
     {
         if (version == 1)
