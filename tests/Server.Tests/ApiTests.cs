@@ -24,6 +24,43 @@ public sealed class ApiTests : IAsyncLifetime
         var response = await client.PostAsJsonAsync("/api/session", new { token });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancelledHistoryReadDoesNotPreventTheNextRequestOrCollection(bool scopes)
+    {
+        if (scopes)
+        {
+            await server.DisposeAsync(); client.Dispose();
+            V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-before-cancellation.db"));
+            server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+            client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        }
+        await Login();
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var method = typeof(MonitorServer).GetMethod("QueryHistory",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var query = new V2rayNMonitor.Core.QuerySpec(at, at.AddDays(1), "UTC");
+        var error = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            method.Invoke(server, [query, scopes ? "local_proxy" : "legacy_proxy", cancellation.Token]));
+        Assert.IsType<OperationCanceledException>(error.InnerException);
+        if (scopes)
+        {
+            var member = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "synthetic", "Synthetic", "synthetic", "proxy");
+            server.Scopes!.Accept(new("synthetic", "core", "config", at, [new(member, 0, 0)], []));
+            server.Scopes.Accept(new("synthetic", "core", "config", at.AddSeconds(1), [new(member, 7, 0)], []));
+        }
+        else
+        {
+            server.Ledger.Accept(new("synthetic", "node", "Synthetic", "core", "config", at, 0, 0));
+            server.Ledger.Accept(new("synthetic", "node", "Synthetic", "core", "config", at.AddSeconds(1), 7, 0));
+        }
+        var history = await client.GetFromJsonAsync<JsonElement>("/api/history?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC");
+        Assert.Equal("7", history.GetProperty("upload").GetString());
+    }
+
     [Fact]
     public async Task DisplaySnapshotsKeepHistoricalNameFiltersAndExactEstimatesInExport()
     {
