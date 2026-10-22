@@ -1,5 +1,6 @@
-export type Unit = 'GB' | 'GiB';
-export const unitDivisor = (unit: Unit): bigint => unit === 'GB' ? 1_000_000_000n : 1_073_741_824n;
+export type Unit = 'GB' | 'GiB' | 'MB' | 'MiB';
+const divisors: Record<Unit, bigint> = { GB: 1_000_000_000n, GiB: 1_073_741_824n, MB: 1_000_000n, MiB: 1_048_576n };
+export const unitDivisor = (unit: Unit): bigint => divisors[unit];
 export function bytes(value: string): bigint {
   if (!/^\d+$/.test(value)) throw new Error('服务返回了无效的字节数。');
   return BigInt(value);
@@ -20,8 +21,8 @@ export const formatBytes = (value: string | bigint, unit: Unit): string => forma
 export function recordByteParts(value: string | bigint | null, unit: Unit): { value: string; unit: string; isZero: boolean } {
   if (value === null) return { value: '—', unit: '', isZero: false };
   const number = typeof value === 'bigint' ? value : bytes(value);
-  const base = unit === 'GB' ? 1000n : 1024n;
-  const labels = unit === 'GB' ? ['B', 'KB', 'MB', 'GB'] : ['B', 'KiB', 'MiB', 'GiB'];
+  const base = unit.endsWith('iB') ? 1024n : 1000n;
+  const labels = base === 1000n ? ['B', 'KB', 'MB', 'GB'] : ['B', 'KiB', 'MiB', 'GiB'];
   let divisor = 1n, index = 0;
   while (number >= divisor * base && index < 3) { divisor *= base; index++; }
   return { value: decimal(number, divisor, index ? 2 : 0), unit: labels[index], isZero: number === 0n };
@@ -34,8 +35,8 @@ export const exactBytes = (value: string | bigint): string => `${(typeof value =
 export function rate(value: string | null, unit: Unit): string {
   if (value === null) return '—';
   const number = bytes(value);
-  const base = unit === 'GB' ? 1000n : 1024n;
-  const labels = unit === 'GB' ? ['B', 'KB', 'MB', 'GB'] : ['B', 'KiB', 'MiB', 'GiB'];
+  const base = unit.endsWith('iB') ? 1024n : 1000n;
+  const labels = base === 1000n ? ['B', 'KB', 'MB', 'GB'] : ['B', 'KiB', 'MiB', 'GiB'];
   let divisor = 1n, index = 0;
   while (number >= divisor * base && index < 3) { divisor *= base; index++; }
   return `${decimal(number, divisor, index ? 2 : 0)} ${labels[index]}/s`;

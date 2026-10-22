@@ -4,6 +4,7 @@ import { chartSlots, shortLabel } from './lib/chart.ts';
 import { compareNames, compareBuckets } from './lib/comparison.ts';
 import { displayNodes } from './lib/display.ts';
 import { initializeTheme } from './lib/theme.ts';
+import { createUiMotion } from './lib/motion.ts';
 import { createDetailPopover } from './lib/detail-popover.ts';
 import type { ComparisonRow } from './lib/comparison.ts';
 import { bytes, exactBytes, formatBytes, percentage, rate } from './lib/format.ts';
@@ -18,7 +19,15 @@ const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   if (!found) throw new Error(`页面组件缺失：${id}`);
   return found as T;
 };
-const put = (id: string, value: string): void => { el(id).textContent = value; };
+const put = (id: string, value: string): void => {
+  const target = el(id);
+  // Preserve the exact text/accessibility name; only the display unit is quieter.
+  const amount = target.classList.contains('metric-value') ? /^(.*)( [MG]i?B)$/.exec(value) : null;
+  if (amount) {
+    const suffix = document.createElement('span'); suffix.className = 'metric-unit'; suffix.textContent = amount[2];
+    target.replaceChildren(document.createTextNode(amount[1]), suffix);
+  } else target.textContent = value;
+};
 const show = (id: string, visible: boolean): void => { el(id).hidden = !visible; };
 const element = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag); node.textContent = text; node.className = className; return node;
@@ -26,6 +35,8 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '', class
 const fail = (message: string): void => { put('global-error', message); show('global-error', true); };
 initializeTheme(el<HTMLSelectElement>('theme'));
 const detailPopover = createDetailPopover(showExactValue);
+const motion = createUiMotion();
+el('theme').addEventListener('change', () => motion.cancel());
 function discloseGroups(button: HTMLButtonElement, groups: string[], key: string, note?: string): void {
   button.classList.add('has-groups');
   button.removeAttribute('title');
@@ -38,13 +49,27 @@ let ready = false;
 const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo'];
 for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 let refreshController: AbortController | null = null;
+let statusController: AbortController | null = null;
+let statusRequest: Promise<CollectorStatus | undefined> | null = null;
+let nodesController: AbortController | null = null;
+let nodesContext = '';
+let nodeCatalog: NodeInfo[] | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let settings: Settings = { v2rayNPath: '', timeZoneId: 'UTC', demo: false };
 let period: Period = 'month';
 let anchor = dateInZone(new Date(), 'UTC');
 let range: Range;
 let bucket: Bucket = 'day';
-let unit: Unit = 'GB';
+const pageUnits: Record<'overview' | 'probes', Unit> = { overview: 'GB', probes: 'MB' };
+for (const view of ['overview', 'probes'] as const) {
+  try {
+    const saved = localStorage.getItem(`v2rayn-monitor-unit-${view}`);
+    if (saved === 'GB' || saved === 'GiB' || saved === 'MB' || saved === 'MiB') pageUnits[view] = saved;
+  } catch { /* Page units still work for this session when browser storage is unavailable. */ }
+}
+let unit: Unit = pageUnits.overview;
+el<HTMLSelectElement>('unit').value = unit;
 let nodeKey = '';
 let page = 0;
 const pageSize = 50;
@@ -54,21 +79,29 @@ let statisticsSource = '';
 let providerMetric: 'raw' | 'billed' = 'raw';
 let comparison = false;
 let latestComparison: { local: HistoryResult; provider: ProviderHistory } | null = null;
+let comparisonNodePage = 0;
+let comparisonNodeCount = 0;
 let comparisonBucketPage = 0;
 let comparisonBucketCount = 0;
 let latestStatus: CollectorStatus | null = null;
 let lastBatchList: ImportBatch[] = [];
 let activeView = 'overview';
 let probeBasis = 'probe_urltest_member';
+let historyBasis = 'local_proxy';
+const historyBasisLabels: Record<string, string> = {
+  local_proxy: '代理流量（默认）', actual_member: '代理成员', business: '代理业务总量',
+  excluded: '直连流量', unknown: '归属未知流量', legacy_proxy: '单 proxy 出站', routed_outbound: '路由出站历史'
+};
 let rankingMode: 'ranking' | 'share' = 'ranking';
 const comparisonModes: Record<'nodes' | 'buckets', 'list' | 'share'> = { nodes: 'list', buckets: 'list' };
 const probeView = (): boolean => activeView === 'probes';
+const aggregateHistory = (): boolean => !probeView() && !statisticsSource && ['business', 'excluded', 'unknown'].includes(historyBasis);
+const historyName = (name: string): string => aggregateHistory() && name === historyBasis ? historyBasisLabels[historyBasis]! : name;
 let importRequest: { source: string; timeZoneId: string; csv: string } | null = null;
 let importRevision = 0;
 
 function expireSession(): void {
-  expired = true; refreshController?.abort();
-  if (refreshTimer) clearTimeout(refreshTimer);
+  expired = true; pauseRefresh();
   show('session-alert', true); put('refresh-note', '会话已失效');
   for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 }
@@ -87,12 +120,22 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 const post = <T>(path: string, body: unknown): Promise<T> => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
 const errorText = (error: unknown): string => error instanceof Error ? error.message : '操作失败，请检查本机采集器。';
+function updateHistoryBasisControl(): void {
+  const available = latestStatus?.historyBases ?? ['local_proxy'];
+  const bases = Object.keys(historyBasisLabels).filter(basis => available.includes(basis));
+  const select = el<HTMLSelectElement>('history-basis');
+  if (Array.from(select.options, option => option.value).join(',') !== bases.join(','))
+    select.replaceChildren(...bases.map(basis => { const option = element('option', historyBasisLabels[basis]!); option.value = basis; return option; }));
+  select.value = historyBasis;
+  show('history-basis-control', activeView === 'overview' && !statisticsSource && bases.length > 1);
+}
 function query(localComparison = false, nonZeroRecords = false): string {
   const params = new URLSearchParams({ start: range.start, end: range.end, timeZoneId: settings.timeZoneId, bucket, page: String(page), pageSize: String(pageSize) });
   if (nodeKey) params.set(localComparison ? 'nodeName' : 'nodeKey', nodeKey);
   if (statisticsSource && !localComparison) params.set('source', statisticsSource);
   if (nonZeroRecords) params.set('nonZeroRecords', 'true');
   if (probeView()) params.set('basis', probeBasis);
+  else if (!statisticsSource && !localComparison && historyBasis !== 'local_proxy') params.set('basis', historyBasis);
   return params.toString();
 }
 function updateRange(): void {
@@ -119,16 +162,35 @@ function selectPeriod(next: Period): void {
 }
 function renderStatus(status: CollectorStatus): void {
   latestStatus = status;
-  const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '采集器已连接', baseline: '已建立基线', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
-  const state = status.scope?.isPartial || status.state === 'partial' ? '部分采集' : states[status.state.toLowerCase()] || status.state;
-  const message = [status.message || '等待有效采样。', status.scope?.description].filter(Boolean).join(' ');
+  updateHistoryBasisControl();
+  const states: Record<string, string> = { collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '已连接', baseline: '正在采样', reset: '正在采样', duplicate: '等待新采样', stale: '等待新采样', collector_stopped: '采集已停止', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录', unsupported: '当前模式不支持', error: '采集暂不可用', demo: '合成演示模式', needs_setup: '需要设置', needs_statistics: '需要开启统计', setup: '等待设置目录', needs_directory: '等待设置目录', unsupported_platform: '系统暂不支持', unsupported_configuration: '配置暂不支持', unsupported_connection: '连接字段暂不支持', unsupported_core: '内核暂不支持', unsupported_mode: '模式暂不支持', statistics_disabled: '需要开启统计', statistics_unavailable: '统计接口不可用', interface_unavailable: '统计接口不可用', invalid_metrics: '统计响应无效', missing_counters: '统计计数缺失', unavailable: '暂时无法读取', core_not_running: '等待内核运行', ambiguous_instance: '实例归属不明确', unsupported_version: '版本尚未核实', waiting_for_core: '等待内核加载', snapshot_changed: '正在切换配置', missing_database: '缺少配置数据库', unknown_node: '节点归属未知', ambiguous_node: '节点归属不明确', mapping_changed: '等待节点配置同步' };
+  const key = status.state.toLowerCase();
+  const active = ['collecting', 'connected', 'running', 'ready', 'baseline', 'reset'].includes(key);
+  const scope = status.scope;
+  const partial = key === 'partial' || (active && !!scope?.isPartial);
+  const state = partial ? '部分采集' : states[key] || status.state;
+  const description = scope?.description?.trim();
+  const details = [...new Set([status.message?.trim(), description].filter(Boolean))].join(' ') || '等待有效采样。';
+  const fullMessage = active && description ? description : details;
+  let message = fullMessage;
+  if (active && !partial) {
+    const scopes: Record<string, string> = {
+      routed_proxy: '仅统计路由匹配 proxy 的流量',
+      xray_outbound_proxy: '仅统计 Xray proxy 出站流量',
+      xray_outbound_members: ['Xray', scope?.collectedOutbounds == null ? '独立代理出站' : `${scope.collectedOutbounds} 个代理出站`,
+        scope?.collectedGroups ? `${scope.collectedGroups} 个策略组` : '', '不含直连和阻断'].filter(Boolean).join(' · ')
+    };
+    message = (scope && scopes[scope.basis]) ||
+      (status.collectionBasis === 'actual_member' ? '按独立代理成员统计 · 不叠加汇总和直连' : '') ||
+      (['baseline', 'reset'].includes(key) ? '正在读取累计流量，连续采样后显示速率。' : fullMessage);
+  }
   put('collector-state', state);
   put('collector-message', message);
-  document.querySelector('.collector-strip')?.classList.toggle('is-partial', !!status.scope?.isPartial || status.state === 'partial');
+  document.querySelector('.collector-strip')?.classList.toggle('is-partial', partial);
   put('current-node', status.currentNode || '未确定'); el('current-node').title = status.currentNode || '未确定';
   put('live-upload', `↑ ${rate(status.uploadPerSecond, unit)}`); put('live-download', `↓ ${rate(status.downloadPerSecond, unit)}`);
-  put('settings-collector-status', `当前状态：${state}。${message} 最近采样：${timestamp(status.lastSample, settings.timeZoneId)}`);
-  el('status-dot').className = `status-dot ${status.scope?.isPartial || status.state === 'partial' ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(status.state.toLowerCase()) ? 'connected' : ['error', 'unsupported'].includes(status.state.toLowerCase()) ? 'error' : ''}`;
+  put('settings-collector-status', `${state}。${fullMessage} 最近采样：${status.lastSample ? timestamp(status.lastSample, settings.timeZoneId) : '尚无有效采样'}`);
+  el('status-dot').className = `status-dot ${partial ? 'partial' : ['collecting', 'connected', 'running', 'ready', 'demo'].includes(key) ? 'connected' : ['error', 'unsupported'].includes(key) ? 'error' : ''}`;
   show('demo-notice', status.demo); show('demo-controls', status.demo);
   const probeStates: Record<string, string> = { disabled: '探测历史未启用', waiting: '等待探测采样', unavailable: '探测计数暂不可用', unsupported: '当前核心未支持探测计量', partial: '探测部分采集', available: '探测计数可用' };
   put('probe-state', probeStates[status.probes?.state ?? 'disabled'] ?? '探测状态未知');
@@ -137,7 +199,7 @@ function renderStatus(status: CollectorStatus): void {
 function renderNodes(nodes: NodeInfo[]): void {
   const select = el<HTMLSelectElement>('node-filter');
   const existing = Array.from(select.options).map(o => [o.value, o.textContent]);
-  const next = [['', '全部节点'], ...nodes.map(n => [n.key, n.name])];
+  const next = [['', aggregateHistory() ? '全部范围' : '全部节点'], ...nodes.map(n => [n.key, historyName(n.name)])];
   if (JSON.stringify(existing) === JSON.stringify(next)) return;
   select.replaceChildren(...next.map(([value, name]) => { const option = element('option', name); option.value = value; return option; }));
   if (nodeKey && !nodes.some(n => n.key === nodeKey)) { const option = element('option', '已删除 / 历史节点'); option.value = nodeKey; select.append(option); }
@@ -148,7 +210,7 @@ function renderChart(history: HistoryPointInput, provider = false): void {
   const exact = (value: string | bigint): string => provider ? exactProviderTotal(providerUnitsText(BigInt(value))) : exactBytes(value);
   const chart = el('chart'); chart.replaceChildren();
   chart.classList.toggle('empty', !history.series.length);
-  if (!history.series.length) { chart.append(element('p', provider ? '所选日期没有已导入记录。\n请调整范围或导入服务商 CSV。' : '这个区间还没有可分时的记录。\n采集器连接后，新增流量会显示在这里。')); chart.setAttribute('aria-label', '此区间没有可分时记录，缺失不代表零流量'); put('chart-scale', ''); return; }
+  if (!history.series.length) { chart.append(element('p', provider ? '所选日期没有已导入记录。\n请调整范围或导入服务商 CSV。' : '所选范围没有可分时的记录。\n请调整日期或节点；缺失记录不等于零流量。')); chart.setAttribute('aria-label', '此区间没有可分时记录，缺失不代表零流量'); put('chart-scale', ''); return; }
   const max = history.series.reduce((result, p) => { const total = bytes(p.upload) + bytes(p.download); return total > result ? total : result; }, 0n);
   chart.setAttribute('aria-label', `流量趋势，共 ${history.series.length} 个有记录的时间桶；空白时间不代表零流量。`);
   const slots = chartSlots(history.series, range, bucket, settings.timeZoneId);
@@ -224,7 +286,7 @@ function renderRanking(items: RankingItem[], provider = false): void {
     const x = metric(a), y = metric(b);
     return x > y ? -1 : x < y ? 1 : a.name.localeCompare(b.name);
   });
-  const aggregate = probeView() && probeBasis !== 'probe_urltest_member';
+  const aggregate = (probeView() && probeBasis !== 'probe_urltest_member') || aggregateHistory();
   const share = rankingMode === 'share' && !aggregate;
   ranking.classList.toggle('show-shares', share);
   el<HTMLButtonElement>('ranking-share').disabled = aggregate;
@@ -236,7 +298,7 @@ function renderRanking(items: RankingItem[], provider = false): void {
   const precise = (value: bigint): string => provider ? exactProviderTotal(providerUnitsText(value)) : exactBytes(value);
   if (!sorted.length) {
     detailPopover.close();
-    ranking.append(element('p', '所选范围尚无节点记录', 'empty-state'));
+    ranking.append(element('p', aggregate ? '所选范围尚无已保存记录' : '所选范围尚无节点记录', 'empty-state'));
     return;
   }
   if (share && total === 0n) {
@@ -252,8 +314,8 @@ function renderRanking(items: RankingItem[], provider = false): void {
   sorted.forEach((node, index) => {
     const row = element('div', '', `rank-row ${share ? 'share-mode' : ''}`);
     const heading = element('div', '', 'rank-heading');
-    const name = element('button', node.name || '未归属', 'rank-node');
-    name.type = 'button'; name.title = node.name || '未归属';
+    const name = element('button', historyName(node.name) || '未归属', 'rank-node');
+    name.type = 'button'; name.title = historyName(node.name) || '未归属';
     name.addEventListener('click', () => {
       nodeKey = provider ? node.name : node.key;
       el<HTMLSelectElement>('node-filter').value = nodeKey; page = 0; void refresh(true);
@@ -311,19 +373,45 @@ function renderEstimate(display: TrafficDisplay | null | undefined): void {
   put('billing-note', display?.estimatedBilledBytes == null ? '未估算，不表示计费为零' :
     `名称倍率估算 · 覆盖 ${formatBytes(covered, unit)}${unknown && bytes(unknown) > 0n ? ` · 未估算 ${formatBytes(unknown, unit)}` : ''} · 非服务商扣费`);
 }
+let displayedGaps: HistoryResult['gaps'];
+let displayedGapZone = '';
+function renderGapDetails(): void {
+  const target = el('gap-list');
+  if (!latestHistory || !el<HTMLDetailsElement>('gap-details').open) {
+    target.replaceChildren(); displayedGaps = undefined; displayedGapZone = ''; return;
+  }
+  if (displayedGaps === latestHistory.gaps && displayedGapZone === settings.timeZoneId) return;
+  const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化', collector_stopped: '采集器已停止', collector_error: '采集或保存失败', unsupported_mode: '当时的模式不支持' };
+  const rows = document.createDocumentFragment();
+  for (const gap of latestHistory.gaps ?? []) rows.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
+  target.replaceChildren(rows);
+  displayedGaps = latestHistory.gaps; displayedGapZone = settings.timeZoneId;
+}
+function hideGapDetails(): void {
+  el<HTMLDetailsElement>('gap-details').open = false;
+  show('gap-details', false);
+  renderGapDetails();
+}
 function renderHistory(history: HistoryResult): void {
+  motion.cancel();
   latestHistory = history;
   latestProvider = null;
   statisticLabels();
   const attribution = el('attribution-note');
   attribution.textContent = probeView()
     ? '探测流字节单独保存。成员和总量分别查看，不重复相加；Xray 原出站累计可能包含探测，不能与本页相加或直接相减。'
+    : historyBasis !== 'local_proxy'
+    ? `${historyBasisLabels[historyBasis]}，仅显示已保存的历史；各维度不相加，也不补当前核心未提供的计数。顶部实时速率仍为代理合计，不随历史筛选变化。`
     : history.basis === 'local_proxy'
-    ? '包含当前账本中的 sing-box 成员、Xray 独立出站和旧 proxy 历史，切换核心不隐藏记录。同名记录仍按原身份分账；直连、业务汇总和独立探测不重复计入。Xray 原出站累计可能包含内部探测，与探测页的流字节不能相加或直接相减。'
-    : '按已核实的节点或出站身份分账，名称和策略组前缀仅用于展示。';
+    ? '合并显示 sing-box 成员、Xray 出站及旧 proxy 历史，切换核心不隐藏记录；同名记录仍按原身份分账。直连、汇总和独立探测不重复计入。Xray 出站可能含探测，与探测页数值不能相加或直接相减。'
+    : '按已核实的节点或出站身份分账，名称和策略组仅用于展示。';
   const up = bytes(history.upload), down = bytes(history.download), total = up + down;
   renderEstimate(history.display);
   if (history.displayMetadataEnabled === false) put('billing-exact', '倍率快照未启用，原始量正常记录');
+  if (aggregateHistory()) {
+    put('billing-value', '—'); put('billing-exact', '此维度不提供节点倍率估算');
+    put('billing-note', '仅看原始量，不推算服务商计费');
+  }
   put('total-value', formatBytes(total, unit)); put('total-exact', exactBytes(total));
   put('download-value', formatBytes(down, unit)); put('download-exact', exactBytes(down));
   put('upload-value', formatBytes(up, unit)); put('upload-exact', exactBytes(up));
@@ -334,12 +422,12 @@ function renderHistory(history: HistoryResult): void {
   const recovered = bytes(history.recoveredUpload ?? '0') + bytes(history.recoveredDownload ?? '0');
   const partial = bytes(history.partialUpload ?? '0') + bytes(history.partialDownload ?? '0');
   const unbucketed = bytes(history.unbucketedUpload ?? '0') + bytes(history.unbucketedDownload ?? '0');
-  const quality = ['首次采样建立基线，接入前累计不回填；缺失记录不等于零流量。'];
+  const quality = ['首次采样仅记录累计起点，接入前累计不回填；缺失记录不等于零流量。'];
   if (probeView()) {
     quality.push('当前仅为所选 HTTP 探测维度，不与出站累计或服务商计费相加。');
     put('probe-coverage', history.earliestRecord
-      ? `最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}（按分钟显示，不是精确的首次基线）。`
-      : '所选维度及节点尚无已保存的探测区间；首次有效采样只建立基线，不回填此前累计。');
+      ? `最早保存区间：${dateInZone(new Date(history.earliestRecord), settings.timeZoneId)} ${timestamp(history.earliestRecord, settings.timeZoneId).split(' ').at(-1)}（按分钟保存，并非精确的首次采样时间）。`
+      : '所选维度及节点尚无探测记录；首次采样仅记录累计起点，不回填此前累计。');
   }
   if (history.basis === 'actual_member')
     quality.push('当前为实际成员维度，直连和汇总分别保存。');
@@ -352,12 +440,10 @@ function renderHistory(history: HistoryResult): void {
   if (partial > 0n) quality.push(`另有部分重叠的恢复区间，共 ${formatBytes(partial, unit)}（${exactBytes(partial)}）；本范围内用量未知，未计入合计，不能跨日期相加。`);
   if (history.gapCount) quality.push(`本范围有 ${history.gapCount} 段历史采集间断，当前采集状态见上方。`);
   put('quality-notice', quality.join(' '));
-  put('quality-summary', recovered > 0n ? `已知合计包含 ${formatBytes(recovered, unit)} 恢复量` : history.gapCount ? `本范围有 ${history.gapCount} 段历史采集间断` : '统计口径与数据说明');
-  const details = el('gap-list'); details.replaceChildren();
-  const reasons: Record<string, string> = { uncollected_outbounds: '其他出站未采集，流量未知', long_interval: '采样间隔较长', ambiguous_instance: '实例归属核对', listener_unverified: '监听端口核对', snapshot_changed: '配置快照变化', identity_change: '会话或节点变化', counter_reset: '计数重置', mapping_changed: '节点映射变化' };
-  for (const gap of history.gaps ?? []) details.append(element('li', `${timestamp(gap.start, settings.timeZoneId)} → ${timestamp(gap.end, settings.timeZoneId)} · ${reasons[gap.reason] ?? gap.reason} · ${gap.isOpen ? '尚未结束' : '已结束（不代表流量全部恢复）'}`));
+  put('quality-summary', recovered > 0n ? `已知合计包含 ${formatBytes(recovered, unit)} 恢复量` : history.gapCount ? `本范围有 ${history.gapCount} 段历史采集间断` : '统计说明');
   show('gap-details', history.gapCount > 0);
   put('gap-summary', `查看历史间断与覆盖缺口（${history.gapCount} 段）`);
+  renderGapDetails();
   put('trend-subtitle', `${({ hour: '小时', day: '日', week: '周', month: '月', year: '年' } as const)[bucket]}分桶 · ${settings.timeZoneId}`);
   renderChart(history);
   const nodes = displayNodes(history.nodes);
@@ -366,11 +452,11 @@ function renderHistory(history: HistoryResult): void {
     upload: bytes(node.upload), download: bytes(node.download), recovered: bytes(node.recoveredUpload ?? '0') + bytes(node.recoveredDownload ?? '0') })));
   const records = el('records'); detailPopover.beforeReplace(records); records.replaceChildren();
   const labels: Record<string, string> = { exact: '已记录', normal: '已记录', measured: '已记录', approximate: '分时近似', 'recovered-contained': '恢复量 · 已计入', 'recovered-partial': '部分重叠 · 未计入', 'recovered-unallocated': '恢复未分时', estimated: '分时近似', interpolated: '分时近似', apportioned: '分时近似', unallocated: '恢复未分时', recovered_unallocated: '恢复未分时', unknown: '未归属', gap: '采集缺口', synthetic: '合成演示' };
-  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个区间没有非零采集明细。零字节记录已隐藏，采集缺口仍单独显示。', 'empty-state'); cell.colSpan = 9; row.append(cell); records.append(row); }
+  if (!history.records.length) { const row = element('tr'), cell = element('td', undefined, 'empty-state'); cell.append(element('p', '这个区间没有非零采集明细。零字节记录已隐藏，采集缺口仍单独显示。')); cell.colSpan = 9; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr');
     const time = element('td', timestamp(record.start, settings.timeZoneId)); time.title = `${record.start} → ${record.end}`;
-    const name = element('td', record.display?.originalName ?? record.nodeName ?? '未归属', 'node-cell'); name.title = record.nodeName || '未归属';
+    const name = element('td', historyName(record.display?.originalName ?? record.nodeName ?? '未归属'), 'node-cell'); name.title = historyName(record.nodeName || '未归属');
     if (record.display?.groups.length) {
       const label = element('button', name.textContent!, 'node-name'); label.type = 'button';
       discloseGroups(label, record.display.groups, `record-groups:${JSON.stringify([record.nodeKey, record.start, record.end, record.upload, record.download, record.display])}`);
@@ -404,10 +490,12 @@ function pagination(count: number, nonZeroRecords = false): void {
 function statisticLabels(): void {
   const provider = statisticsSource !== '';
   const probe = probeView();
+  const dimension = !provider && !probe && historyBasis !== 'local_proxy';
+  const aggregate = aggregateHistory();
+  updateHistoryBasisControl();
   show('source-controls', !probe); show('probe-controls', probe); show('probe-notice', probe);
   put('statistics-title', probe ? '探测流量' : '流量统计');
-  put('statistics-eyebrow', probe ? 'URLTEST PROBES' : 'TRAFFIC OVERVIEW');
-  put('statistics-subtitle', probe ? '独立查看测活与延迟探测，按实际成员、日期和已知范围排查。' : '按来源和节点查看历史，清楚区分已知流量与采集间断。');
+  put('statistics-subtitle', probe ? '按成员和日期查看探测流量。' : '按节点和日期查看已记录流量。');
   el('records').closest('.records-panel')?.classList.toggle('local-records', !provider);
   const metric = providerMetric === 'raw' ? '服务商原始量' : '服务商计费量';
   put('provider-metric-caption', comparison ? '对比口径' : '排行与趋势');
@@ -420,19 +508,22 @@ function statisticLabels(): void {
   show('attribution-note', !provider);
   el('summary').classList.toggle('provider-summary', provider);
   show('raw-card', true); show('billed-card', true);
-  put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : '本机内核统计 · 含可确定范围的恢复量');
-  put('total-title', provider ? '原始量' : probe ? '所选维度探测量' : '区间已知合计');
+  put('source-caption', provider ? `服务商：${statisticsSource} · 与本机分别统计` : dimension ? `本机历史 · ${historyBasisLabels[historyBasis]}` : '本机采集 · 含恢复量');
+  put('total-title', provider ? '原始量' : probe ? '所选维度探测量' : dimension ? '所选维度合计' : '区间已知合计');
   put('total-note', provider ? '仅当前来源 · 不与本机流量相加' : probe ? '上传 + 下载 · 与业务分别保存' : '上传 + 下载 · 包含区间内恢复量');
   put('download-title', '下载'); put('upload-title', '上传');
-  put('download-note', provider ? '不从原始总量推算' : probe ? '从探测目标接收的流字节' : '从代理节点接收');
-  put('upload-note', provider ? '不从原始总量推算' : probe ? '发往探测目标的流字节' : '通过代理节点发送');
+  put('download-note', provider ? '不从原始总量推算' : probe ? '从探测目标接收的流字节' : dimension ? '本维度接收' : '从代理节点接收');
+  put('upload-note', provider ? '不从原始总量推算' : probe ? '发往探测目标的流字节' : dimension ? '本维度发送' : '通过代理节点发送');
   put('billing-title', provider ? '计费量' : '估算计费量');
   put('billing-value', '—'); put('billing-exact', provider ? '等待记录' : '历史倍率未核实');
   put('billing-note', provider ? 'CSV 精确值 · 不重新乘倍率' : '未估算，不表示计费为零');
   put('download-legend', provider ? metric : '下载');
+  put('ranking-title', aggregate ? '范围汇总' : '节点排行');
+  put('node-filter-label', aggregate ? '范围' : '节点');
+  put('node-column', aggregate ? '范围' : '节点');
   put('ranking-caption', provider ? `按${metric}排序` : '按区间已知合计排序');
   put('records-heading', provider ? '服务商记录' : probe ? '探测明细' : '采集明细');
-  put('records-caption', provider ? '独立来源 · 方向、设备和 IP 未提供 · 点击数值查看精确值' : '仅显示非零明细 · 点击数值查看精确值 · 仅按采集时倍率快照估算，旧记录保持未知');
+  put('records-caption', provider ? '方向、设备和 IP 未提供 · 点击数值查看精确值' : aggregate ? '仅此维度的非零明细 · 不与其他维度相加 · 点击数值查看精确值' : '仅非零明细 · 点击数值查看精确值 · 按采集时倍率估算，旧记录保持未知');
   put('billing-column', provider ? '计费量' : '估算计费量');
 }
 function comparisonValues(row: ComparisonRow): [string | null, string | null] {
@@ -445,6 +536,7 @@ function renderComparisonShares(section: 'nodes' | 'buckets', rows: ComparisonRo
   const target = el(`comparison-${section}-shares`);
   target.replaceChildren();
   const share = comparisonModes[section] === 'share';
+  if (section === 'nodes') show('comparison-node-sort-control', !share);
   show(`comparison-${section}-list`, !share); show(`comparison-${section}-shares`, share);
   for (const button of document.querySelectorAll<HTMLButtonElement>(`[data-comparison-section="${section}"]`)) {
     const selected = button.dataset.comparisonMode === comparisonModes[section];
@@ -491,7 +583,8 @@ function renderComparisonShares(section: 'nodes' | 'buckets', rows: ComparisonRo
   }
 }
 function renderComparison(local: HistoryResult, provider: ProviderHistory): void {
-  if (latestComparison?.local !== local || latestComparison?.provider !== provider) comparisonBucketPage = 0;
+  motion.cancel();
+  if (latestComparison?.local !== local || latestComparison?.provider !== provider) { comparisonBucketPage = 0; comparisonNodePage = 0; }
   latestComparison = { local, provider }; latestProvider = null; latestHistory = null; statisticLabels();
   const card = (id: string, value: string | null, empty = '所选范围无记录'): void => {
     put(`comparison-${id}`, value === null ? '—' : formatProviderTotal(value, unit));
@@ -514,7 +607,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   put('comparison-recovery', `本机历史间断 ${local.gapCount} 段。已计入总量但未分配到当前时间桶：${exactBytes(unbucketed)}；部分重叠恢复区间（未计入）：${exactBytes(partial)}。`);
   put('quality-summary', '同名汇总对照 · 两边数值分别计量');
   put('quality-notice', '名称相同仅用于展示对照，不证明节点身份相同；服务商记录范围可能不同。缺口不是零，不把差额归因于设备或漏计。');
-  show('gap-details', false);
+  hideGapDetails();
   const table = (id: string, rows: ComparisonRow[], scaleRows = rows): void => {
     const body = el(id); detailPopover.beforeReplace(body); body.replaceChildren();
     const maximum = scaleRows.reduce((max, row) => {
@@ -526,6 +619,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
       comparisonValues(row).forEach((value, index) => {
         const unknownEstimate = index === 0 && billed && row.local !== null && value === null;
         const tr = element('tr', '', `comparison-pair ${value === null ? 'missing' : ''}`);
+        tr.dataset.motionKey = JSON.stringify([row.name, index]);
         if (index === 0) {
           const name = element('td', row.name, 'comparison-name'); name.rowSpan = 2;
           if (id === 'comparison-nodes') {
@@ -573,7 +667,13 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
     if (x === null || y === null) return x === y ? a.name.localeCompare(b.name) : x === null ? 1 : -1;
     return providerUnits(x) > providerUnits(y) ? -1 : providerUnits(x) < providerUnits(y) ? 1 : a.name.localeCompare(b.name);
   });
-  table('comparison-nodes', sortedNames);
+  comparisonNodeCount = sortedNames.length;
+  const nodePages = Math.max(1, Math.ceil(comparisonNodeCount / pageSize));
+  comparisonNodePage = Math.min(comparisonNodePage, nodePages - 1);
+  table('comparison-nodes', sortedNames.slice(comparisonNodePage * pageSize, (comparisonNodePage + 1) * pageSize), sortedNames);
+  put('comparison-node-page', `共 ${comparisonNodeCount.toLocaleString('zh-CN')} 个节点 · 第 ${comparisonNodePage + 1} / ${nodePages} 页 · 每页 ${pageSize} 个`);
+  el<HTMLButtonElement>('comparison-node-previous').disabled = comparisonNodePage === 0;
+  el<HTMLButtonElement>('comparison-node-next').disabled = comparisonNodePage + 1 >= nodePages;
   renderComparisonShares('nodes', names);
   const buckets = compareBuckets(local, provider);
   renderComparisonShares('buckets', buckets);
@@ -627,6 +727,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
   el('summary').setAttribute('aria-busy', 'false');
 }
 function renderProviderHistory(history: ProviderHistory): void {
+  motion.cancel();
   latestProvider = history; latestHistory = null; statisticLabels();
   const metric = (value: { rawBytes: string; billedBytes: string }): string => providerMetric === 'raw' ? value.rawBytes : value.billedBytes;
   put('total-value', formatBytes(history.rawBytes, unit)); put('total-exact', exactBytes(history.rawBytes));
@@ -639,13 +740,13 @@ function renderProviderHistory(history: ProviderHistory): void {
   }
   put('quality-notice', '仅统计所选服务商的已导入记录，不代表完整使用量。上下行方向、设备和 IP 未知；不与本机流量相加。');
   put('quality-summary', '服务商独立记录 · 与本机分别统计');
-  show('gap-details', false);
+  hideGapDetails();
   put('trend-subtitle', `${providerMetric === 'raw' ? '原始量' : '计费量'} · ${settings.timeZoneId}`);
   renderChart({ series: history.series.map(point => ({ label: point.label, upload: '0', download: providerUnits(metric(point)).toString() })) }, true);
   put('node-count', String(history.nodes.length));
   renderRanking(history.nodes.map(node => ({ key: node.name, name: node.name, total: providerUnits(metric(node)) })), true);
   const records = el('records'); records.replaceChildren();
-  if (!history.records.length) { const row = element('tr'), cell = element('td', '这个范围没有已导入记录，请调整日期或来源。', 'empty-state'); cell.colSpan = 9; row.append(cell); records.append(row); }
+  if (!history.records.length) { const row = element('tr'), cell = element('td', undefined, 'empty-state'); cell.append(element('p', '这个范围没有已导入记录，请调整日期或来源。')); cell.colSpan = 9; row.append(cell); records.append(row); }
   for (const record of history.records) {
     const row = element('tr'), name = element('td', record.nodeName, 'node-cell'); name.title = record.nodeName;
     const quality = element('td'); quality.append(element('span', '服务商导入', 'quality-pill'));
@@ -664,19 +765,97 @@ async function loadSources(): Promise<void> {
   for (const source of sources) { const option = element('option', `服务商 · ${source}`); option.value = source; select.append(option); }
   select.value = statisticsSource;
 }
-async function refresh(force = false): Promise<void> {
-  if (expired || !ready || !range) return;
-  if (refreshController && !force) return;
+function statisticsVisible(): boolean { return activeView === 'overview' || probeView(); }
+function directoryContext(): string { return JSON.stringify([probeView() ? probeBasis : statisticsSource ? '' : historyBasis, statisticsSource, comparison]); }
+function renderNodeCatalog(): void {
+  if (!nodeCatalog) return;
+  if (comparison) {
+    const names = [...new Set([...nodeCatalog, ...(latestComparison?.local.comparisonNodes ?? [])].map(node => node.name))].sort();
+    renderNodes(names.map(name => ({ key: name, name })));
+  } else renderNodes(nodeCatalog);
+  updateFilterDisclosure();
+}
+function pauseRefresh(): void {
+  refreshController?.abort(); refreshController = null;
+  statusController?.abort(); statusController = null; statusRequest = null;
+  nodesController?.abort(); nodesController = null;
   if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+  if (statusTimer) clearTimeout(statusTimer);
+  statusTimer = null;
+}
+function scheduleRefresh(): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  if (statusTimer) clearTimeout(statusTimer);
+  refreshTimer = null;
+  statusTimer = null;
+  if (!ready || expired || document.hidden) return;
+  const statusTick = (): void => {
+    if (!ready || expired || document.hidden) return;
+    statusTimer = setTimeout(statusTick, 2000);
+    void refreshStatus();
+  };
+  const historyTick = (): void => {
+    if (!ready || expired || document.hidden) return;
+    refreshTimer = setTimeout(historyTick, 30000);
+    void refresh(false, true);
+  };
+  statusTimer = setTimeout(statusTick, 2000);
+  refreshTimer = setTimeout(historyTick, 30000);
+}
+function refreshStatus(): Promise<CollectorStatus | undefined> {
+  if (statusRequest) return statusRequest;
+  const controller = new AbortController(); statusController = controller;
+  statusRequest = api<CollectorStatus>('/api/status', { signal: controller.signal }).then(status => {
+    if (controller.signal.aborted || statusController !== controller) return undefined;
+    const probeChanged = probeView() && latestStatus !== null &&
+      !!latestStatus.probes?.historyEnabled !== !!status.probes?.historyEnabled;
+    renderStatus(status);
+    if (probeChanged) void refresh(true);
+    return status;
+  }).catch(error => {
+    if (!controller.signal.aborted && !expired) fail(`暂时无法读取采集状态。${errorText(error)}`);
+    return undefined;
+  }).finally(() => {
+    if (statusController === controller) { statusController = null; statusRequest = null; }
+  });
+  return statusRequest;
+}
+async function refreshNodes(poll: boolean): Promise<void> {
+  const context = directoryContext();
+  if (nodesContext === context && (nodesController || (nodeCatalog && !poll))) return;
+  nodesController?.abort();
+  if (nodesContext !== context) nodeCatalog = null;
+  nodesContext = context;
+  const controller = new AbortController(); nodesController = controller;
+  try {
+    const paths = comparison ? ['/api/nodes', `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}`] :
+      [statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` :
+        `/api/nodes${probeView() ? `?basis=${probeBasis}` : historyBasis !== 'local_proxy' ? `?basis=${historyBasis}` : ''}`];
+    const catalogs = await Promise.all(paths.map(path => api<NodeInfo[]>(path, { signal: controller.signal })));
+    if (controller.signal.aborted || nodesController !== controller || context !== directoryContext()) return;
+    nodeCatalog = catalogs.flat(); renderNodeCatalog();
+  } catch (error) {
+    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法更新节点目录。${errorText(error)}`); }
+  } finally {
+    if (nodesController === controller) nodesController = null;
+  }
+}
+async function refresh(force = false, auxiliary = false): Promise<void> {
+  if (expired || !ready || !range || document.hidden) return;
+  const status = auxiliary || !latestStatus ? refreshStatus() : Promise.resolve(latestStatus);
+  if (!statisticsVisible()) return;
+  // A period/filter change needs history only. Collector ticks update the directory independently.
+  if (!probeView()) void refreshNodes(auxiliary && !statisticsSource);
+  if (refreshController && !force) return;
   refreshController?.abort();
   const controller = new AbortController(); refreshController = controller;
   if (force) { detailPopover.close(); show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
   try {
-    let probeStatus: CollectorStatus | undefined;
     if (probeView()) {
-      probeStatus = await api<CollectorStatus>('/api/status', { signal: controller.signal });
+      const probeStatus = await status;
       if (controller.signal.aborted || refreshController !== controller) return;
-      renderStatus(probeStatus);
+      if (!probeStatus) { el('summary').setAttribute('aria-busy', 'false'); return; }
       if (!probeStatus.probes?.historyEnabled) {
         latestHistory = null; statisticLabels();
         for (const id of ['total-value', 'upload-value', 'download-value', 'node-count']) put(id, '—');
@@ -684,75 +863,64 @@ async function refresh(force = false): Promise<void> {
         for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
         detailPopover.finishRender();
         put('probe-coverage', '尚未启用探测历史；现有业务历史继续保留。');
-        put('quality-notice', '探测量未知，不能记为零。首次接入建立基线，不能追记此前探测流量。');
+        put('quality-notice', '探测量未知，不能记为零。首次接入仅记录累计起点，不能追记此前探测流量。');
         put('quality-summary', '探测历史未启用');
         put('attribution-note', '探测量与业务分别保存。当前实例未启用探测历史，不以业务量推算探测量。');
         el('chart').classList.add('empty');
         el('chart').append(element('p', '探测历史尚未启用，流量未知。'));
         el('chart').setAttribute('aria-label', '探测量未知');
-        show('gap-details', false); pagination(0);
+        hideGapDetails(); pagination(0);
         el('summary').setAttribute('aria-busy', 'false');
         el<HTMLButtonElement>('export-button').disabled = true;
-        put('refresh-note', '探测未启用 · 5 秒检查');
+        put('refresh-note', '探测未启用 · 2 秒检查');
         return;
       }
       el<HTMLButtonElement>('export-button').disabled = false;
+      void refreshNodes(auxiliary);
     }
     // Imported history changes only on an explicit operation, not each collector tick.
-    if (statisticsSource && (latestProvider || latestComparison) && !force) {
-      const status = await api<CollectorStatus>('/api/status', { signal: controller.signal });
-      if (!controller.signal.aborted && refreshController === controller) renderStatus(status);
-      return;
-    }
+    if (statisticsSource && (latestProvider || latestComparison) && !force) return;
     if (comparison) {
-      const [status, localNodes, providerNodes, local, provider] = await Promise.all([
-        api<CollectorStatus>('/api/status', { signal: controller.signal }),
-        api<NodeInfo[]>('/api/nodes', { signal: controller.signal }),
-        api<NodeInfo[]>(`/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}`, { signal: controller.signal }),
+      const [local, provider] = await Promise.all([
         api<HistoryResult>(`/api/history?${query(true)}`, { signal: controller.signal }),
         api<ProviderHistory>(`/api/provider/history?${query()}`, { signal: controller.signal })
       ]);
       if (controller.signal.aborted || refreshController !== controller) return;
-      renderStatus(status);
-      const names = [...new Set([...localNodes, ...providerNodes, ...(local.comparisonNodes ?? [])].map(node => node.name))].sort();
-      renderNodes(names.map(name => ({ key: name, name })));
       renderComparison(local, provider);
+      renderNodeCatalog();
       put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)} · 对照按操作刷新`);
       return;
     }
-    const results = await Promise.allSettled([
-      probeStatus ? Promise.resolve(probeStatus) : api<CollectorStatus>('/api/status', { signal: controller.signal }),
-      api<NodeInfo[]>(statisticsSource ? `/api/provider/nodes?source=${encodeURIComponent(statisticsSource)}` : `/api/nodes${probeView() ? `?basis=${probeBasis}` : ''}`, { signal: controller.signal }),
-      api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal })
-    ]);
+    const history = await api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal });
     if (controller.signal.aborted || refreshController !== controller) return;
-    const [status, nodes, history] = results;
-    if (status.status === 'fulfilled') renderStatus(status.value);
-    if (nodes.status === 'fulfilled') renderNodes(nodes.value);
-    if (history.status === 'fulfilled') {
-      if (statisticsSource) renderProviderHistory(history.value as ProviderHistory); else renderHistory(history.value as HistoryResult);
-      show('global-error', false);
-    }
-    for (const result of results) if (result.status === 'rejected') throw result.reason;
-    put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 5 秒'}`);
+    if (statisticsSource) renderProviderHistory(history as ProviderHistory); else renderHistory(history as HistoryResult);
+    show('global-error', false);
+    put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 30 秒'}`);
   } catch (error) {
-    if (!controller.signal.aborted && !expired) { fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '连接中断 · 自动重试'); }
+    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '更新失败 · 请重试'); }
   } finally {
-    if (refreshController === controller) { refreshController = null; if (!expired) refreshTimer = setTimeout(() => { void refresh(); }, 5000); }
+    updateFilterDisclosure();
+    if (refreshController === controller) { refreshController = null; el('summary').setAttribute('aria-busy', 'false'); }
   }
 }
 function navigate(view: string): void {
+  motion.cancel();
   detailPopover.close();
   const wasProbe = probeView();
   activeView = view;
+  updateHistoryBasisControl();
+  unit = pageUnits[probeView() ? 'probes' : 'overview'];
+  el<HTMLSelectElement>('unit').value = unit;
+  updateFilterDisclosure();
   for (const id of ['overview', 'settings', 'provider']) show(`${id}-view`, id === view || (id === 'overview' && probeView()));
   for (const nav of document.querySelectorAll<HTMLButtonElement>('.nav-item')) { const active = nav.dataset.view === view; nav.classList.toggle('active', active); if (active) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current'); }
   put('page-name', ({ overview: '流量统计', probes: '探测流量', settings: '采集与设置', provider: '导入记录' } as Record<string, string>)[view]);
   if (wasProbe !== probeView()) {
     chooseSource(probeView() ? '' : statisticsSource);
     el<HTMLButtonElement>('export-button').disabled = expired || !ready;
-    if (ready) void refresh(true);
   }
+  if (!statisticsVisible()) { refreshController?.abort(); refreshController = null; nodesController?.abort(); nodesController = null; }
+  if (ready) void refresh(true, true);
   if (view === 'provider' && ready) void loadBatches();
 }
 async function loadBatches(): Promise<void> {
@@ -772,7 +940,7 @@ function renderBatches(): void {
     view.addEventListener('click', async () => {
       try {
         await loadSources(); chooseSource(batch.source);
-        navigate('overview'); void refresh(true);
+        navigate('overview');
       } catch (error) { formResult('import-result', errorText(error), true); }
     });
     group.append(element('span', batch.source), view); source.append(group);
@@ -780,6 +948,7 @@ function renderBatches(): void {
   }
 }
 function chooseSource(source: string): void {
+  nodesController?.abort(); nodesController = null; nodesContext = ''; nodeCatalog = null;
   statisticsSource = source; el<HTMLSelectElement>('statistics-source').value = source;
   if (!source) comparison = false;
   el<HTMLInputElement>('compare-toggle').checked = comparison;
@@ -791,16 +960,20 @@ function chooseSource(source: string): void {
   select.value = bucket;
   nodeKey = ''; page = 0; latestHistory = null; latestProvider = null; latestComparison = null; statisticLabels();
   comparisonBucketPage = 0; comparisonBucketCount = 0;
+  comparisonNodePage = 0; comparisonNodeCount = 0;
+  put('comparison-node-page', '正在读取…');
+  el<HTMLButtonElement>('comparison-node-previous').disabled = true;
+  el<HTMLButtonElement>('comparison-node-next').disabled = true;
   put('comparison-bucket-page', '正在读取…');
   el<HTMLButtonElement>('comparison-bucket-previous').disabled = true;
   el<HTMLButtonElement>('comparison-bucket-next').disabled = true;
-  const allNodes = element('option', '全部节点'); allNodes.value = '';
+  const allNodes = element('option', aggregateHistory() ? '全部范围' : '全部节点'); allNodes.value = '';
   el<HTMLSelectElement>('node-filter').replaceChildren(allNodes);
   for (const id of ['total-value', 'total-exact', 'upload-value', 'upload-exact', 'download-value', 'download-exact', 'node-count']) put(id, '—');
   for (const id of ['records', 'ranking', 'chart']) el(id).replaceChildren();
   for (const id of ['comparison-nodes', 'comparison-buckets', 'comparison-chart', 'comparison-nodes-shares', 'comparison-buckets-shares']) el(id).replaceChildren();
   for (const id of ['local', 'raw', 'billed']) { put(`comparison-${id}`, '—'); put(`comparison-${id}-exact`, '正在读取…'); }
-  pagination(0); put('chart-scale', ''); show('gap-details', false);
+  pagination(0); put('chart-scale', ''); hideGapDetails();
   put('quality-notice', '正在读取所选来源…'); put('quality-summary', '正在读取所选来源…');
   if (probeView()) put('probe-coverage', '正在读取所选探测维度及节点的历史起点…');
 }
@@ -837,25 +1010,64 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')
 document.querySelector('.brand')?.addEventListener('click', event => { event.preventDefault(); navigate('overview'); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-period]')) button.addEventListener('click', () => selectPeriod(button.dataset.period as Period));
 el('custom-range').addEventListener('submit', event => { event.preventDefault(); selectRange(); });
+el('gap-details').addEventListener('toggle', renderGapDetails);
 el('previous-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, -1); selectRange(); } });
 el('next-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, 1); selectRange(); } });
 el('today-button').addEventListener('click', () => { anchor = dateInZone(new Date(), settings.timeZoneId); if (period === 'custom') selectPeriod('day'); else selectRange(); });
 el('node-filter').addEventListener('change', () => { nodeKey = el<HTMLSelectElement>('node-filter').value; page = 0; void refresh(true); });
 el('bucket').addEventListener('change', () => { bucket = el<HTMLSelectElement>('bucket').value as Bucket; page = 0; void refresh(true); });
-el('unit').addEventListener('change', () => { detailPopover.close(); unit = el<HTMLSelectElement>('unit').value as Unit; if (latestHistory) renderHistory(latestHistory); if (latestProvider) renderProviderHistory(latestProvider); if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider); if (latestStatus) renderStatus(latestStatus); renderBatches(); });
+el('unit').addEventListener('change', () => {
+  detailPopover.close();
+  unit = el<HTMLSelectElement>('unit').value as Unit;
+  const view = probeView() ? 'probes' : 'overview';
+  pageUnits[view] = unit;
+  try { localStorage.setItem(`v2rayn-monitor-unit-${view}`, unit); } catch { /* Session-only preference. */ }
+  if (latestHistory) renderHistory(latestHistory);
+  if (latestProvider) renderProviderHistory(latestProvider);
+  if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+  if (latestStatus) renderStatus(latestStatus);
+  renderBatches();
+});
 el('previous-page').addEventListener('click', () => { if (page > 0) { page--; void refresh(true); } });
 el('next-page').addEventListener('click', () => { if ((page + 1) * pageSize < (latestProvider?.recordCount ?? latestHistory?.recordCount ?? 0)) { page++; void refresh(true); } });
+el('filter-disclosure').addEventListener('click', () => {
+  const control = el('filter-disclosure');
+  motion.disclose(el('filter-extra'), control, control.getAttribute('aria-expanded') !== 'true');
+});
+function updateFilterDisclosure(): void {
+  const option = (id: string): string => el<HTMLSelectElement>(id).selectedOptions[0]?.textContent ?? '';
+  const dimension = !probeView() && !statisticsSource && historyBasis !== 'local_proxy' ? ` · ${historyBasisLabels[historyBasis]}` : '';
+  put('filter-disclosure', `更多筛选${dimension} · ${option('node-filter')} · ${option('bucket')} · ${unit}`);
+}
+for (const id of ['node-filter', 'bucket', 'unit']) el(id).addEventListener('change', updateFilterDisclosure);
 el('comparison-node-sort').addEventListener('change', () => {
-  if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+  comparisonNodePage = 0;
+  detailPopover.close();
+  motion.reorder(el('comparison-nodes'), () => {
+    if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+  });
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-comparison-mode]')) {
   button.addEventListener('click', () => {
     const section = button.dataset.comparisonSection === 'nodes' ? 'nodes' : 'buckets';
     comparisonModes[section] = button.dataset.comparisonMode === 'share' ? 'share' : 'list';
     detailPopover.close();
-    if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+    const panel = el(`comparison-${section}-list`).closest<HTMLElement>('.comparison-panel')!;
+    motion.crossfade(panel, () => {
+      if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
+    });
   });
 }
+function changeComparisonNodePage(offset: number): void {
+  const next = comparisonNodePage + offset;
+  if (!latestComparison || next < 0 || next * pageSize >= comparisonNodeCount) return;
+  comparisonNodePage = next;
+  detailPopover.close();
+  renderComparison(latestComparison.local, latestComparison.provider);
+  el('comparison-nodes-list').querySelector('.table-scroll')!.scrollTop = 0;
+}
+el('comparison-node-previous').addEventListener('click', () => changeComparisonNodePage(-1));
+el('comparison-node-next').addEventListener('click', () => changeComparisonNodePage(1));
 el('comparison-bucket-previous').addEventListener('click', () => {
   if (latestComparison && comparisonBucketPage > 0) { comparisonBucketPage--; renderComparison(latestComparison.local, latestComparison.provider); }
 });
@@ -870,8 +1082,15 @@ el('probe-basis').addEventListener('change', () => {
   probeBasis = el<HTMLSelectElement>('probe-basis').value;
   chooseSource(''); void refresh(true);
 });
+el('history-basis').addEventListener('change', () => {
+  const basis = el<HTMLSelectElement>('history-basis').value;
+  if (basis === historyBasis || !latestStatus?.historyBases?.includes(basis)) return;
+  historyBasis = basis;
+  chooseSource(''); void refresh(true);
+});
 el('provider-metric').addEventListener('change', () => {
   providerMetric = el<HTMLSelectElement>('provider-metric').value as 'raw' | 'billed';
+  comparisonNodePage = 0;
   if (latestProvider) renderProviderHistory(latestProvider);
   if (latestComparison) renderComparison(latestComparison.local, latestComparison.provider);
 });
@@ -884,8 +1103,10 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-ranking
       peer.classList.toggle('selected', selected);
       peer.setAttribute('aria-pressed', String(selected));
     }
-    if (latestHistory) renderHistory(latestHistory);
-    else if (latestProvider) renderProviderHistory(latestProvider);
+    motion.crossfade(el('ranking'), () => {
+      if (latestHistory) renderHistory(latestHistory);
+      else if (latestProvider) renderProviderHistory(latestProvider);
+    });
   });
 }
 el('compare-toggle').addEventListener('change', () => {
@@ -908,17 +1129,20 @@ el('settings-form').addEventListener('submit', async event => {
     dateInZone(new Date(), next.timeZoneId);
     await post('/api/settings', next); settings = next; anchor = dateInZone(new Date(), settings.timeZoneId);
     el<HTMLSelectElement>('import-zone').value = settings.timeZoneId; invalidateImport();
-    selectRange(); formResult('settings-result', '设置已保存。采集器会重新检查实例，首次有效采样先建立基线。');
+    updateRange(); page = 0; void refresh(true, true);
+    formResult('settings-result', '设置已保存，采集器将重新检查连接。');
   } catch (error) { formResult('settings-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('export-button').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('export-button'); button.disabled = true;
   try {
+    const fileBasis = !statisticsSource && !probeView() && historyBasis !== 'local_proxy' ? `-${historyBasis}` : '';
+    const filename = `v2rayN-${statisticsSource ? 'provider' : 'local'}${fileBasis}-${range.from}-${range.through}.csv`;
     const response = await fetch(`${statisticsSource ? '/api/provider/export' : '/api/export'}?${query()}`, { credentials: 'same-origin', cache: 'no-store', headers: { 'x-monitor-request': '1' } });
     if (response.status === 401 || response.status === 403) { expireSession(); return; }
     if (!response.ok) { const error = await response.json().catch(() => null) as { error?: string } | null; throw new Error(error?.error || `导出失败（${response.status}）。`); }
     const blob = await response.blob(), url = URL.createObjectURL(blob), link = element('a');
-    link.href = url; link.download = `v2rayN-${statisticsSource ? 'provider' : 'local'}-${range.from}-${range.through}.csv`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (error) { fail(errorText(error)); } finally { button.disabled = expired; }
 });
 for (const id of ['provider-source', 'import-zone', 'csv-file']) el(id).addEventListener('change', invalidateImport);
@@ -937,7 +1161,7 @@ el('import-form').addEventListener('submit', async event => {
     el('import-warnings').replaceChildren(...(preview.warnings || []).map(warning => element('li', warning)));
     show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate || preview.warnings.length > 0;
     formResult('import-result', preview.duplicate ? '全部记录已存在，不会重复记账。' : preview.warnings.length ?
-      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : '预览完成。相同来源按重复导出快照比较，保留文件内相同行的出现次数。请确认来源与时区后导入。');
+      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : '预览完成。请核对来源、时区和新增记录后确认导入。');
   } catch (error) { if (revision === importRevision) formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('commit-import').addEventListener('click', async () => {
@@ -947,17 +1171,18 @@ el('commit-import').addEventListener('click', async () => {
       const result = await post<ImportPreview>('/api/imports/commit', request); invalidateImport();
       formResult('import-result', `导入完成：新增 ${result.newRowCount.toLocaleString('zh-CN')} 条，跳过 ${result.skippedRowCount.toLocaleString('zh-CN')} 条。${result.duplicate ?
         '全部记录已存在，未新增批次。' : `新增原始量 ${exactBytes(result.newRawBytes)}，新增计费量 ${exactProviderBytes(result.newBilledBytes)}。已保存到独立服务商账本。`}可在统计来源中选择查看节点历史。`);
-      await loadBatches(); await loadSources(); if (statisticsSource === request.source.trim()) await refresh(true);
+      await loadBatches(); await loadSources();
+      if (statisticsSource === request.source.trim()) { nodesContext = ''; await refresh(true, true); }
     }
   catch (error) { formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('seed-demo').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('seed-demo'); button.disabled = true;
-  try { await post('/api/demo', {}); put('demo-result', '已生成合成记录，请回到本机总览查看。'); await refresh(true); }
+  try { await post('/api/demo', {}); put('demo-result', '已生成合成记录，可在「统计」页查看。'); nodesContext = ''; await refresh(true, true); }
   catch (error) { put('demo-result', errorText(error)); } finally { button.disabled = expired; }
 });
-window.addEventListener('pagehide', () => { refreshController?.abort(); if (refreshTimer) clearTimeout(refreshTimer); });
-window.addEventListener('pageshow', event => { if (event.persisted && !expired) void refresh(true); });
+window.addEventListener('pagehide', pauseRefresh);
+window.addEventListener('pageshow', event => { if (event.persisted && !expired) { scheduleRefresh(); void refresh(true, true); } });
 let resizePending = false;
 window.addEventListener('resize', () => {
   if (resizePending) return;
@@ -968,7 +1193,10 @@ window.addEventListener('resize', () => {
     else if (latestProvider) renderProviderHistory(latestProvider); else if (latestHistory) renderChart(latestHistory);
   });
 });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !expired && range) void refresh(true); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) pauseRefresh();
+  else if (!expired && range) { scheduleRefresh(); void refresh(true, true); }
+});
 
 async function start(): Promise<void> {
   // A launch credential is used once, kept out of storage, and removed before any async work.
@@ -987,7 +1215,7 @@ async function start(): Promise<void> {
     }
     ready = true; for (const id of writeControls) el<HTMLButtonElement>(id).disabled = false;
     anchor = dateInZone(new Date(), settings.timeZoneId); updateRange(); show('demo-notice', settings.demo); show('demo-controls', settings.demo);
-    await refresh(true);
+    scheduleRefresh(); await refresh(true, true);
     await loadSources();
     if (activeView === 'provider') await loadBatches();
   } catch (error) { if (!expired) fail(`无法连接本机采集器。${errorText(error)} 请确认托盘仍在运行，并从托盘重新打开页面。`); }
