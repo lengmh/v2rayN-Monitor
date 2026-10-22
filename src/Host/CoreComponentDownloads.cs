@@ -23,9 +23,47 @@ internal static class CoreComponentDownloads
     private const long MaxExpandedBytes = 512L * 1024 * 1024;
     private const string ReleasePrefix = "/lengmh/v2rayN-Monitor/releases/download/";
 
-    // No independent component assets have been published. Do not use full/extended bundles,
-    // latest, or a downloaded manifest as a substitute for a reviewed, shipped asset identity.
-    internal static CoreComponentAsset? PublishedAsset(string componentId) => null;
+    // Reviewed independent assets only. Never resolve "latest", full bundles or a remote manifest.
+    private const string ComponentRelease = "https://github.com/lengmh/v2rayN-Monitor/releases/download/v0.2.0-preview.2-components.1/";
+    internal static CoreComponentAsset? PublishedAsset(string componentId) => componentId switch
+    {
+        "sing-box-statistics" => new(new(ComponentRelease +
+            "v2rayn-monitor-component-sing-box-statistics-1.14.1-monitor-test.5-windows-x64.zip"),
+            30342198, "e3d9ea251c794b404499c08bc6407e2da77bbe6bac28b02880a10eb2bc991066",
+            Array.AsReadOnly(new CoreAssetFile[]
+            {
+                new("COPYING", 35149, "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"),
+                new("LICENSE", 791, "650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c"),
+                new("NOTICE.txt", 791, "650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c"),
+                new("README.md", 10806, "b158fb5169ede7e7a4099168a334003a04da69de80bf37ecb557342f541a0f96"),
+                new("build-ci.ps1", 5311, "99b4ff16ebe32374fa8aec928888522b7007b6dba44dc48ee370ac1a8ddfdd59"),
+                new("build-provenance.json", 1813, "dfb75227d6ac737a0b193bb5d062f8d9844586368f840dc7a046efde5473f031"),
+                new("component.json", 519, "aaed2bc4c3f84501fc0aad973021612928088997ea85c5634e58ec343d7fc884"),
+                new("member-sidecar.patch", 3699, "83a9d155cedda96195090eff7eced8767215baf1f184cbdb4da692d48cc9a205"),
+                new("member-stats.patch", 18942, "d63aaf45f78214481195c3599278e540b65d29ec0562a2cb10138603591b62a5"),
+                new("monitor.patch", 6009, "741eb4b643e5e501d072bc22525766352c2ec1b553b9caf2f9edfbde2bdf4877"),
+                new("probe-stats.patch", 9593, "3f6c83e829dcbc3ec0f2f3ccf7c5aaa7511dac94ba00a2d1894a2540ae70bb5e"),
+                new("sing-box-client.exe", 81990144, "595b4b3fede70fc23ca645dcf7b5a4ab6f91e5e7938db0ca77d50eb0f8376695"),
+                new("sing-box-fixed-source.tar.gz", 1982381, "8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537")
+            })),
+        "xray-probes" => new(new(ComponentRelease +
+            "v2rayn-monitor-component-xray-probes-26.7.28-monitor-test.1-windows-x64.zip"),
+            13218492, "5b71cc923bc64de44bf6f82a92ab5cad944bad8ef0dc68a3f8316fec4514400c",
+            Array.AsReadOnly(new CoreAssetFile[]
+            {
+                new("LICENSE", 16725, "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"),
+                new("README.md", 2891, "f65264b909d8e30577f912fcf4829fdbdd4c45b501670c0764f809491a5b55d7"),
+                new("build-ci.ps1", 5297, "569c832b93a235d3287172d9e9b10ec2d2077f86535c156b4b45bd5ff355ac60"),
+                new("component.json", 492, "8807b966b7931017b0985b409331a493c36f7d33b47381f3cb3b9949436c414b"),
+                new("probe-stats.go", 4491, "a16a9d0d8cfba37c551522f76d384c0adf142a498595dd4175e77ab9f0639d87"),
+                new("probe-stats.patch", 927, "cfd5003e20bc2d05ee58cb8c39e85bad6168d20a139891ffef13472e6a40bcf7"),
+                new("probe-stats_test.go", 3986, "512eca4d4b71e6ed8341ffa747046b106c3dd0168e2e07c078a8eb420ea7ffee"),
+                new("provenance.json", 1153, "2788e7dee2e411e2addd34843c7651b5fbe577dc40ce4a31fc1c5a89a33dcb7a"),
+                new("xray-fixed-source.tar.gz", 932611, "45de3ead5186fea442b04c662c554a1ffd1d7bd9093a83410f2edabe74fb766e"),
+                new("xray.exe", 32780800, "fafb97663a3d7f2831b86409d8bc949394103c987e0d36c889bc6a6e4f20fa8e")
+            })),
+        _ => null
+    };
 
     internal static Task<CorePreparation> PrepareAsync(string componentId, string? existingFile,
         string clientVersion, string targetRuntime, CancellationToken cancellationToken, IWebProxy? proxy = null)
