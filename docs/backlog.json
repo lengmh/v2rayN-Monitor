@@ -11,10 +11,10 @@
     "issue": 23,
     "status": "in_progress",
     "branch": "feat/issue23-ui-polish-v2",
-    "scope": "PR #30 采集状态栏同行排版及统计/设置/CSV导入文案精简，仅展示层",
+    "scope": "PR30补齐既有UI与零等待诊断修正；策略组/速率/历史入口留独立分支，不改实机",
     "implementation_status": "complete",
-    "remaining": "用户已验收本批UI排版和文案。本批隔离构建、前端92项检查（88项首轮及4项定向复测）、最终状态相关8项、浏览器34项及终版2项通过；桌面/手机截图已目视。尚未commit/push/新CI/启用，策略组切换验收另续。普通月/年延迟仍保留，四个性能原型均不采用，派生汇总范围待确认；多范围速率、完整维度入口、受控切换/核心生命周期保留，PR30保持Draft",
-    "resume_requirement": "HEAD仍1203170，保留10月20接入/零值记录和10月21性能对照结论；工作区为三份状态文档及五份前端/现有测试文件。本批UI已获用户验收，不重复索要同范围确认。UI证据仅TempFiles/v2rayn-monitor-pr30-ui-copy-20261021，未改采集/查询/刷新频率/依赖/CI/Schema/真实账本，实际运行包未操作。按具体范围提交、核对CI和接入，新包启用前提醒；性能派生汇总和真实迁移另按范围授权，PR35最后处理，PR33不合并"
+    "remaining": "保留ea8a322原UI提交，仅提取1295f4e的ScopeLedger零等待诊断修正；隔离Core431/Server43/前端92/浏览器34、Release零警告零错误及计划/diff通过；精确Push/PR CI推送后另核，再做独立规范/需求审查，PR仍Draft。原0993a4b及采集/速率/文案/历史入口验收复用；不是本PR独立包启用证据。S5.6剩余受控轮换/旧长连接/生命周期仍待窗口，不因本次PR整合关闭；策略组分支后续17提交不整体塞入PR30。",
+    "resume_requirement": "先核对本分支准确HEAD、远端PR30 head/base及本批精确CI，保留原提交、不强推。主工作区的策略组分支起点20b5b63；本批在TempFiles/v2rayn-monitor-pr30-integration-20261022/candidate-pr30隔离处理。CI完成后独立审查；必要整合再同步策略组分支，避免重复补丁，独立PR创建/合并按具体范围授权。不启用本批包，不操作真实数据/客户端/核心/路由或启动项，不要求退出Monitor；PR35最后，PR33不合并。"
   },
   "capability_levels": [
     {
