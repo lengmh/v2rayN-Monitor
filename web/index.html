@@ -75,6 +75,20 @@
           <div class="page-heading"><div><h1>采集与设置</h1><p class="subtitle">设置采集目录和统计时区。</p></div></div>
           <div class="settings-workspace"><section class="panel settings-panel"><h2>v2rayN 实例</h2><form id="settings-form"><label for="v2rayn-path">v2rayN 数据根目录</label><input id="v2rayn-path" type="text" placeholder="C:\Apps\v2rayN" autocomplete="off" spellcheck="false"><p class="field-help">选择包含 guiConfigs 和 binConfigs 的数据根目录，通常在程序旁或用户目录。只读采集，不修改配置、重启内核或清零统计。</p><label for="time-zone">统计时区</label><select id="time-zone"></select><p class="field-help">按此时区划分日期及解释 CSV 时间，周区间从周一开始；原始时间以 UTC 保存。</p><button type="submit" id="save-settings" class="button">保存设置</button><p id="settings-result" role="status" class="form-result"></p></form></section><section class="panel settings-panel"><h2>首次连接</h2><ol class="setup-list"><li>使用兼容的 v2rayN；sing-box 成员统计及两种核心的独立探测计量均需配套核心。</li><li>在 v2rayN 开启流量统计或实时速度显示，并应用配置。</li><li>保存数据根目录，保持 v2rayN 和 Monitor 托盘运行。</li><li>首次采样仅记录当前累计值，之后记录新增流量，不追记接入前的流量。</li></ol><div class="notice quality">Xray 支持已核实的独立代理出站和策略组实际出站。配套扩展可单独记录 sing-box URLTest 与 Xray Observatory 探测；未覆盖流量保持未知。实际范围见下方采集详情。</div><p id="settings-collector-status" class="muted"></p></section></div>
 
+          <section id="core-capabilities-panel" class="panel settings-panel" aria-labelledby="core-capabilities-heading">
+            <h2 id="core-capabilities-heading">配套核心与账本</h2>
+            <p class="field-help">只读检查已保存目录中的配套核心文件，不下载、安装或修改配置。</p>
+            <button id="check-core-capabilities" type="button" class="button secondary" disabled="">检查配套核心</button>
+            <p id="core-capabilities-result" class="form-result" role="status">尚未检查。点击后读取文件摘要及当前状态。</p>
+            <div id="core-capabilities-details" hidden="">
+              <p id="core-target" class="field-help"></p>
+              <ul id="core-components" class="core-components"></ul>
+              <p id="core-ledger" class="field-help"></p>
+              <p id="core-collector" class="field-help"></p>
+              <p id="core-probe" class="field-help"></p>
+            </div>
+            <p class="field-help">文件摘要一致仅代表本次文件身份匹配；运行核心及统计接口的独立核验尚未接入。账本模式与采集状态分别展示，升级账本须停止采集后离线执行，并另行确认；此处不会迁移或切换启动模式。</p>
+          </section>
           <section id="demo-controls" class="panel settings-panel" hidden=""><h2>合成演示数据</h2><p class="field-help">仅演示模式可用，生成的数据不代表实际用量。</p><button id="seed-demo" class="button secondary">生成演示记录</button><p id="demo-result" role="status"></p></section>
         </section>
         <section id="provider-view" class="view" hidden="" aria-label="导入页面">

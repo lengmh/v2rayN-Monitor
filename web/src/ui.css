@@ -198,6 +198,11 @@ tbody tr:hover { background: var(--hover); }
 .settings-panel input:not([type="file"]), .settings-panel select { width: 100%; min-height: 36px; font-size: 12px; }
 .settings-panel input[type="file"] { width: 100%; min-width: 0; font-size: 11px; padding: 8px; }
 .settings-panel .field-help { margin-bottom: 8px; }
+.core-components { list-style: none; padding: 0; margin: 8px 0 16px; font-size: 12px; overflow-wrap: anywhere; }
+.core-components li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.core-components p { margin-top: 4px; }
+#core-capabilities-result { margin: 8px 0; color: var(--muted); }
+#core-capabilities-result.error { color: var(--error); }
 .setup-list { padding-left: 20px; font-size: 12px; color: var(--muted); line-height: 2.2; margin: 0 0 16px; }
 .import-help { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; }
 .import-help summary { font-size: 11px; cursor: pointer; color: var(--muted); }

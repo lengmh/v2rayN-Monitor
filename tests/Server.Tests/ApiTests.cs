@@ -24,6 +24,125 @@ public sealed class ApiTests : IAsyncLifetime
         var response = await client.PostAsJsonAsync("/api/session", new { token });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
+    private async Task StartCapabilityServer(Func<string, CancellationToken, Task<V2rayNMonitor.Core.CoreCapabilityInspection>> inspect,
+        int version = 1, bool demo = false)
+    {
+        await server.DisposeAsync(); client.Dispose();
+        if (version > 1) V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "capability-v1.db"));
+        if (version == 3) V2rayNMonitor.Core.ScopeLedgerMigration.MigrateProbes(Path.Combine(root, "history.db"), Path.Combine(root, "capability-v2.db"));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), demo: demo,
+            useScopeLedger: version > 1, useProbeLedger: version == 3, inspectCoreCapabilities: inspect);
+        server.UpdateSettings(server.Settings with { V2rayNPath = root });
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+    }
+    private static V2rayNMonitor.Core.CoreCapabilityInspection SyntheticCapability() => new("identified",
+        [new("sing-box-statistics", "Synthetic component", "Synthetic version", "identity_matched", "asset_unavailable", "Synthetic license")]);
+
+    [Fact]
+    public async Task CapabilityEndpointUsesExistingAuthenticationAndAcceptsNoPathsOrWrites()
+    {
+        var calls = 0;
+        await StartCapabilityServer((path, token) =>
+        {
+            calls++; Assert.Equal(root, path); Assert.True(token.CanBeCanceled);
+            return Task.FromResult(SyntheticCapability());
+        });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/core-capabilities")).StatusCode);
+        await Login();
+        using var foreign = new HttpRequestMessage(HttpMethod.Get, "/api/core-capabilities");
+        foreign.Headers.Add("Origin", "https://synthetic.invalid");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(foreign)).StatusCode);
+        using var host = new HttpRequestMessage(HttpMethod.Get, "/api/core-capabilities");
+        host.Headers.Host = "synthetic.invalid";
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(host)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/core-capabilities?path=untrusted")).StatusCode);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, (await client.PostAsJsonAsync("/api/core-capabilities", new { path = "untrusted" })).StatusCode);
+        Assert.Equal(0, calls);
+        byte[] ReadHistory()
+        {
+            using var input = new FileStream(Path.Combine(root, "history.db"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var bytes = new MemoryStream();
+            input.CopyTo(bytes);
+            return bytes.ToArray();
+        }
+        var historyBefore = ReadHistory();
+        var response = await client.GetAsync("/api/core-capabilities");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl!.NoStore);
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(root, text);
+        Assert.Equal(1, calls);
+        Assert.Equal(historyBefore, ReadHistory());
+    }
+
+    [Theory]
+    [InlineData(1, "")]
+    [InlineData(2, "--scope-ledger")]
+    [InlineData(3, "--probe-ledger")]
+    public async Task CapabilityEndpointSeparatesLedgerAndCollectorFromFileIdentity(int version, string mode)
+    {
+        await StartCapabilityServer((_, _) => Task.FromResult(SyntheticCapability()), version);
+        await Login();
+        var result = await client.GetFromJsonAsync<V2rayNMonitor.Core.CoreCapabilitiesResponse>("/api/core-capabilities");
+        Assert.Equal(version, result!.LedgerVersion);
+        Assert.Equal(mode, result.StartupMode);
+        Assert.Equal("setup", result.CollectorState);
+        Assert.Null(result.LastSample);
+        Assert.Equal("identity_matched", Assert.Single(result.Components).FileState);
+    }
+
+    [Fact]
+    public async Task CapabilityEndpointRejectsConcurrentAndStaleReadsThenAllowsRetry()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await StartCapabilityServer(async (_, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return SyntheticCapability();
+        });
+        await Login();
+        var pending = client.GetAsync("/api/core-capabilities");
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            Assert.Equal(HttpStatusCode.Conflict, (await client.GetAsync("/api/core-capabilities")).StatusCode);
+            var settings = server.Settings;
+            server.UpdateSettings(settings with { V2rayNPath = "" });
+            server.UpdateSettings(settings); // An ABA change must still invalidate the in-flight read.
+        }
+        finally { release.TrySetResult(); }
+        Assert.Equal(HttpStatusCode.Conflict, (await pending).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/core-capabilities")).StatusCode);
+    }
+
+    [Fact]
+    public async Task CapabilityEndpointReleasesItsGateAfterFailureWithoutLeakingPaths()
+    {
+        var calls = 0;
+        await StartCapabilityServer((_, _) =>
+        {
+            if (++calls == 1) throw new IOException("Private path: " + root);
+            return Task.FromResult(SyntheticCapability());
+        });
+        await Login();
+        var failed = await client.GetAsync("/api/core-capabilities");
+        Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+        Assert.DoesNotContain(root, await failed.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/core-capabilities")).StatusCode);
+    }
+
+    [Fact]
+    public async Task CapabilityEndpointDoesNotInspectRealTargetsInDemoMode()
+    {
+        await StartCapabilityServer((_, _) => throw new InvalidOperationException("Must not inspect"), demo: true);
+        await Login();
+        var result = await client.GetFromJsonAsync<V2rayNMonitor.Core.CoreCapabilitiesResponse>("/api/core-capabilities");
+        Assert.Equal("demo", result!.TargetState);
+        Assert.Empty(result.Components);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

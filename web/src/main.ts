@@ -12,7 +12,7 @@ import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProv
 import type { Unit } from './lib/format.ts';
 import { dateInZone, dateRange, periodRange, shiftAnchor, timestamp } from './lib/ranges.ts';
 import type { Bucket, Period, Range } from './lib/ranges.ts';
-import type { CollectorStatus, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings, ProviderHistory, TrafficDisplay } from './types.ts';
+import type { CollectorStatus, CoreCapabilities, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings, ProviderHistory, TrafficDisplay } from './types.ts';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -46,7 +46,7 @@ function discloseGroups(button: HTMLButtonElement, groups: string[], key: string
 class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
 let expired = false;
 let ready = false;
-const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo'];
+const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo', 'check-core-capabilities'];
 for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 let refreshController: AbortController | null = null;
 let statusController: AbortController | null = null;
@@ -57,6 +57,9 @@ let nodeCatalog: NodeInfo[] | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let settings: Settings = { v2rayNPath: '', timeZoneId: 'UTC', demo: false };
+let savingSettings = false;
+let coreCapabilitiesRevision = 0;
+let coreCapabilitiesController: AbortController | null = null;
 let period: Period = 'month';
 let anchor = dateInZone(new Date(), 'UTC');
 let range: Range;
@@ -104,10 +107,11 @@ function expireSession(): void {
   expired = true; pauseRefresh();
   show('session-alert', true); put('refresh-note', '会话已失效');
   for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
+  invalidateCoreCapabilities('本机会话已失效，请从托盘重新打开页面。');
 }
-async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function api<T>(path: string, options: RequestInit = {}, timeoutMs = 12000): Promise<T> {
   if (expired) throw new ApiError('请从托盘重新打开页面。', 401);
-  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000);
+  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
   const response = await fetch(path, { ...options, signal, credentials: 'same-origin', cache: 'no-store', headers: { 'x-monitor-request': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
   if (response.status === 401 || response.status === 403) { expireSession(); throw new ApiError('本机会话已失效，请从托盘重新打开页面。', response.status); }
   if (!response.ok) {
@@ -120,6 +124,80 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 const post = <T>(path: string, body: unknown): Promise<T> => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
 const errorText = (error: unknown): string => error instanceof Error ? error.message : '操作失败，请检查本机采集器。';
+function coreDirectoryChanged(): boolean {
+  return el<HTMLInputElement>('v2rayn-path').value.trim() !== settings.v2rayNPath.trim();
+}
+function updateCoreCheckButton(): void {
+  el<HTMLButtonElement>('check-core-capabilities').disabled =
+    !ready || expired || savingSettings || coreCapabilitiesController !== null || coreDirectoryChanged();
+}
+function invalidateCoreCapabilities(message?: string): void {
+  coreCapabilitiesRevision++;
+  coreCapabilitiesController?.abort(); coreCapabilitiesController = null;
+  el('core-capabilities-panel').setAttribute('aria-busy', 'false');
+  show('core-capabilities-details', false);
+  for (const id of ['core-target', 'core-components', 'core-ledger', 'core-collector', 'core-probe']) el(id).replaceChildren();
+  formResult('core-capabilities-result', message ?? (coreDirectoryChanged()
+    ? '目录已修改，请先保存设置再检查。' : '尚未检查。点击后读取文件摘要及当前状态。'));
+  updateCoreCheckButton();
+}
+function renderCoreCapabilities(result: CoreCapabilities): void {
+  const targets: Record<string, string> = {
+    identified: '已识别支持的目标目录', not_selected: '未选择数据根目录', unknown_target: '目录身份尚未核实',
+    unsupported_target: '当前目标不受支持', unavailable: '暂时无法核实目标', demo: '合成演示模式：不检查本机核心文件'
+  };
+  const files: Record<string, string> = {
+    identity_matched: '文件摘要一致', missing: '文件缺失', digest_mismatch: '文件摘要不符',
+    size_mismatch: '文件大小不符', unreadable: '文件不可读', not_checked: '未检查'
+  };
+  put('core-target', targets[result.targetState] ?? '目标状态未知');
+  el('core-components').replaceChildren(...result.components.map(component => {
+    const item = element('li');
+    item.append(element('strong', `${component.name} · ${component.version}`),
+      element('p', `文件：${files[component.fileState] ?? '文件状态未知'} · 下载：${component.downloadState === 'asset_unavailable' ? '独立组件尚未发布' : '状态未知'} · 许可：${component.license}`, 'muted'));
+    if (component.id === 'xray-probes')
+      item.append(element('p', '仅用于可选的独立探测计量；文件不匹配不影响原生 Xray 普通统计，无需为普通统计替换核心。', 'muted'));
+    return item;
+  }));
+  const modes: Record<string, string> = { '': '默认入口', default: '默认入口', '--scope-ledger': '--scope-ledger', '--probe-ledger': '--probe-ledger' };
+  put('core-ledger', `账本模式：${[1, 2, 3].includes(result.ledgerVersion) ? `v${result.ledgerVersion}` : '版本未知'} · 启动模式：${modes[result.startupMode] ?? '未知'}`);
+  const collectors: Record<string, string> = {
+    collecting: '正在采集', connected: '正在采集', running: '正在采集', ready: '已连接', baseline: '正在采样',
+    reset: '正在采样', duplicate: '等待新采样', stale: '等待新采样', partial: '部分采集',
+    collector_stopped: '采集已停止', disconnected: '等待连接', waiting: '等待采样', unconfigured: '等待设置目录',
+    setup: '等待设置目录', needs_directory: '等待设置目录', core_not_running: '等待核心运行',
+    unsupported: '当前模式不支持', error: '采集暂不可用', unavailable: '暂时无法读取', demo: '合成演示模式'
+  };
+  const bases: Record<string, string> = { ...historyBasisLabels, routed_proxy: '路由匹配 proxy', xray_outbound_proxy: 'Xray proxy 出站', xray_outbound_members: 'Xray 代理出站成员' };
+  put('core-collector', `采集状态快照：${collectors[result.collectorState] ?? '状态未知'} · 口径：${bases[result.collectionBasis] ?? '未知'} · 最近采样：${result.lastSample ? timestamp(result.lastSample, settings.timeZoneId) : '尚无有效采样'}`);
+  const probes: Record<string, string> = { disabled: '探测历史未启用', waiting: '等待探测采样', unavailable: '探测计数暂不可用', unsupported: '当前核心未支持探测计量', partial: '探测部分采集', available: '探测计数可用', demo: '合成演示模式' };
+  put('core-probe', `独立探测：${probes[result.probeState] ?? '状态未知'}`);
+  show('core-capabilities-details', true);
+}
+async function checkCoreCapabilities(): Promise<void> {
+  if (!ready || expired || savingSettings || coreCapabilitiesController || coreDirectoryChanged()) return;
+  const revision = coreCapabilitiesRevision, controller = new AbortController();
+  coreCapabilitiesController = controller; updateCoreCheckButton();
+  el('core-capabilities-panel').setAttribute('aria-busy', 'true');
+  show('core-capabilities-details', false);
+  formResult('core-capabilities-result', '正在只读检查配套核心…');
+  try {
+    const result = await api<CoreCapabilities>('/api/core-capabilities', { signal: controller.signal }, 35000);
+    if (revision !== coreCapabilitiesRevision || expired || coreDirectoryChanged()) return;
+    renderCoreCapabilities(result);
+    formResult('core-capabilities-result', result.targetState === 'identified'
+      ? '已读取本次文件身份与状态快照。' : '已读取状态；未核实配套核心文件身份。');
+  } catch (error) {
+    if (revision === coreCapabilitiesRevision && !expired)
+      formResult('core-capabilities-result', `检查失败。${errorText(error)} 可点击「检查配套核心」重试。`, true);
+  } finally {
+    if (coreCapabilitiesController === controller) {
+      coreCapabilitiesController = null;
+      el('core-capabilities-panel').setAttribute('aria-busy', 'false');
+      updateCoreCheckButton();
+    }
+  }
+}
 function updateHistoryBasisControl(): void {
   const available = latestStatus?.historyBases ?? ['local_proxy'];
   const bases = Object.keys(historyBasisLabels).filter(basis => available.includes(basis));
@@ -1121,8 +1199,11 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-exact]'
   button.addEventListener('pointerenter', () => { button.title = el(button.dataset.exact!).textContent ?? ''; });
   button.addEventListener('click', () => showExactValue(el(button.dataset.exact!).textContent ?? ''));
 }
+el('check-core-capabilities').addEventListener('click', () => { void checkCoreCapabilities(); });
+for (const event of ['input', 'change']) el('v2rayn-path').addEventListener(event, () => invalidateCoreCapabilities());
 el('settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const button = el<HTMLButtonElement>('save-settings'); button.disabled = true; formResult('settings-result', '正在保存…');
+  savingSettings = true; invalidateCoreCapabilities('正在保存设置，保存后请重新检查配套核心。');
   try {
     const next = { ...settings, v2rayNPath: el<HTMLInputElement>('v2rayn-path').value.trim(), timeZoneId: el<HTMLSelectElement>('time-zone').value };
     // Validate that the chosen IANA timezone can be interpreted before persisting it.
@@ -1131,7 +1212,10 @@ el('settings-form').addEventListener('submit', async event => {
     el<HTMLSelectElement>('import-zone').value = settings.timeZoneId; invalidateImport();
     updateRange(); page = 0; void refresh(true, true);
     formResult('settings-result', '设置已保存，采集器将重新检查连接。');
-  } catch (error) { formResult('settings-result', errorText(error), true); } finally { button.disabled = expired; }
+  } catch (error) { formResult('settings-result', errorText(error), true); } finally {
+    savingSettings = false; button.disabled = expired;
+    if (!expired) invalidateCoreCapabilities();
+  }
 });
 el('export-button').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('export-button'); button.disabled = true;
