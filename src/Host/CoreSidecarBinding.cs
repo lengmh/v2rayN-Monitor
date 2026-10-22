@@ -30,8 +30,8 @@ internal sealed class CoreSidecarBinding(CoreComponent approvedCore, XraySnapsho
             var root = Path.GetDirectoryName(Path.GetDirectoryName(coreDirectory)!)!;
             if (baseline.InstanceId != XrayParser.Hash(root.ToUpperInvariant()))
                 throw new CoreComponentInstaller.Rejected(CoreInstallState.PlanChanged);
-            var core = lease.Open(Path.Combine(coreDirectory, approvedCore.FileName),
-                exclusiveCore ? FileShare.None : FileShare.Read);
+            var corePath = Path.Combine(coreDirectory, approvedCore.FileName);
+            var core = lease.Open(corePath);
             if ((await CoreComponents.VerifyStreamAsync(approvedCore, core, token)).State != CoreFileState.IdentityMatched)
                 throw new CoreComponentInstaller.Rejected(CoreInstallState.InvalidCandidate);
             var config = Read(lease.Open(Path.Combine(root, "binConfigs", "config.json")), 4 * 1024 * 1024);
@@ -62,6 +62,19 @@ internal sealed class CoreSidecarBinding(CoreComponent approvedCore, XraySnapsho
                 CoreComponentInstaller.PlainPath(file.Name, directory: false);
                 var identity = await CoreComponentInstaller.IdentifyAsync(file, token);
                 if (!await CoreComponentInstaller.SameFileAtPathAsync(file, file.Name, identity, token))
+                    throw new CoreComponentInstaller.Rejected(CoreInstallState.PlanChanged);
+            }
+            if (exclusiveCore)
+            {
+                // Unix's path comparison reopens the file and would conflict with our own flock.
+                // Take the exclusive lease last, then verify the approved bytes again through it.
+                lease.Files.Remove(core);
+                core.Dispose();
+                core = lease.Open(corePath, FileShare.None);
+                if ((await CoreComponents.VerifyStreamAsync(approvedCore, core, token)).State != CoreFileState.IdentityMatched)
+                    throw new CoreComponentInstaller.Rejected(CoreInstallState.InvalidCandidate);
+                if (OperatingSystem.IsWindows() && !await CoreComponentInstaller.SameFileAtPathAsync(core, corePath,
+                    new(core.Length, approvedCore.Sha256), token))
                     throw new CoreComponentInstaller.Rejected(CoreInstallState.PlanChanged);
             }
             return lease;
