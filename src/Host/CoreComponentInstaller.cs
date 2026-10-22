@@ -11,7 +11,7 @@ internal sealed record CoreInstallObservation(string ClientPath, string DataRoot
     string ClientVersion, string Runtime, IReadOnlyList<ProcessInfo> Processes, bool Complete = true);
 internal sealed record CoreFileIdentity(long Bytes, string Sha256);
 internal sealed record CoreInstallPlan(string CandidatePath, string TargetPath, int ClientPid,
-    DateTimeOffset ClientStartedAt, CoreFileIdentity Client, CoreFileIdentity? Previous);
+    DateTimeOffset ClientStartedAt, CoreFileIdentity Client, CoreFileIdentity? Previous, Guid OperationId);
 internal enum CoreInstallState
 {
     Ready, AlreadyMatched, InstalledPendingReload, Restored, AlreadyRestored, FailedRestored,
@@ -76,7 +76,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
                 return new(CoreInstallState.InvalidCandidate);
             using var port = sidecar?.ReservePort(sidecar.Confirmed.Json);
             return new(CoreInstallState.Ready, new(Path.GetFullPath(candidatePath), target.Path,
-                target.Client.Pid, target.Client.StartedAt!.Value, target.ClientFile, identity));
+                target.Client.Pid, target.Client.StartedAt!.Value, target.ClientFile, identity, Guid.NewGuid()));
         }
         catch (Exception e) when (Expected(e)) { return new(Failure(e)); }
     }
@@ -107,8 +107,8 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
                 65536, FileOptions.Asynchronous | FileOptions.SequentialScan);
             if ((await CoreComponents.VerifyStreamAsync(component, candidate, token)).State != CoreFileState.IdentityMatched)
                 throw new Rejected(CoreInstallState.InvalidCandidate);
-            operation = Guid.NewGuid();
-            var folder = CreateBackup(target.Path, operation.Value);
+            var folder = CreateBackup(target.Path, plan.OperationId);
+            operation = plan.OperationId;
             journal = new(operation.Value, component.Id, component.Version, target.ClientFile,
                 new(candidate.Length, component.Sha256.ToUpperInvariant()), old, "Preparing");
             WriteJournal(target.Path, journal);
@@ -397,7 +397,8 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         a.Client.Pid == b.Client.Pid && a.Client.StartedAt == b.Client.StartedAt && a.ClientFile == b.ClientFile;
     private static void RequirePlan(CoreInstallPlan plan, Target target)
     {
-        if (!ProcessBinding.SamePath(plan.TargetPath, target.Path) || plan.ClientPid != target.Client.Pid ||
+        if (plan.OperationId == Guid.Empty ||
+            !ProcessBinding.SamePath(plan.TargetPath, target.Path) || plan.ClientPid != target.Client.Pid ||
             plan.ClientStartedAt != target.Client.StartedAt || plan.Client != target.ClientFile)
             throw new Rejected(CoreInstallState.PlanChanged);
     }

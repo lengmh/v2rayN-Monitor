@@ -54,7 +54,7 @@ internal sealed class CoreComponentActions(
                 var prompt = new CoreActionPrompt("确认替换配套核心",
                     $"组件：{component.Id} · {component.Version}\n目标：{plan.TargetPath}\n" +
                     $"原文件：{plan.Previous?.Sha256 ?? "不存在"}\n新文件：{component.Sha256}\n" +
-                    $"新备份位置：{BackupDirectory(plan.TargetPath)}\\<新操作编号>\n\n" +
+                    $"操作编号：{plan.OperationId:N}\n新备份位置：{BackupDirectory(plan.TargetPath, plan.OperationId)}\n\n" +
                     "仅替换此核心文件，不写 sidecar、配置、账本或启动项。目标核心必须已停止；程序不会自动停止或重载代理。\n" +
                     (component.Id == "xray-probes" ? "这是可选实验探测核心，不承诺与原定制核心等价；普通 Xray 统计无需替换。\n" : "") +
                     "确认后将重新核对目标与文件。完成后请在 v2rayN 中手动重载，再核验实际接口。");
@@ -71,6 +71,7 @@ internal sealed class CoreComponentActions(
             var restorePrompt = new CoreActionPrompt("确认恢复原核心文件",
                 $"组件：{component.Id}\n目标：{restored.TargetPath}\n操作编号：{operation:N}\n" +
                 $"备份：{BackupDirectory(restored.TargetPath, operation)}\n" +
+                $"当前文件摘要：{journal.Installed.Sha256}\n" +
                 $"将恢复：{journal.Previous?.Sha256 ?? "原文件不存在的状态"}\n\n" +
                 "只恢复该操作的核心文件，保留备份，不回退账本或设置。目标核心必须已停止；不会自动停止或重载代理。\n" +
                 "若当前文件或备份已变化，将拒绝恢复。恢复后请手动重载并核验实际接口。");
