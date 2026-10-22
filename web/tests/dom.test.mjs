@@ -7,10 +7,17 @@ const asset = (await readdir(new URL('../dist/assets/', import.meta.url))).find(
 const script = await readFile(new URL(`../dist/assets/${asset}`, import.meta.url), 'utf8');
 const history = { upload: '1073741824', download: '15032385536', unallocatedUpload: '0', unallocatedDownload: '0', gapCount: 0, series: [{ label: '2026-10-09', upload: '1073741824', download: '15032385536' }], nodes: [{ key: 'a', name: 'Synthetic A', upload: '1073741824', download: '15032385536' }], records: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', nodeKey: 'a', nodeName: 'Synthetic A', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51 };
 async function until(condition, timeout = 1000) { for (let i = 0; i < timeout / 5; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
-async function fixture(t, overrides = {}, savedUnits = {}) {
+async function fixture(t, overrides = {}, savedUnits = {}, timers = null) {
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4173/#synthetic-once', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const w = dom.window, calls = [], errors = [];
+  if (timers) {
+    const originalTimeout = w.setTimeout.bind(w);
+    w.setTimeout = (callback, delay, ...args) => {
+      if (delay === 2000 || delay === 30000) { timers.set(delay, () => callback(...args)); return 0; }
+      return originalTimeout(callback, delay, ...args);
+    };
+  }
   for (const [view, unit] of Object.entries(savedUnits)) w.localStorage.setItem(`v2rayn-monitor-unit-${view}`, unit);
   w.addEventListener('error', event => errors.push(event.error));
   w.AbortSignal = AbortSignal; w.AbortController = AbortController;
@@ -32,6 +39,123 @@ test('production DOM exchanges fragment once, keeps integer bytes, separates mis
   assert.equal(calls.find(c => c.path === '/api/session').headers['x-monitor-request'], '1');
   assert.equal(get('live-upload').textContent, '↑ —'); assert.equal(get('live-download').textContent, '↓ 0 B/s');
   change('unit', 'GiB'); assert.equal(get('total-value').textContent, '15.000 GiB'); assert.equal(get('total-exact').textContent, '16,106,127,360 bytes'); assert.equal(errors.length, 0);
+});
+test('ordinary history dimensions keep directory, filters, pagination and export aligned without adding totals', async t => {
+  const bases = ['local_proxy', 'actual_member', 'business', 'excluded', 'unknown', 'legacy_proxy', 'routed_outbound'];
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, historyBases: bases,
+      uploadPerSecond: '0', downloadPerSecond: '0' }),
+    '/api/nodes': url => Response.json([{ key: `scope:${url.searchParams.get('basis') || 'local_proxy'}`,
+      name: url.searchParams.get('basis') || 'Synthetic A' }]),
+    '/api/history': url => {
+      const basis = url.searchParams.get('basis');
+      if (!basis) return Response.json(history);
+      const missing = basis === 'unknown', upload = basis === 'excluded' || missing ? '0' : '123';
+      return Response.json({ ...history, basis, upload, download: '0',
+        nodes: missing ? [] : [{ key: `scope:${basis}`, name: basis, upload, download: '0' }],
+        records: missing ? [] : [{ ...history.records[0], nodeKey: `scope:${basis}`, nodeName: basis, upload, download: '0' }],
+        series: missing ? [] : [{ label: '2026-10-09', upload, download: '0' }], recordCount: missing ? 0 : 51 });
+    }
+  });
+  assert.ok(get('history-basis'), 'ordinary history has a dimension selector');
+  assert.equal(get('history-basis-control').hidden, false);
+  assert.equal(get('history-basis').value, 'local_proxy');
+  assert.equal(calls.find(c => c.path === '/api/history').query.has('basis'), false);
+  w.URL.createObjectURL = () => 'blob:synthetic-history';
+  w.URL.revokeObjectURL = () => {};
+  const downloads = [];
+  w.HTMLAnchorElement.prototype.click = function () { downloads.push(this.download); };
+  for (const basis of bases.slice(1)) {
+    change('history-basis', basis);
+    await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === basis &&
+      get('summary').getAttribute('aria-busy') === 'false');
+    await until(() => Array.from(get('node-filter').options).some(option => option.value === `scope:${basis}`));
+    assert.equal(calls.filter(c => c.path === '/api/nodes').at(-1).query.get('basis'), basis);
+    const query = calls.filter(c => c.path === '/api/history').at(-1).query;
+    assert.equal(query.get('page'), '0');
+    assert.equal(query.has('nodeKey'), false);
+    assert.ok(get('attribution-note').textContent.includes('不相加'));
+    assert.equal(get('live-upload').textContent, '↑ 0 B/s');
+    if (basis === 'unknown') {
+      assert.equal(get('total-value').textContent, '—');
+      assert.ok(get('chart').textContent.includes('缺失记录不等于零流量'));
+    } else {
+      assert.equal(get('total-exact').textContent, basis === 'excluded' ? '0 bytes' : '123 bytes');
+      change('node-filter', `scope:${basis}`);
+      await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === `scope:${basis}`);
+      get('next-page').click();
+      await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('page') === '1');
+    }
+    const count = calls.filter(c => c.path === '/api/export').length;
+    get('export-button').click();
+    await until(() => calls.filter(c => c.path === '/api/export').length === count + 1);
+    const exported = calls.filter(c => c.path === '/api/export').at(-1).query;
+    assert.equal(exported.get('basis'), basis);
+    assert.equal(exported.has('nonZeroRecords'), false);
+    await until(() => get('export-button').disabled === false);
+    assert.ok(downloads.at(-1).startsWith(`v2rayN-local-${basis}-`));
+  }
+  change('history-basis', 'local_proxy');
+  await until(() => get('total-exact').textContent === '16,106,127,360 bytes');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+});
+test('ordinary dimension stays separate from probe dimensions and the default provider comparison', async t => {
+  const provider = { source: 'Synthetic provider', rawBytes: '100', billedBytes: '100', recordCount: 0, nodes: [], series: [], records: [] };
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, historyBases: ['local_proxy', 'actual_member'],
+      uploadPerSecond: null, downloadPerSecond: null, probes: { historyEnabled: true, state: 'available' } }),
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('history-basis', 'actual_member');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  change('statistics-source', provider.source);
+  await until(() => calls.some(c => c.path === '/api/provider/history') && get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(get('history-basis-control').hidden, true);
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+  assert.equal(calls.filter(c => c.path === '/api/provider/history').at(-1).query.has('basis'), false);
+  change('statistics-source', '');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  assert.equal(get('history-basis').value, 'actual_member');
+  assert.equal(get('history-basis-control').hidden, false);
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'probe_urltest_member');
+  assert.equal(get('history-basis-control').hidden, true);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  assert.equal(get('history-basis').value, 'actual_member');
+});
+test('ordinary dimension changes ignore late history and directory responses', async t => {
+  let finishHistory, finishNodes;
+  const { get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false,
+      historyBases: ['local_proxy', 'business', 'excluded'], uploadPerSecond: null, downloadPerSecond: null }),
+    '/api/history': url => url.searchParams.get('basis') === 'business'
+      ? new Promise(resolve => { finishHistory = () => resolve(Response.json({ ...history, upload: '999', download: '0' })); })
+      : Response.json(history),
+    '/api/nodes': url => url.searchParams.get('basis') === 'business'
+      ? new Promise(resolve => { finishNodes = () => resolve(Response.json([{ key: 'scope:old', name: 'Stale business' }])); })
+      : Response.json([{ key: 'scope:new', name: 'Current dimension' }])
+  });
+  change('history-basis', 'business');
+  await until(() => finishHistory && finishNodes);
+  change('history-basis', 'excluded');
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  finishHistory(); finishNodes();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('history-basis').value, 'excluded');
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  assert.ok(!get('node-filter').textContent.includes('Stale business'));
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.get('basis'), 'excluded');
+});
+test('legacy or older servers keep the ordinary history selector hidden', async t => {
+  const { get } = await fixture(t);
+  assert.ok(get('history-basis-control'));
+  assert.equal(get('history-basis-control').hidden, true);
 });
 test('statistics and probes default to GB and MB and retain independent display units', async t => {
   const { w, calls, get, change, errors } = await fixture(t, {
@@ -125,7 +249,7 @@ test('changing gap context closes and releases old rows, including disabled prob
   await expand();
   historyEnabled = false;
   w.document.dispatchEvent(new w.Event('visibilitychange'));
-  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查');
+  await until(() => get('refresh-note').textContent === '探测未启用 · 2 秒检查');
   closed();
   w.document.querySelector('.nav-item[data-view=overview]').click();
   await until(() => get('total-value').textContent === '16.106 GB');
@@ -183,6 +307,119 @@ test('collector failure keeps the diagnostic visible even with a known scope', a
   assert.equal(get('live-upload').textContent, '↑ —');
   assert.equal(get('live-download').textContent, '↓ —');
 });
+for (const [state, label] of [['baseline', '正在采样'], ['reset', '正在采样'], ['ready', '已连接']])
+  test(`${state} keeps the collector strip concise while retaining scope details`, async t => {
+    const description = '采集 64 个 Xray 独立代理出站，包含 3 个策略组；排除直连和阻断，内部探测未单独区分。';
+    const { get } = await fixture(t, {
+      '/api/status': () => Response.json({ state, message: 'Xray 策略组联合采样；各独立代理出站分别记账，不叠加组汇总。',
+        currentNode: 'Synthetic group', lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false,
+        scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 64, collectedGroups: 3,
+          uncollectedOutbounds: 0, uncollectedGroups: 0, description } })
+    });
+    assert.equal(get('collector-state').textContent, label);
+    assert.equal(get('collector-message').textContent, 'Xray · 64 个代理出站 · 3 个策略组 · 不含直连和阻断');
+    assert.ok(get('settings-collector-status').textContent.includes(description));
+    assert.ok(!get('settings-collector-status').textContent.includes('联合采样'));
+    assert.ok(get('settings-collector-status').textContent.includes('尚无有效采样'));
+    assert.equal(get('live-upload').textContent, '↑ —');
+    assert.equal(get('live-download').textContent, '↓ —');
+  });
+test('first sampling without scope explains the missing rate rather than exposing baseline jargon', async t => {
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'baseline', message: '已建立采样基线；节点切换后从新基线开始记录。',
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false })
+  });
+  assert.equal(get('collector-state').textContent, '正在采样');
+  assert.equal(get('collector-message').textContent, '正在读取累计流量，连续采样后显示速率。');
+  assert.equal(get('live-upload').textContent, '↑ —');
+});
+for (const state of ['duplicate', 'stale']) test(`${state} waits for a fresh sample without showing an internal state code`, async t => {
+  const message = '等待更新的有效采样，已有历史保留。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state, message, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null })
+  });
+  assert.equal(get('collector-state').textContent, '等待新采样');
+  assert.equal(get('collector-message').textContent, message);
+  assert.equal(get('live-download').textContent, '↓ —');
+});
+test('member collection without scope uses a plain summary and retains its detailed message', async t => {
+  const message = '按独立代理成员记账；业务汇总、直连和未知归属分别保存，不相加。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message, collectionBasis: 'actual_member',
+      lastSample: null, uploadPerSecond: '0', downloadPerSecond: '0', demo: false })
+  });
+  assert.equal(get('collector-message').textContent, '按独立代理成员统计 · 不叠加汇总和直连');
+  assert.ok(get('settings-collector-status').textContent.includes(message));
+  assert.equal(get('live-upload').textContent, '↑ 0 B/s');
+});
+for (const [state, label] of [['error', '采集暂不可用'], ['snapshot_changed', '正在切换配置']])
+  test(`retained partial scope cannot replace the ${state} diagnostic`, async t => {
+    const message = '统计暂不可用，请检查 v2rayN 后重试。';
+    const description = '其他出站未采集，其流量未知。';
+    const { get } = await fixture(t, {
+      '/api/status': () => Response.json({ state, message, demo: false,
+        lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+        scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 2,
+          uncollectedGroups: 1, description } })
+    });
+    assert.equal(get('collector-state').textContent, label);
+    assert.equal(get('collector-message').textContent, `${message} ${description}`);
+    assert.ok(get('settings-collector-status').textContent.includes(message));
+    assert.equal(get('status-dot').classList.contains('partial'), false);
+    assert.equal(get('status-dot').classList.contains('error'), state === 'error');
+    assert.equal(get('live-upload').textContent, '↑ —');
+  });
+test('partial counters retain both the unavailable count and coverage warning', async t => {
+  const message = '4 个范围计数未知，未补零。';
+  const description = '其他出站未采集，其流量未知。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'partial', message, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 2,
+        uncollectedGroups: 1, description } })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.equal(get('collector-message').textContent, `${message} ${description}`);
+  assert.ok(get('status-dot').classList.contains('partial'));
+});
+test('identical status and scope descriptions are not repeated', async t => {
+  const description = '统计接口不可用，请检查 v2rayN。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'error', message: description, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      scope: { basis: 'routed_proxy', isPartial: false, uncollectedOutbounds: 0,
+        uncollectedGroups: 0, description } })
+  });
+  assert.equal(get('collector-message').textContent, description);
+  assert.equal(get('settings-collector-status').textContent.split(description).length - 1, 1);
+});
+test('empty historical trend does not promise that reconnecting will fill old records', async t => {
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, series: [], unbucketedUpload: '1073741824',
+      unbucketedDownload: '0', recoveredUpload: '1073741824', recoveredDownload: '0' })
+  });
+  assert.ok(get('chart').textContent.includes('所选范围没有可分时的记录'));
+  assert.ok(!get('chart').textContent.includes('连接后'));
+  assert.ok(get('chart').textContent.includes('缺失记录不等于零流量'));
+  assert.ok(get('quality-notice').textContent.includes('尚未分配到当前趋势图'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('saved collector outages have readable reasons without changing their history', async t => {
+  const reasons = ['collector_stopped', 'collector_error', 'unsupported_mode'];
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, gapCount: 3, gaps: reasons.map(reason => ({
+      start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', reason, isOpen: false
+    })) })
+  });
+  get('gap-details').open = true;
+  await until(() => get('gap-list').children.length === reasons.length);
+  for (const label of ['采集器已停止', '采集或保存失败', '当时的模式不支持'])
+    assert.ok(get('gap-list').textContent.includes(label));
+  for (const reason of reasons) assert.ok(!get('gap-list').textContent.includes(reason));
+  assert.ok(get('gap-list').textContent.includes('不代表流量全部恢复'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
 for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`disabling probe history on a collector tick closes ${target} details`, async t => {
   let historyEnabled = true;
   const display = { originalName: 'Synthetic probe', groups: ['Synthetic probe group'], mergeKey: null };
@@ -203,7 +440,7 @@ for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`dis
   const historyCalls = calls.filter(call => call.path === '/api/history').length;
 
   historyEnabled = false;
-  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查', 8000);
+  await until(() => get('refresh-note').textContent === '探测未启用 · 2 秒检查', 8000);
   assert.equal(anchor.isConnected, false);
   assert.equal(get('detail-popover').hidden, true);
   assert.equal(anchor.getAttribute('aria-expanded'), 'false');
@@ -271,7 +508,7 @@ test('probe page keeps basis, filters, export and business navigation separate',
   assert.equal(get('source-controls').hidden, true);
   assert.equal(get('probe-controls').hidden, false);
   assert.ok(get('probe-coverage').textContent.includes('2026-10-01'));
-  assert.ok(get('probe-coverage').textContent.includes('不是精确的首次基线'));
+  assert.ok(get('probe-coverage').textContent.includes('按分钟保存，并非精确的首次采样时间'));
   assert.ok(get('probe-notice').textContent.includes('不能直接换算服务商计费'));
   change('node-filter', 'scope:99');
   await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === 'scope:99');
@@ -417,6 +654,28 @@ test('comparison renders both histories before directories, then switches period
   await until(() => [...get('node-filter').options].some(option => option.value === 'Synthetic A'));
   assert.equal(get('comparison-billed-exact').textContent, '12.5 bytes');
 });
+test('two-second rate updates do not query history before its thirty-second tick', async t => {
+  const timers = new Map();
+  let upload = '1';
+  const { w, calls, get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Synthetic rates', demo: false,
+      currentNode: 'Synthetic group selection', lastSample: null, uploadPerSecond: upload, downloadPerSecond: '0' })
+  }, {}, timers);
+  const historyReads = () => calls.filter(call => call.path === '/api/history').length;
+  const before = historyReads();
+  upload = '2'; timers.get(2000)();
+  await until(() => get('live-upload').textContent === '↑ 2 B/s');
+  assert.equal(get('live-download').textContent, '↓ 0 B/s');
+  assert.equal(historyReads(), before);
+  timers.get(30000)();
+  await until(() => historyReads() === before + 1 && get('summary').getAttribute('aria-busy') === 'false');
+  Object.defineProperty(w.document, 'hidden', { configurable: true, value: true });
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  const count = calls.length;
+  timers.get(2000)(); timers.get(30000)();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls.length, count);
+});
 test('hidden tabs cancel requests and settings ticks refresh status without scanning history', async t => {
   const pending = [];
   let hold = false;
@@ -437,7 +696,7 @@ test('hidden tabs cancel requests and settings ticks refresh status without scan
   hold = false;
   let tick;
   const originalTimeout = w.setTimeout.bind(w);
-  w.setTimeout = (callback, delay, ...args) => delay === 5000 ? (tick = callback, 0) : originalTimeout(callback, delay, ...args);
+  w.setTimeout = (callback, delay, ...args) => delay === 2000 ? (tick = callback, 0) : originalTimeout(callback, delay, ...args);
   w.document.querySelector('.nav-item[data-view=settings]').click();
   Object.defineProperty(w.document, 'hidden', { configurable: true, value: false });
   w.document.dispatchEvent(new w.Event('visibilitychange'));
@@ -650,9 +909,10 @@ test('ranking without recovery keeps the same value target and shows directions 
 });
 
 for (const empty of [false, true]) test(`share group details close when polling returns ${empty ? 'no nodes' : 'only zero totals'}`, async t => {
+  const timers = new Map();
   let result = { ...history, nodes: history.nodes.map(node => ({ ...node,
     display: { originalName: node.name, groups: ['Synthetic initial group'], mergeKey: null } })) };
-  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) });
+  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) }, {}, timers);
   get('ranking-share').click();
   const firstAnchor = get('ranking').querySelector('.has-groups');
   firstAnchor.focus();
@@ -660,10 +920,11 @@ for (const empty of [false, true]) test(`share group details close when polling 
   assert.equal(popup.hidden, false);
   assert.equal(popup.querySelector('li').textContent, 'Synthetic initial group');
 
-  // A normal collector tick must reconnect the same item and refresh its details.
+  // A history tick must reconnect the same item and refresh its details.
   result = { ...result, nodes: result.nodes.map(node => ({ ...node,
     display: { ...node.display, groups: ['Synthetic updated group'] } })) };
-  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group', 8000);
+  timers.get(30000)();
+  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group');
   const previousAnchor = get('ranking').querySelector('.has-groups');
   assert.equal(firstAnchor.isConnected, false);
   assert.equal(popup.hidden, false);
@@ -672,7 +933,8 @@ for (const empty of [false, true]) test(`share group details close when polling 
 
   result = { ...result, upload: '0', download: '0', series: [], records: [], recordCount: 0,
     nodes: empty ? [] : result.nodes.map(node => ({ ...node, upload: '0', download: '0' })) };
-  await until(() => !!get('ranking').querySelector('.empty-state'), 8000);
+  timers.get(30000)();
+  await until(() => !!get('ranking').querySelector('.empty-state'));
   assert.equal(get('ranking').textContent, empty ? '所选范围尚无节点记录' : '所选范围只有零值记录');
   assert.equal(popup.hidden, true);
   assert.equal(previousAnchor.isConnected, false);

@@ -6,7 +6,7 @@ const history = {
   nodes: [{ key: 'a', name: 'Synthetic · Singapore', upload: '536870912', download: '8589934592' }, { key: 'b', name: 'Synthetic · Tokyo', upload: '268435456', download: '4294967296' }, { key: 'c', name: 'Synthetic · Frankfurt', upload: '268435456', download: '2147483648' }],
   records: [{ start: '2026-10-09T11:00:00Z', end: '2026-10-09T11:01:00Z', nodeKey: 'a', nodeName: 'Synthetic · Singapore', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51
 };
-async function mock(page, overrides = {}) {
+async function mock(page, overrides = {}, controlClock = false) {
   const calls = [];
   await page.route('http://127.0.0.1:4173/', async route => { const response = await route.fetch(); await route.fulfill({ response, headers: { ...response.headers(), 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" } }); });
   await page.route('**/api/**', async route => {
@@ -25,7 +25,8 @@ async function mock(page, overrides = {}) {
     };
     await route.fulfill(json(routes[url.pathname] ?? {}));
   });
-  await page.clock.setFixedTime(new Date('2026-10-09T19:00:00Z'));
+  if (controlClock) await page.clock.install({ time: new Date('2026-10-09T19:00:00Z') });
+  else await page.clock.setFixedTime(new Date('2026-10-09T19:00:00Z'));
   await page.goto('/#one-time-synthetic-token');
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
@@ -97,7 +98,7 @@ test('probe view separates dimensions and keeps a readable desktop and mobile la
   await expect(page.locator('#statistics-title')).toHaveText('探测流量');
   await expect(page.locator('#total-exact')).toHaveText('4,096 bytes');
   await expect(page.locator('#probe-state')).toHaveText('探测部分采集');
-  await expect(page.locator('#probe-coverage')).toContainText('不是精确的首次基线');
+  await expect(page.locator('#probe-coverage')).toContainText('按分钟保存，并非精确的首次采样时间');
   await expect(page.locator('#source-controls')).toBeHidden();
   for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
     await page.setViewportSize({ width, height });
@@ -260,7 +261,7 @@ test('traffic details remain open across polling and support keyboard dismissal'
   const calls = await mock(page, {
     '/api/history': route => route.fulfill(json({ ...history,
       nodes: history.nodes.map((n, i) => ({ ...n, recoveredUpload: i === 0 ? '123456789' : '0', recoveredDownload: '0' })) }))
-  });
+  }, true);
   const value = page.locator('.rank-value').first(), popup = page.locator('#detail-popover');
   await value.focus();
   await expect(popup).toBeVisible();
@@ -271,6 +272,7 @@ test('traffic details remain open across polling and support keyboard dismissal'
   await expect(popup).toBeVisible();
   const previousValue = await value.elementHandle();
   const before = calls.filter(c => c.path === '/api/history').length;
+  await page.clock.fastForward(30000);
   await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
   await expect.poll(() => previousValue.evaluate(node => node.isConnected)).toBe(false);
   await expect(popup).toBeVisible();
@@ -342,7 +344,7 @@ test('issue23 captured rates, group names and exact copy work across business an
       displayMetadataEnabled: true, display, nodes: [{ ...history.nodes[0], display }], records: [
         { ...history.records[0], display },
         { ...history.records[0], display: { ...display, groups: ['Synthetic second snapshot'] } }] }))
-  });
+  }, true);
   await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
   const groupedName = page.locator('#records .node-cell .has-groups').first();
   await expect(groupedName).toHaveText('Synthetic original 0.5x');
@@ -354,6 +356,7 @@ test('issue23 captured rates, group names and exact copy work across business an
   await groupedName.click();
   const previousGroup = await groupedName.elementHandle();
   const before = calls.filter(c => c.path === '/api/history').length;
+  await page.clock.fastForward(30000);
   await expect.poll(() => calls.filter(c => c.path === '/api/history').length, { timeout: 8000 }).toBeGreaterThan(before);
   await expect.poll(() => previousGroup.evaluate(node => node.isConnected)).toBe(false);
   await expect(page.locator('#detail-popover .node-group-list')).toHaveText('US-0.5x');
@@ -421,6 +424,106 @@ test('historical and captured group members use the same labels without merging 
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
   await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
 });
+test('ordinary history dimensions stay isolated, readable and exportable', async ({ page }) => {
+  const bases = ['local_proxy', 'actual_member', 'business', 'excluded', 'unknown', 'legacy_proxy', 'routed_outbound'];
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic dimension fixture',
+      currentNode: 'Synthetic strategy group', demo: false, historyBases: bases,
+      lastSample: '2026-10-09T19:00:00Z', uploadPerSecond: '0', downloadPerSecond: '0' })),
+    '/api/nodes': (route, request, url) => route.fulfill(json([{ key: 'scope:1', name: url.searchParams.get('basis') || 'Synthetic member' }])),
+    '/api/history': (route, request, url) => {
+      const basis = url.searchParams.get('basis');
+      if (!basis) return route.fulfill(json(history));
+      const missing = basis === 'unknown', upload = basis === 'excluded' || missing ? '0' : '123';
+      return route.fulfill(json({ ...history, basis, upload, download: '0',
+        nodes: missing ? [] : [{ key: 'scope:1', name: basis, upload, download: '0' }],
+        series: missing ? [] : [{ label: '2026-10-09', upload, download: '0' }],
+        records: missing ? [] : [{ ...history.records[0], nodeKey: 'scope:1', nodeName: basis, upload, download: '0' }],
+        recordCount: missing ? 0 : 1 }));
+    },
+    '/api/export': route => route.fulfill({ status: 200, contentType: 'text/csv', body: 'synthetic,basis\n' })
+  });
+  await expect(page.locator('#history-basis')).toHaveValue('local_proxy');
+  await expect(page.locator('#history-basis option')).toHaveCount(7);
+  await page.selectOption('#history-basis', 'business');
+  await expect(page.locator('#total-exact')).toHaveText('123 bytes');
+  await expect(page.locator('#ranking-title')).toHaveText('范围汇总');
+  await expect(page.locator('#ranking .rank-node')).toHaveText('代理业务总量');
+  await expect(page.locator('#records .node-cell')).toHaveText('代理业务总量');
+  await expect(page.locator('#attribution-note')).toContainText('各维度不相加');
+  await expect(page.locator('#billing-exact')).toHaveText('此维度不提供节点倍率估算');
+  await expect(page.locator('#ranking-share')).toBeDisabled();
+  await page.selectOption('#node-filter', 'scope:1');
+  const downloadEvent = page.waitForEvent('download');
+  await page.click('#export-button');
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toContain('v2rayN-local-business-');
+  const exported = calls.filter(call => call.path === '/api/export').at(-1).url;
+  expect(exported.searchParams.get('basis')).toBe('business');
+  expect(exported.searchParams.get('nodeKey')).toBe('scope:1');
+  expect(exported.searchParams.has('nonZeroRecords')).toBe(false);
+  for (const [width, height, theme, basis, suffix] of [
+    [1440, 1100, 'light', 'business', 'desktop'],
+    [390, 844, 'dark', 'excluded', 'mobile'],
+    [320, 844, 'light', 'unknown', 'narrow']
+  ]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    if (!await page.locator('#history-basis').isVisible()) await page.click('#filter-disclosure');
+    await page.selectOption('#history-basis', basis);
+    await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+    if (basis === 'unknown') {
+      await expect(page.locator('#total-value')).toHaveText('—');
+      await expect(page.locator('#ranking')).toContainText('所选范围尚无已保存记录');
+      const empty = page.locator('#records .empty-state p');
+      await expect(empty).toContainText('采集缺口仍单独显示');
+      const box = await empty.boundingBox();
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(width);
+    }
+    else await expect(page.locator('#total-exact')).toHaveText(basis === 'excluded' ? '0 bytes' : '123 bytes');
+    await expect(page.locator('#live-upload')).toHaveText('↑ 0 B/s');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await settledScreenshot(page, `test-results/history-dimensions-${suffix}.png`);
+  }
+  await page.selectOption('#history-basis', 'actual_member');
+  await expect(page.locator('#total-exact')).toHaveText('123 bytes');
+  const selected = calls.filter(call => call.path === '/api/history').at(-1).url.searchParams;
+  expect(selected.get('basis')).toBe('actual_member');
+  expect(selected.has('nodeKey')).toBe(false);
+  expect(selected.get('page')).toBe('0');
+  await page.selectOption('#history-basis', 'local_proxy');
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+  expect(calls.filter(call => call.path === '/api/history').at(-1).url.searchParams.has('basis')).toBe(false);
+});
+test('live proxy rates refresh independently of history and stay readable with a group selected', async ({ page }) => {
+  let upload = '1048576', download = '2097152';
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic grouped collector', demo: false,
+      currentNode: 'Synthetic · strategy group', lastSample: '2026-10-09T19:00:00Z',
+      uploadPerSecond: upload, downloadPerSecond: download,
+      scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 3, collectedGroups: 2,
+        uncollectedOutbounds: 0, uncollectedGroups: 0, description: 'Synthetic independent outbounds; groups are not added again.' } }))
+  }, true);
+  await page.selectOption('#unit', 'GiB');
+  await expect(page.getByRole('group', { name: '已采集代理合计实时速率' })).toContainText('代理合计');
+  await expect(page.locator('#live-upload')).toHaveText('↑ 1.00 MiB/s');
+  const before = calls.filter(call => call.path === '/api/history').length;
+  upload = '2097152'; download = '4194304';
+  await page.clock.fastForward(2000);
+  await expect(page.locator('#live-upload')).toHaveText('↑ 2.00 MiB/s');
+  await expect(page.locator('#live-download')).toHaveText('↓ 4.00 MiB/s');
+  expect(calls.filter(call => call.path === '/api/history')).toHaveLength(before);
+  const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/history');
+  await page.clock.fastForward(28000);
+  await response;
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  expect(calls.filter(call => call.path === '/api/history')).toHaveLength(before + 1);
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/live-rates-${suffix}.png`, fullPage: true, animations: 'disabled' });
+  }
+});
 test('collector strip aligns node and rates without repeating implementation details', async ({ page }) => {
   const name = 'Synthetic · A deliberately long current member name '.repeat(4);
   const description = '采集 35 个 Xray 独立代理出站，包含 2 个策略组；不叠加策略组，排除直连和阻断。内部探测未单独区分。';
@@ -451,6 +554,56 @@ test('collector strip aligns node and rates without repeating implementation det
   await page.getByRole('button', { name: '采集详情 →', exact: true }).click();
   await expect(page.locator('#settings-collector-status')).toContainText(description);
   await expect(page.locator('#settings-collector-status')).not.toContainText('联合采样');
+});
+test('collector copy stays concise through sampling, switching and failures', async ({ page }) => {
+  let state = 'baseline', message = 'Xray 策略组联合采样；各独立代理出站分别记账，不叠加组汇总。';
+  let partial = false, upload = null, download = null;
+  const description = '采集 64 个 Xray 独立代理出站，包含 3 个策略组；不叠加组汇总，排除直连和阻断。内部探测未单独区分。';
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state, message, currentNode: 'Synthetic · strategy group',
+      demo: false, lastSample: null, uploadPerSecond: upload, downloadPerSecond: download,
+      scope: { basis: 'xray_outbound_members', isPartial: partial, collectedOutbounds: 64, collectedGroups: 3,
+        uncollectedOutbounds: partial ? 2 : 0, uncollectedGroups: 0, description } }))
+  }, true);
+  const summary = 'Xray · 64 个代理出站 · 3 个策略组 · 不含直连和阻断';
+  await expect(page.locator('#collector-state')).toHaveText('正在采样');
+  await expect(page.locator('#collector-message')).toHaveText(summary);
+  await expect(page.locator('#live-upload')).toHaveText('↑ —');
+  for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile'], [320, 844, 'light', 'narrow']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/sampling-copy-${suffix}.png`, fullPage: true, animations: 'disabled' });
+  }
+  await page.getByRole('button', { name: '采集详情 →', exact: true }).click();
+  await expect(page.locator('#settings-collector-status')).toContainText(description);
+  await expect(page.locator('#settings-collector-status')).not.toContainText('联合采样');
+  await expect(page.locator('#settings-view')).not.toContainText('基线');
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.screenshot({ path: 'test-results/settings-copy-desktop.png', fullPage: true, animations: 'disabled' });
+  await page.click('.nav-item[data-view=overview]');
+  state = 'collecting'; upload = '0'; download = '0';
+  await page.clock.fastForward(2000);
+  await expect(page.locator('#collector-state')).toHaveText('正在采集');
+  await expect(page.locator('#collector-message')).toHaveText(summary);
+  await expect(page.locator('#live-upload')).toHaveText('↑ 0 B/s');
+  partial = true;
+  for (const [next, label, text] of [
+    ['snapshot_changed', '正在切换配置', '配置已变化，正在等待内核加载。'],
+    ['partial', '部分采集', '4 个范围计数未知，未补零。'],
+    ['error', '采集暂不可用', '统计接口不可用，请检查 v2rayN 后重试。']
+  ]) {
+    state = next; message = text; upload = null; download = null;
+    await page.clock.fastForward(2000);
+    await expect(page.locator('#collector-state')).toHaveText(label);
+    await expect(page.locator('#collector-message')).toContainText(text);
+    await expect(page.locator('#collector-message')).toContainText(description);
+    await expect(page.locator('#live-upload')).toHaveText('↑ —');
+    if (next === 'snapshot_changed') await expect(page.locator('#status-dot')).not.toHaveClass(/partial|error/);
+    else await expect(page.locator('#status-dot')).toHaveClass(next === 'partial' ? 'status-dot partial' : 'status-dot error');
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/collector-error-copy-mobile.png', fullPage: true, animations: 'disabled' });
 });
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
@@ -903,7 +1056,7 @@ test('polished mobile disclosure and reduced motion remain accessible', async ({
 test('collector polling preserves filter focus and never replays user motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.setViewportSize({ width: 390, height: 844 });
-  await mock(page);
+  await mock(page, {}, true);
   await page.click('#ranking-share');
   await expect(page.locator('#ranking')).not.toHaveClass(/user-view-change/);
   await page.click('#filter-disclosure');
@@ -914,7 +1067,9 @@ test('collector polling preserves filter focus and never replays user motion', a
     const animate = Element.prototype.animate;
     Element.prototype.animate = function (...args) { window.previewAnimationStarts++; return animate.apply(this, args); };
   });
-  await page.waitForResponse(r => new URL(r.url()).pathname === '/api/history', { timeout: 8000 });
+  const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/history', { timeout: 8000 });
+  await page.clock.fastForward(30000);
+  await response;
   await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('#bucket')).toBeFocused();
   await expect(page.locator('#filter-disclosure')).toHaveAttribute('aria-expanded', 'true');

@@ -226,9 +226,10 @@ internal sealed class TrayContext : ApplicationContext
                     var state = outcome is "recorded" or "unallocated" ? "collecting" : outcome;
                     var message = outcome switch
                     {
-                        "recorded" => $"正在采集 {reading.CoreName} proxy 原始字节。",
+                        "recorded" => $"正在采集 {reading.CoreName} 代理出站流量。",
                         "unallocated" => "采集已恢复；已找回连续会话的区间流量，细分时间未知，详见统计说明。",
-                        _ => "已建立采样基线；节点切换或核心重启后从新基线开始记录。"
+                        "duplicate" or "stale" => "等待更新的有效采样，已有历史保留。",
+                        _ => "正在采样；新节点或核心重启后，从当前累计值开始记录。"
                     };
                     server.SetStatus(new(state, message, reading.CurrentNode, sample.At, up, down, Scope: reading.Scope));
                 }
@@ -260,6 +261,7 @@ internal sealed class TrayContext : ApplicationContext
     private async Task CollectScopesAsync(WindowsDiscovery discovery, ScopeLedger ledger)
     {
         var basis = "actual_member";
+        ScopeBatch? previous = null;
         while (!stop.IsCancellationRequested)
         {
             try
@@ -269,15 +271,19 @@ internal sealed class TrayContext : ApplicationContext
                 {
                     var result = ScopeCollector.Commit(ledger, batch);
                     discovery.AcknowledgePersistence();
+                    var rates = ScopeCollector.Rates(previous, batch);
+                    previous = batch;
                     var unavailable = result.Scopes.Values.Count(x => x == "unavailable");
                     basis = batch.Readings.Any(x => x.Scope.Basis == "actual_member") ? "actual_member" : "legacy_proxy";
                     var baseline = result.Scopes.Values.All(x => x is "baseline" or "reset");
                     server.SetStatus(new(unavailable != 0 ? "partial" : baseline ? "baseline" : "collecting",
                         reading.Message + (unavailable == 0 ? "" : $" {unavailable} 个范围计数未知，未补零。"),
-                         reading.CurrentNode, batch.At, Scope: reading.Scope, CollectionBasis: basis, Probes: reading.Probes));
+                         reading.CurrentNode, batch.At, rates.Upload, rates.Download,
+                         Scope: reading.Scope, CollectionBasis: basis, Probes: reading.Probes));
                 }
                 else
                 {
+                    previous = null;
                     ledger.RecordGap(DateTimeOffset.UtcNow, reading.State, reading.InvalidateContinuity);
                     discovery.AcknowledgePersistence();
                     server.SetStatus(new(reading.State, reading.Message, reading.CurrentNode,
@@ -288,6 +294,7 @@ internal sealed class TrayContext : ApplicationContext
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
             catch (Exception)
             {
+                previous = null;
                 try
                 {
                     ledger.RecordGap(DateTimeOffset.UtcNow, "collector_error", discovery.RequiresBaseline);
