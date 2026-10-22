@@ -246,6 +246,132 @@ public sealed class ProviderDecimalImportTests : IDisposable
         using var retry = new ProviderImports(PathFor()); Assert.Single(retry.List());
     }
 
+    [Fact]
+    public void LegacyProviderOpenDoesNotEnableReferencesAndExplicitUpgradePreservesBothTablesAndOldOwnership()
+    {
+        var originalRequest = CreateLegacy();
+        var rewritten = originalRequest with { Csv = originalRequest.Csv.Replace(",synthetic,", ",different display,", StringComparison.Ordinal) };
+        using (var imports = new ProviderImports(PathFor()))
+        {
+            Assert.False(imports.TrackingAvailable);
+            Assert.True(imports.Commit(rewritten).Duplicate); // Old zero-new behavior is retained until explicit enable.
+            using (var check = Open())
+                Assert.Equal(0L, Scalar(check, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'provider_batch_%';"));
+            var before = BaseSnapshot(PathFor());
+            var backup = PathFor("before-references.db");
+            var enabled = imports.EnableBatchTracking(backup);
+            Assert.Equal(backup, enabled.BackupPath);
+            Assert.Equal(1, enabled.PreservedBatches);
+            Assert.Equal(1, enabled.PreservedRecords);
+            Assert.True(imports.TrackingAvailable);
+            Assert.Equal(before, BaseSnapshot(backup));
+            Assert.Equal(before, BaseSnapshot(PathFor()));
+            using (var saved = new SqliteConnection($"Data Source={backup};Mode=ReadOnly;Pooling=False"))
+            {
+                saved.Open();
+                Assert.Equal(0L, Scalar(saved, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'provider_batch_%';"));
+            }
+            var legacy = Assert.Single(imports.List());
+            Assert.False(legacy.ReferencesComplete);
+            Assert.Null(legacy.FileRowCount);
+            var denied = imports.PreviewRevoke(legacy.Source, legacy.Hash);
+            Assert.False(denied.CanRevoke);
+            Assert.Null(denied.DeletedRowCount);
+            Assert.Null(denied.RetainedRawBytes);
+            Assert.Contains("旧批次", denied.Reason);
+            Assert.Throws<InvalidOperationException>(() => imports.Revoke(denied.Source, denied.Hash, denied.Token));
+
+            var tracked = imports.Commit(rewritten);
+            Assert.False(tracked.Duplicate);
+            Assert.Equal(0, tracked.NewRowCount);
+            var revoke = imports.PreviewRevoke(rewritten.Source, tracked.Hash);
+            Assert.True(revoke.CanRevoke);
+            Assert.Equal(0, revoke.DeletedRowCount);
+            Assert.Equal(1, revoke.RetainedRowCount);
+            Assert.Equal("9223372036854775807", revoke.RetainedRawBytes);
+            Assert.Equal("9223372036854775807", revoke.RetainedBilledBytes);
+            imports.Revoke(revoke.Source, revoke.Hash, revoke.Token);
+            Assert.Equal(before, BaseSnapshot(PathFor()));
+        }
+        using var reopened = new ProviderImports(PathFor());
+        Assert.True(reopened.TrackingAvailable);
+        Assert.False(Assert.Single(reopened.List()).ReferencesComplete);
+    }
+
+    [Fact]
+    public void ExplicitTrackingUpgradeRefusesExistingBackupAndDoesNotChangeLegacyTables()
+    {
+        CreateLegacy();
+        using var imports = new ProviderImports(PathFor());
+        var before = BaseSnapshot(PathFor());
+        var backup = PathFor("existing-backup.db");
+        File.WriteAllText(backup, "Synthetic existing backup");
+        Assert.Throws<IOException>(() => imports.EnableBatchTracking(backup));
+        Assert.False(imports.TrackingAvailable);
+        Assert.Equal(before, BaseSnapshot(PathFor()));
+        Assert.Equal("Synthetic existing backup", File.ReadAllText(backup));
+        Assert.Single(imports.List()); // Its connection can be reused after the failed exclusive step.
+    }
+
+    [Fact]
+    public void ExplicitTrackingUpgradeDdlFailureRollsBackAndRetainsFreshBackup()
+    {
+        CreateLegacy();
+        using (var occupied = Open())
+            Execute(occupied, "CREATE TABLE provider_batch_rows_record(synthetic TEXT);");
+        using var imports = new ProviderImports(PathFor());
+        var before = BaseSnapshot(PathFor());
+        var backup = PathFor("failed-upgrade-backup.db");
+        Assert.Throws<SqliteException>(() => imports.EnableBatchTracking(backup));
+        Assert.False(imports.TrackingAvailable);
+        Assert.Equal(before, BaseSnapshot(PathFor()));
+        Assert.Equal(before, BaseSnapshot(backup));
+        using var check = Open();
+        Assert.Equal(0L, Scalar(check, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('provider_batch_tracking','provider_batch_rows');"));
+        Assert.Single(imports.List());
+    }
+
+    [Fact]
+    public void BatchRevokePreviewKeepsInt64BoundaryAndSubByteDecimalWithoutRounding()
+    {
+        using var imports = new ProviderImports(PathFor());
+        var committed = imports.Commit(Request(Row("9007199254740993.123456789012", "9007199254740993")));
+        var tinyRequest = Request(Row("0.0000000000000000000000000001", "7"));
+        var tiny = imports.Commit(tinyRequest with { Csv = tinyRequest.Csv.Replace("2026-01-01", "2026-01-02", StringComparison.Ordinal) });
+        var preview = imports.PreviewRevoke("synthetic-decimal", committed.Hash);
+        Assert.Equal("9007199254740993", preview.DeletedRawBytes);
+        Assert.Equal("9007199254740993.123456789012", preview.DeletedBilledBytes);
+        var total = imports.Query("synthetic-decimal", new(new(2025, 12, 31, 0, 0, 0, TimeSpan.Zero),
+            new(2026, 1, 3, 0, 0, 0, TimeSpan.Zero), "UTC"));
+        Assert.Equal("9007199254741000", total.RawBytes);
+        Assert.Equal("9007199254740993.1234567890120000000000000001", total.BilledBytes);
+        imports.Revoke(preview.Source, preview.Hash, preview.Token);
+        var small = imports.PreviewRevoke("synthetic-decimal", tiny.Hash);
+        Assert.Equal("7", small.DeletedRawBytes);
+        Assert.Equal("0.0000000000000000000000000001", small.DeletedBilledBytes);
+        imports.Revoke(small.Source, small.Hash, small.Token);
+        Assert.Empty(imports.List());
+    }
+
+    private static string BaseSnapshot(string path)
+    {
+        using var db = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        db.Open();
+        var rows = new List<object?[]>();
+        foreach (var sql in new[]
+        {
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('import_batches','provider_records') ORDER BY type,name;",
+            "SELECT * FROM import_batches ORDER BY source,hash;",
+            "SELECT * FROM provider_records ORDER BY source,hash,row_number;"
+        })
+        {
+            using var command = db.CreateCommand(); command.CommandText = sql;
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) rows.Add([sql, .. Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)]);
+        }
+        return System.Text.Json.JsonSerializer.Serialize(rows);
+    }
+
     private ImportRequest CreateLegacy()
     {
         var request = Request(Row("9223372036854775807", "9223372036854775807", "1"));

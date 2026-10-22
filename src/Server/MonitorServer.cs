@@ -16,6 +16,10 @@ using V2rayNMonitor.Core;
 
 namespace V2rayNMonitor.Server;
 
+public sealed record ProviderTrackingPrompt(string DatabasePath, string BackupPath);
+public sealed record ProviderTrackingResult(string State, string? BackupPath = null,
+    long? PreservedBatches = null, long? PreservedRecords = null);
+
 public sealed class MonitorServer : IAsyncDisposable
 {
     private WebApplication app = null!;
@@ -23,6 +27,8 @@ public sealed class MonitorServer : IAsyncDisposable
     private readonly bool demo;
     private readonly object settingsGate = new();
     private readonly SemaphoreSlim capabilityGate = new(1, 1);
+    private readonly SemaphoreSlim providerGate = new(1, 1);
+    private readonly Func<ProviderTrackingPrompt, CancellationToken, Task<bool>>? confirmProviderTracking;
     private readonly Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities;
     private readonly Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction;
     private readonly Action? invalidateCoreActions;
@@ -48,12 +54,14 @@ public sealed class MonitorServer : IAsyncDisposable
 
     private MonitorServer(string directory, bool demoMode, bool useScopeLedger, bool useProbeLedger,
         Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities,
-        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction, Action? invalidateCoreActions)
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction, Action? invalidateCoreActions,
+        Func<ProviderTrackingPrompt, CancellationToken, Task<bool>>? confirmProviderTracking)
     {
         this.inspectCoreCapabilities = inspectCoreCapabilities;
         this.coreAction = coreAction;
         this.invalidateCoreActions = invalidateCoreActions;
-        dataDir = directory; demo = demoMode; Directory.CreateDirectory(directory);
+        this.confirmProviderTracking = confirmProviderTracking;
+        dataDir = directory = Path.GetFullPath(directory); demo = demoMode; Directory.CreateDirectory(directory);
         var zone = TimeZoneInfo.Local.Id;
         if (TimeZoneInfo.TryConvertWindowsIdToIanaId(zone, out var iana)) zone = iana;
         settings = new("", zone, demo);
@@ -83,15 +91,17 @@ public sealed class MonitorServer : IAsyncDisposable
         bool useScopeLedger = false, bool useProbeLedger = false,
         Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities = null,
         Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction = null,
-        Action? invalidateCoreActions = null)
+        Action? invalidateCoreActions = null,
+        Func<ProviderTrackingPrompt, CancellationToken, Task<bool>>? confirmProviderTracking = null)
         // The WinForms tray joins this task synchronously; nested framework awaits must not
         // inherit its UI synchronization context (the same applies to Kestrel shutdown).
-        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction, invalidateCoreActions), ct);
+        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction, invalidateCoreActions, confirmProviderTracking), ct);
     private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger, bool useProbeLedger,
         Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities,
-        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction, Action? invalidateCoreActions)
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction, Action? invalidateCoreActions,
+        Func<ProviderTrackingPrompt, CancellationToken, Task<bool>>? confirmProviderTracking)
     {
-        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction, invalidateCoreActions);
+        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction, invalidateCoreActions, confirmProviderTracking);
         try { await server.StartWebAsync(webRoot, ct).ConfigureAwait(false); return server; }
         catch { await server.DisposeAsync().ConfigureAwait(false); throw; }
     }
@@ -219,9 +229,22 @@ public sealed class MonitorServer : IAsyncDisposable
             }
             return Results.File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", "v2rayn-local-history.csv");
         });
-        app.MapPost("/api/imports/preview", (ImportRequest request) => imports.Preview(request));
-        app.MapPost("/api/imports/commit", (ImportRequest request) => imports.Commit(request));
+        app.MapPost("/api/imports/preview", (ImportRequest request, HttpContext context) => ProviderImportAsync(request, context, commit: false));
+        app.MapPost("/api/imports/commit", (ImportRequest request, HttpContext context) => ProviderImportAsync(request, context, commit: true));
         app.MapGet("/api/imports", () => imports.List());
+        app.MapGet("/api/imports/features", (HttpContext context) =>
+        {
+            if (context.Request.Query.Count != 0) return Results.BadRequest();
+            var tracking = imports.TrackingAvailable;
+            return Results.Ok(new
+            {
+                trackingAvailable = tracking,
+                upgradeAvailable = !demo && confirmProviderTracking is not null && !tracking
+            });
+        });
+        app.MapPost("/api/imports/enable-tracking", (Func<HttpContext, Task<IResult>>)EnableProviderTrackingAsync);
+        app.MapPost("/api/imports/revoke-preview", (Func<HttpContext, Task<IResult>>)(context => ProviderRevokeAsync(context, execute: false)));
+        app.MapPost("/api/imports/revoke", (Func<HttpContext, Task<IResult>>)(context => ProviderRevokeAsync(context, execute: true)));
         app.MapGet("/api/provider/sources", () => imports.Sources());
         app.MapGet("/api/provider/nodes", (HttpRequest request) => imports.GetNodes(request.Query["source"].ToString()));
         app.MapGet("/api/provider/history", (HttpRequest request) => imports.Query(request.Query["source"].ToString(), ParseQuery(request)));
@@ -366,6 +389,80 @@ public sealed class MonitorServer : IAsyncDisposable
         }
     }
 
+    private static IResult ProviderBusy() => Results.Conflict(new { error = "服务商批次操作正在进行，请完成或取消确认后重试。" });
+
+    private async Task<IResult> ProviderImportAsync(ImportRequest request, HttpContext context, bool commit)
+    {
+        if (Stopping.IsCancellationRequested) return Results.StatusCode(503);
+        if (!await providerGate.WaitAsync(0, context.RequestAborted)) return ProviderBusy();
+        try { return Results.Ok(commit ? imports.Commit(request) : imports.Preview(request)); }
+        finally { providerGate.Release(); }
+    }
+
+    private async Task<IResult> EnableProviderTrackingAsync(HttpContext context)
+    {
+        if (await ReadProviderRequestAsync(context) is null) return Results.BadRequest();
+        if (Stopping.IsCancellationRequested) return Results.Ok(new ProviderTrackingResult("Cancelled"));
+        if (demo || confirmProviderTracking is null) return Results.Ok(new ProviderTrackingResult("Unavailable"));
+        if (!await providerGate.WaitAsync(0, context.RequestAborted)) return Results.Ok(new ProviderTrackingResult("Busy"));
+        try
+        {
+            if (imports.TrackingAvailable) return Results.Ok(new ProviderTrackingResult("AlreadyEnabled"));
+            var root = Path.GetFullPath(dataDir);
+            var prompt = new ProviderTrackingPrompt(Path.Combine(root, "provider.db"),
+                Path.Combine(root, "provider-before-batch-tracking-" + Guid.NewGuid().ToString("N") + ".db"));
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, Stopping);
+            deadline.CancelAfter(TimeSpan.FromMinutes(6));
+            if (!await confirmProviderTracking(prompt, deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false) ||
+                deadline.IsCancellationRequested)
+                return Results.Ok(new ProviderTrackingResult("Cancelled"));
+            // After consent the synchronous transaction completes even if HTTP/Host stop is requested.
+            var result = imports.EnableBatchTracking(prompt.BackupPath);
+            return Results.Ok(new ProviderTrackingResult("Enabled", result.BackupPath, result.PreservedBatches, result.PreservedRecords));
+        }
+        catch (OperationCanceledException) { return Results.Ok(new ProviderTrackingResult("Cancelled")); }
+        catch (Exception) { return Results.Ok(new ProviderTrackingResult("Failed")); }
+        finally { providerGate.Release(); }
+    }
+
+    private async Task<IResult> ProviderRevokeAsync(HttpContext context, bool execute)
+    {
+        var body = await ReadProviderRequestAsync(context, execute ? ["source", "hash", "token"] : ["source", "hash"]);
+        if (body is null) return Results.BadRequest();
+        if (Stopping.IsCancellationRequested) return Results.StatusCode(503);
+        var source = body["source"];
+        var hash = body["hash"];
+        if (string.IsNullOrWhiteSpace(source) || source.Length > 100 || !ValidImportToken(hash) ||
+            (execute && !ValidImportToken(body["token"]))) return Results.BadRequest();
+        if (!await providerGate.WaitAsync(0, context.RequestAborted)) return ProviderBusy();
+        try
+        {
+            if (!execute) return Results.Ok(imports.PreviewRevoke(source, hash));
+            try { return Results.Ok(imports.Revoke(source, hash, body["token"])); }
+            catch (InvalidOperationException)
+            { return Results.Conflict(new { error = "批次状态已变化或无法安全撤销，请重新预览后确认。" }); }
+        }
+        finally { providerGate.Release(); }
+    }
+
+    private static bool ValidImportToken(string value) => value.Length == 64 &&
+        value.All(char.IsAsciiHexDigit) && value == value.ToLowerInvariant();
+
+    private static async Task<Dictionary<string, string>?> ReadProviderRequestAsync(HttpContext context, params string[] fields)
+    {
+        if (context.Request.Query.Count != 0 || context.Request.ContentLength is <= 0 or > 1024) return null;
+        var limit = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (limit is { IsReadOnly: false }) limit.MaxRequestBodySize = 1024;
+        using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        if (body.RootElement.ValueKind != JsonValueKind.Object) return null;
+        var properties = body.RootElement.EnumerateObject().ToArray();
+        if (properties.Length != fields.Length ||
+            properties.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length ||
+            properties.Any(x => !fields.Contains(x.Name, StringComparer.Ordinal) || x.Value.ValueKind != JsonValueKind.String))
+            return null;
+        return properties.ToDictionary(x => x.Name, x => x.Value.GetString()!, StringComparer.Ordinal);
+    }
+
     private QuerySpec ParseQuery(HttpRequest request)
     {
         var q = request.Query;
@@ -404,6 +501,8 @@ public sealed class MonitorServer : IAsyncDisposable
             // A committed core replacement finishes verification/recovery even after HTTP cancellation.
             await capabilityGate.WaitAsync().ConfigureAwait(false);
             capabilityGate.Release();
+            await providerGate.WaitAsync().ConfigureAwait(false);
+            providerGate.Release();
             await app.DisposeAsync().ConfigureAwait(false);
         }
         imports.Dispose(); legacyLedger?.Dispose(); Scopes?.Dispose();

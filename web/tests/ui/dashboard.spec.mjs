@@ -334,6 +334,87 @@ test('raw and billing comparisons switch both sources and disclose missing multi
   await expect(page.locator('#comparison-nodes .rank-download')).toHaveCount(2);
   await expect(page.locator('#comparison-estimate-note')).toBeHidden();
 });
+test('calendar drilldown supports native keyboard in all four views without changing source or probe semantics', async ({ page }) => {
+  const series = url => url.searchParams.get('bucket') === 'month'
+    ? [{ label: '2026-11', upload: '0', download: '0' }] : [{ label: '2026-11-01', upload: '0', download: '0' }];
+  const calls = await mock(page, {
+    '/api/settings': route => route.fulfill(json({ v2rayNPath: 'C:\\Synthetic', timeZoneId: 'America/New_York', demo: true })),
+    '/api/status': route => route.fulfill(json({ state: 'demo', demo: true, probes: { historyEnabled: true, state: 'partial', message: 'Synthetic' } })),
+    '/api/provider/sources': route => route.fulfill(json(['Synthetic CSV'])),
+    '/api/provider/nodes': route => route.fulfill(json([{ key: 'Synthetic A', name: 'Synthetic A' }])),
+    '/api/history': (route, _request, url) => route.fulfill(json({ ...history, series: series(url) })),
+    '/api/provider/history': (route, _request, url) => route.fulfill(json({ source: 'Synthetic CSV', rawBytes: '0', billedBytes: '0',
+      recordCount: 1, nodes: [{ name: 'Synthetic A', rawBytes: '0', billedBytes: '0' }], records: [],
+      series: series(url).map(p => ({ label: p.label, rawBytes: '0', billedBytes: '0' })) }))
+  });
+  for (const mode of ['local', 'provider', 'comparison', 'probe']) {
+    if (mode === 'provider') { await page.selectOption('#statistics-source', 'Synthetic CSV'); await page.selectOption('#provider-metric', 'billed'); }
+    if (mode === 'comparison') await page.check('#compare-toggle');
+    if (mode === 'probe') await page.click('.nav-item[data-view=probes]');
+    await page.click('[data-period=year]');
+    const chart = page.locator(mode === 'comparison' ? '#comparison-chart' : '#chart');
+    await expect(chart.getByRole('button')).toHaveCount(1);
+    const month = chart.locator('[data-bucket-label="2026-11"]');
+    await month.focus(); await month.press('Enter');
+    const day = chart.locator('[data-bucket-label="2026-11-01"]');
+    await expect(day).toBeVisible(); await day.focus(); await day.press('Space');
+    const path = mode === 'provider' ? '/api/provider/history' : '/api/history';
+    await expect.poll(() => calls.filter(c => c.path === path).at(-1).url.searchParams.get('bucket')).toBe('hour');
+    const q = calls.filter(c => c.path === path).at(-1).url.searchParams;
+    expect(q.get('timeZoneId')).toBe('America/New_York');
+    expect(Date.parse(q.get('end')) - Date.parse(q.get('start'))).toBe(25 * 3600000);
+    expect(q.get('page')).toBe('0');
+    if (mode === 'provider' || mode === 'comparison') {
+      expect(await page.locator('#statistics-source').inputValue()).toBe('Synthetic CSV');
+      expect(await page.locator('#provider-metric').inputValue()).toBe('billed');
+    }
+    if (mode === 'probe') expect(q.get('basis')).toBe('probe_urltest_member');
+    await expect(chart).toHaveAttribute('role', 'group');
+  }
+});
+test('batch revoke is previewed precisely and a changed plan requires a fresh explicit confirmation', async ({ page }) => {
+  const batch = { source: 'Synthetic CSV', hash: 'synthetic-hash', rowCount: 0, rawBytes: '0', billedBytes: '0',
+    referencesComplete: true, fileRowCount: 2, fileRawBytes: '1', fileBilledBytes: '0.000000000001' };
+  const preview = { ...batch, token: 'synthetic-token', canRevoke: true, reason: null, deletedRowCount: 1,
+    retainedRowCount: 1, deletedRawBytes: '1', deletedBilledBytes: '0.000000000001', retainedRawBytes: '0', retainedBilledBytes: '0' };
+  const calls = await mock(page, {
+    '/api/imports': route => route.fulfill(json([batch])),
+    '/api/imports/features': route => route.fulfill(json({ trackingAvailable: true, upgradeAvailable: false })),
+    '/api/imports/revoke-preview': route => route.fulfill(json(preview)),
+    '/api/imports/revoke': route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"error":"Synthetic changed"}' })
+  });
+  await page.click('.nav-item[data-view=provider]');
+  await page.getByRole('button', { name: '预览撤销', exact: true }).click();
+  await expect(page.locator('#revoke-details')).toContainText('synthetic-hash');
+  await expect(page.locator('#revoke-details')).toContainText('0.000000000001 bytes');
+  expect(calls.filter(c => c.path === '/api/imports/revoke')).toHaveLength(0);
+  await page.click('#confirm-revoke'); await expect(page.locator('#revoke-result')).toContainText('请重新预览');
+  await expect(page.locator('#confirm-revoke')).toBeDisabled();
+  expect(calls.find(c => c.path === '/api/imports/revoke').body).toEqual({ source: 'Synthetic CSV', hash: 'synthetic-hash', token: 'synthetic-token' });
+});
+test('optional CSV archive preserves original BOM bytes and reports cancellation without undoing import', async ({ page }) => {
+  const calls = await mock(page);
+  await page.click('.nav-item[data-view=provider]');
+  await expect(page.locator('#archive-csv')).not.toBeChecked();
+  await page.check('#archive-csv'); await page.fill('#provider-source', 'Synthetic CSV');
+  await page.setInputFiles('#csv-file', { name: 'original.csv', mimeType: 'text/csv', buffer: Buffer.from([239, 187, 191, 97, 13, 10]) });
+  await page.evaluate(() => {
+    window.showSaveFilePicker = async () => ({ createWritable: async () => ({
+      write: async file => { window.syntheticArchiveBytes = [...new Uint8Array(await file.arrayBuffer())]; },
+      close: async () => { window.syntheticArchiveClosed = true; }
+    }) });
+  });
+  await page.click('#preview-import'); await page.click('#commit-import');
+  await expect(page.locator('#archive-original')).toBeVisible();
+  await expect(page.locator('#archive-result')).toContainText('尚未保存');
+  await page.click('#save-original-csv');
+  await expect(page.locator('#archive-result')).toContainText('原 CSV 已保存');
+  expect(await page.evaluate(() => window.syntheticArchiveBytes)).toEqual([239, 187, 191, 97, 13, 10]);
+  expect(await page.evaluate(() => window.syntheticArchiveClosed)).toBe(true);
+  await page.evaluate(() => { window.showSaveFilePicker = async () => { throw new DOMException('Synthetic cancel', 'AbortError'); }; });
+  await page.click('#save-original-csv'); await expect(page.locator('#archive-result')).toContainText('原 CSV 未保存');
+  expect(calls.filter(c => c.path === '/api/imports/commit')).toHaveLength(1);
+});
 test('probe view separates dimensions and keeps a readable desktop and mobile layout', async ({ page }) => {
   const calls = await mock(page, {
     '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic collector', demo: false,
