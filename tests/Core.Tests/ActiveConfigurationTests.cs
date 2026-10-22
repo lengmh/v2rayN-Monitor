@@ -2299,6 +2299,333 @@ public sealed class ActiveConfigurationTests : IDisposable
         AssertExistingComponentUnchanged(existing);
     }
 
+    private sealed class InstallFixture
+    {
+        internal readonly string Root, ClientPath, DataRoot, Candidate, Target;
+        internal readonly CoreComponent Component;
+        internal CoreInstallObservation Observation;
+        internal Action<CoreInstallCheckpoint>? Fault;
+        private readonly Dictionary<string, byte[]> untouched = [];
+        internal InstallFixture(string root, string id = "sing-box-statistics", bool appData = false, bool existing = true)
+        {
+            Root = root;
+            DataRoot = Path.Combine(root, appData ? "appdata/v2rayN" : "portable");
+            ClientPath = Path.Combine(appData ? Path.Combine(root, "program") : DataRoot, "v2rayN.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(ClientPath)!);
+            File.WriteAllBytes(ClientPath, Bytes("synthetic client identity; never executable"));
+            Component = CoreComponents.Catalog.Single(x => x.Id == id) with
+            { Sha256 = ComponentDigest(SyntheticCoreBytes), ExpectedBytes = SyntheticCoreBytes.Length };
+            Target = Path.Combine(DataRoot, "bin", id == "sing-box-statistics" ? "sing_box" : "xray", Component.FileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(Target)!);
+            if (existing) File.WriteAllBytes(Target, ExistingCoreBytes);
+            Candidate = Path.Combine(root, "candidate.bin");
+            File.WriteAllBytes(Candidate, SyntheticCoreBytes);
+            Observation = new(ClientPath, DataRoot, Path.Combine(root, "appdata/v2rayN"), Component.ClientVersion,
+                "win-x64", [new(101, 1, Start, ClientPath, "synthetic command line must not persist", "v2rayN.exe")]);
+            foreach (var relative in new[] { "monitor/history.db", "monitor/provider.db", "monitor/settings.json",
+                "portable-not-selected/bin/xray/xray.exe", "data/guiNConfig.json", "data/monitor-stats.json" })
+            {
+                var path = Path.Combine(root, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                untouched[path] = Bytes("synthetic preserved " + relative);
+                File.WriteAllBytes(path, untouched[path]);
+            }
+            var sidecar = Path.Combine(Path.GetDirectoryName(Target)!, "monitor-stats.json");
+            untouched[sidecar] = Bytes("synthetic existing sidecar");
+            File.WriteAllBytes(sidecar, untouched[sidecar]);
+        }
+        internal CoreComponentInstaller Installer() => new(Component, () => Observation, point => Fault?.Invoke(point));
+        internal string Backup(Guid id) => Path.Combine(Path.GetDirectoryName(Target)!, ".monitor-core-backups", id.ToString("N"));
+        internal void Preserved()
+        {
+            foreach (var (path, bytes) in untouched) Assert.Equal(bytes, File.ReadAllBytes(path));
+            Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(Candidate));
+        }
+        internal void Running()
+        {
+            Observation = Observation with { Processes = [.. Observation.Processes,
+                new(202, 101, Start.AddSeconds(1), Target, "synthetic run", Component.FileName)] };
+        }
+        internal void Stopped() => Observation = Observation with { Processes = [Observation.Processes[0]] };
+    }
+    private InstallFixture Installation(string id = "sing-box-statistics", bool appData = false, bool existing = true) =>
+        new(Path.Combine(directory, "install-" + Guid.NewGuid().ToString("N")), id, appData, existing);
+    private static async Task<CoreInstallPlan> Ready(CoreComponentInstaller installer, InstallFixture files)
+    {
+        var result = await installer.PrepareAsync(files.Candidate, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Ready, result.State);
+        return Assert.IsType<CoreInstallPlan>(result.Plan);
+    }
+
+    [Theory]
+    [InlineData("sing-box-statistics", false, true)]
+    [InlineData("sing-box-statistics", true, false)]
+    [InlineData("xray-probes", true, true)]
+    [InlineData("xray-probes", false, false)]
+    public async Task ComponentInstallBacksUpReplacesAndRestoresAcrossFreshSession(string id, bool appData, bool existing)
+    {
+        var f = Installation(id, appData, existing);
+        var service = f.Installer();
+        var plan = await Ready(service, f);
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-install.lock")));
+        var installed = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var operation = Assert.IsType<Guid>(installed.OperationId);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(existing, File.Exists(Path.Combine(f.Backup(operation), "previous.exe")));
+        if (existing) Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(operation), "previous.exe")));
+        var journal = File.ReadAllText(Path.Combine(f.Backup(operation), "install.json"));
+        Assert.Contains("InstalledPendingReload", journal);
+        Assert.DoesNotContain(f.DataRoot, journal);
+        Assert.DoesNotContain("synthetic command line", journal);
+        f.Observation = f.Observation with { Processes = [f.Observation.Processes[0] with { Pid = 303, StartedAt = Start.AddMinutes(1) }] };
+        var restored = await f.Installer().RestoreAsync(operation, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Restored, restored.State);
+        Assert.Equal(existing, File.Exists(f.Target));
+        if (existing) Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(CoreInstallState.AlreadyRestored,
+            (await f.Installer().RestoreAsync(operation, CancellationToken.None)).State);
+        Assert.True(Directory.Exists(f.Backup(operation)));
+        if (!existing) Assert.Single(Directory.GetFiles(f.Backup(operation), "removed-*.exe"));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("running", nameof(CoreInstallState.CoreRunning))]
+    [InlineData("missing-parent", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("multiple", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("incomplete", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("unknown-process", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("version", nameof(CoreInstallState.UnsupportedTarget))]
+    [InlineData("runtime", nameof(CoreInstallState.UnsupportedTarget))]
+    [InlineData("unrelated-root", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("missing-core-folder", nameof(CoreInstallState.UnsafePath))]
+    public async Task ComponentInstallPreflightRejectsUnverifiedTargetsWithoutWrites(string kind, string expected)
+    {
+        var f = Installation();
+        switch (kind)
+        {
+            case "running": f.Running(); break;
+            case "missing-parent": f.Observation = f.Observation with { Processes = [] }; break;
+            case "multiple": f.Observation = f.Observation with { Processes = [.. f.Observation.Processes, f.Observation.Processes[0] with { Pid = 404 }] }; break;
+            case "incomplete": f.Observation = f.Observation with { Complete = false }; break;
+            case "unknown-process": f.Observation = f.Observation with { Processes = [.. f.Observation.Processes, new(202, 101, Start, "", "", "xray.exe", "process_path_unverified")] }; break;
+            case "version": f.Observation = f.Observation with { ClientVersion = "unknown" }; break;
+            case "runtime": f.Observation = f.Observation with { Runtime = "linux-x64" }; break;
+            case "unrelated-root": f.Observation = f.Observation with { DataRoot = f.Root }; break;
+            case "missing-core-folder": Directory.Move(Path.GetDirectoryName(f.Target)!, Path.Combine(f.Root, "saved-core")); break;
+        }
+        var before = Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).OrderBy(x => x).ToArray();
+        var result = await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None);
+        Assert.Equal(expected, result.State.ToString()); Assert.Null(result.Plan);
+        Assert.Equal(before, Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).OrderBy(x => x));
+    }
+
+    [Fact]
+    public async Task ComponentInstallAlreadyMatchingFileDoesNotCreateBackups()
+    {
+        var f = Installation(); File.WriteAllBytes(f.Target, SyntheticCoreBytes);
+        Assert.Equal(CoreInstallState.AlreadyMatched, (await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None)).State);
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-core-backups")));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("old-file", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("parent", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("client", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("candidate", nameof(CoreInstallState.InvalidCandidate))]
+    [InlineData("started", nameof(CoreInstallState.CoreRunning))]
+    public async Task ComponentInstallRechecksTheConfirmedPlan(string change, string expected)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        if (change == "old-file") File.WriteAllText(f.Target, "synthetic intervening version");
+        if (change == "parent") f.Observation = f.Observation with { Processes = [f.Observation.Processes[0] with { StartedAt = Start.AddSeconds(1) }] };
+        if (change == "client") File.AppendAllText(f.ClientPath, "changed");
+        if (change == "candidate") File.AppendAllText(f.Candidate, "wrong version");
+        if (change == "started") f.Running();
+        var old = File.ReadAllBytes(f.Target);
+        Assert.Equal(expected, (await service.InstallAsync(plan, CancellationToken.None)).State.ToString());
+        Assert.Equal(old, File.ReadAllBytes(f.Target));
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-core-backups")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallRejectsFileAndTransactionLocks(bool targetLock)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        var path = targetLock ? f.Target : Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-install.lock");
+        using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        Assert.Equal(CoreInstallState.FileBusy, (await service.InstallAsync(plan, CancellationToken.None)).State);
+        held.Dispose(); Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallWindowsReadOnlyTargetKeepsOriginalAndBackup()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Windows attribute enforcement, exercised on Windows CI/local.
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        File.SetAttributes(f.Target, FileAttributes.ReadOnly);
+        try
+        {
+            var result = await service.InstallAsync(plan, CancellationToken.None);
+            Assert.Equal(CoreInstallState.PermissionDenied, result.State);
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(result.OperationId!.Value), "previous.exe")));
+            f.Preserved();
+        }
+        finally { File.SetAttributes(f.Target, FileAttributes.Normal); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallFailureBeforeOrAfterReplacementPreservesOriginal(bool after)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point => { if (point == (after ? CoreInstallCheckpoint.AfterReplace : CoreInstallCheckpoint.BackupVerified)) throw new IOException("Synthetic failure"); };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(after ? CoreInstallState.FailedRestored : CoreInstallState.StorageFailed, result.State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(result.OperationId!.Value), "previous.exe")));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallCancellationDoesNotMisreportAnAlreadyReplacedFile(bool after)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        using var cancellation = new CancellationTokenSource();
+        f.Fault = point => { if (point == (after ? CoreInstallCheckpoint.AfterReplace : CoreInstallCheckpoint.BeforeReplace)) cancellation.Cancel(); };
+        var result = await service.InstallAsync(plan, cancellation.Token);
+        Assert.Equal(after ? CoreInstallState.InstalledPendingReload : CoreInstallState.Cancelled, result.State);
+        Assert.Equal(after ? SyntheticCoreBytes : ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("target")]
+    [InlineData("backup")]
+    [InlineData("journal")]
+    [InlineData("journal-previous")]
+    [InlineData("client")]
+    [InlineData("running")]
+    public async Task ComponentInstallRestoreRefusesInterveningChanges(string kind)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        var installed = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var operation = installed.OperationId!.Value;
+        if (kind == "target") File.WriteAllText(f.Target, "synthetic newer user version");
+        if (kind == "backup") File.WriteAllText(Path.Combine(f.Backup(operation), "previous.exe"), "synthetic damaged backup");
+        if (kind == "journal") File.WriteAllText(Path.Combine(f.Backup(operation), "install.json"), "{}");
+        if (kind == "journal-previous")
+        {
+            var path = Path.Combine(f.Backup(operation), "install.json");
+            var record = JsonNode.Parse(File.ReadAllText(path))!.AsObject(); record.Remove("Previous");
+            File.WriteAllText(path, record.ToJsonString());
+        }
+        if (kind == "client") File.AppendAllText(f.ClientPath, "changed");
+        if (kind == "running") f.Running();
+        var before = File.ReadAllBytes(f.Target);
+        var result = await f.Installer().RestoreAsync(operation, CancellationToken.None);
+        Assert.Equal(kind == "running" ? CoreInstallState.CoreRunning : CoreInstallState.PlanChanged, result.State);
+        Assert.Equal(before, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallRecoveryRequiredCanResumeFromTheDurableJournal()
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point => { if (point == CoreInstallCheckpoint.AfterReplace) { f.Running(); throw new IOException("Synthetic post-replacement failure"); } };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.RecoveryRequired, result.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        f.Stopped(); f.Fault = null;
+        Assert.Equal(CoreInstallState.Restored, (await f.Installer().RestoreAsync(result.OperationId!.Value, CancellationToken.None)).State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallDoesNotOverwriteAPathSwappedAfterBackup()
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        var unexpected = Bytes("synthetic intervening atomic replacement");
+        f.Fault = point =>
+        {
+            if (point != CoreInstallCheckpoint.BeforeReplace) return;
+            var file = Path.Combine(f.Root, "intervening.exe"); File.WriteAllBytes(file, unexpected);
+            File.Replace(file, f.Target, null);
+        };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.PlanChanged, result.State);
+        Assert.Equal(unexpected, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallRejectsLinkedCoreDirectory()
+    {
+        var f = Installation(); var link = Path.GetDirectoryName(f.Target)!;
+        var actual = Path.Combine(f.Root, "saved-core"); Directory.Move(link, actual);
+        if (OperatingSystem.IsWindows())
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true };
+            start.ArgumentList.Add("-NoProfile"); start.ArgumentList.Add("-NonInteractive"); start.ArgumentList.Add("-Command");
+            start.ArgumentList.Add("$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '" + link.Replace("'", "''") + "' -Target '" + actual.Replace("'", "''") + "' | Out-Null");
+            using var process = System.Diagnostics.Process.Start(start)!; await process.WaitForExitAsync(); Assert.Equal(0, process.ExitCode);
+        }
+        else Directory.CreateSymbolicLink(link, actual);
+        try
+        {
+            Assert.Equal(CoreInstallState.UnsafePath, (await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None)).State);
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(actual, f.Component.FileName)));
+        }
+        finally { Directory.Delete(link); }
+    }
+
+    [Fact]
+    public async Task ComponentInstallFailedFirstMoveDoesNotRemoveAnotherIdenticalInstall()
+    {
+        var f = Installation(existing: false); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point => { if (point == CoreInstallCheckpoint.BeforeReplace) File.WriteAllBytes(f.Target, SyntheticCoreBytes); };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.RecoveryRequired, result.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallRefusesBackupChangedBeforeReplacement()
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point =>
+        {
+            if (point != CoreInstallCheckpoint.BeforeReplace) return;
+            var backup = Assert.Single(Directory.GetFiles(Path.GetDirectoryName(f.Target)!, "previous.exe", SearchOption.AllDirectories));
+            File.WriteAllText(backup, "synthetic damaged backup");
+        };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.PlanChanged, result.State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallWindowsRejectsAnActiveImageUnderAHardLinkAlias()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Physical file IDs are a Windows installation guard.
+        var f = Installation(); var alias = Path.Combine(f.Root, "xray.exe");
+        var start = new System.Diagnostics.ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true };
+        start.ArgumentList.Add("-NoProfile"); start.ArgumentList.Add("-NonInteractive"); start.ArgumentList.Add("-Command");
+        start.ArgumentList.Add("$ErrorActionPreference='Stop'; New-Item -ItemType HardLink -Path '" + alias.Replace("'", "''") + "' -Target '" + f.Target.Replace("'", "''") + "' | Out-Null");
+        using var process = System.Diagnostics.Process.Start(start)!; await process.WaitForExitAsync(); Assert.Equal(0, process.ExitCode);
+        f.Observation = f.Observation with { Processes = [.. f.Observation.Processes,
+            new(202, 101, Start.AddSeconds(1), alias, "synthetic run", "xray.exe")] };
+        Assert.Equal(CoreInstallState.CoreRunning, (await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None)).State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
     public void Dispose()
     {
         foreach (var stage in componentStages)
