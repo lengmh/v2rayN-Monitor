@@ -150,7 +150,11 @@ public sealed class MonitorServer : IAsyncDisposable
             context.Response.Cookies.Append("monitor_session", token, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict, IsEssential = true, Path = "/", MaxAge = TimeSpan.FromHours(12) });
             return Results.Ok(new { ok = true });
         });
-        app.MapGet("/api/status", () => Volatile.Read(ref status));
+        app.MapGet("/api/status", () => Volatile.Read(ref status) with
+        {
+            HistoryBases = Scopes is null ? ["local_proxy"] :
+                ["local_proxy", .. Scopes.Bases.Where(x => !x.StartsWith("probe_", StringComparison.Ordinal))]
+        });
         app.MapGet("/api/settings", () => Settings);
         app.MapPost("/api/settings", (AppSettings value) => { UpdateSettings(value); return Results.Ok(Settings); });
         app.MapGet("/api/timezones", () => TimeZoneInfo.GetSystemTimeZones().Select(z => new { id = TimeZoneInfo.TryConvertWindowsIdToIanaId(z.Id, out var iana) ? iana : z.Id, name = z.DisplayName }).DistinctBy(z => z.id));
@@ -213,11 +217,17 @@ public sealed class MonitorServer : IAsyncDisposable
     private string RequestedBasis(HttpRequest request)
     {
         if (!request.Query.TryGetValue("basis", out var values)) return PrimaryBasis;
-        if (values.Count != 1 || values[0] is not ("probe_urltest_member" or "probe_urltest_business" or
-            "probe_urltest_excluded" or "probe_urltest_unknown"))
-            throw new ArgumentException("显式 basis 仅支持单个 URLTest 探测维度。");
-        if (Scopes?.SupportsProbes != true) throw new ArgumentException("此实例未启用 v3 探测历史，未知不能记为零。");
-        return values[0]!;
+        if (values.Count != 1) throw new ArgumentException("请选择单个历史维度，不同维度不能相加。");
+        var basis = values[0]!;
+        if (basis == "local_proxy") return basis;
+        if (basis is "probe_urltest_member" or "probe_urltest_business" or "probe_urltest_excluded" or "probe_urltest_unknown")
+        {
+            if (Scopes?.SupportsProbes != true) throw new ArgumentException("此实例未启用 v3 探测历史，未知不能记为零。");
+            return basis;
+        }
+        if (Scopes is null || !Scopes.Bases.Contains(basis, StringComparer.Ordinal))
+            throw new ArgumentException("当前账本不支持此历史维度，请选择单个已提供的维度。");
+        return basis;
     }
     private ScopeQuery ToScopeQuery(QuerySpec query, string basis, CancellationToken cancellationToken = default)
     {

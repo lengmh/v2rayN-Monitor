@@ -67,6 +67,144 @@ public sealed class ActiveConfigurationTests : IDisposable
     private static string Change(string source, Action<JsonObject> change)
     { var root = JsonNode.Parse(source)!.AsObject(); change(root); return root.ToJsonString(); }
     private static JsonObject Proxy(JsonObject root) => root["outbounds"]![0]!.AsObject();
+    private static Dictionary<string, string?> PolicyGroup(string children = "", string subscription = "one") =>
+        new(Profile("G"))
+        {
+            ["Remarks"] = "Synthetic policy group", ["ConfigType"] = "101", ["Address"] = "", ["Port"] = "0",
+            ["ProtoExtra"] = JsonSerializer.Serialize(new { ChildItems = children, SubChildItems = subscription, MultipleLoad = 1 })
+        };
+    private static string PolicyConfiguration(int count = 2) => Change(Configuration, root =>
+    {
+        var proxy = Proxy(root).DeepClone();
+        root["outbounds"]!.AsArray().RemoveAt(0);
+        for (var i = 0; i < count; i++)
+        {
+            var member = proxy.DeepClone();
+            member["tag"] = count == 1 ? "proxy" : $"proxy-{i + 1}-Same synthetic name";
+            root["outbounds"]!.AsArray().Insert(i, member);
+        }
+        if (count > 1) root["routing"] = JsonNode.Parse("""
+            {"balancers":[{"tag":"proxy-balancer","selector":["proxy"],
+              "strategy":{"type":"leastLoad","settings":{"expected":1,"tolerance":0.2,"maxRTT":"5000ms"}}}]}
+            """);
+    });
+
+    [Fact]
+    public void SelectedPolicyGroupDoesNotRequireSingleProxyAnchor()
+    {
+        CreateProfiles(new(Profile("unsupported")) { ["ConfigType"] = "11" }, Profile("A"), Profile("B"), PolicyGroup());
+        Assert.Equal("Synthetic policy group", WindowsDiscovery.ReadProfile(Profiles, "G", Bytes(Gui),
+            Bytes(PolicyConfiguration()), out var configuration, allowMemberStatistics: true));
+        Assert.Equal("policy-group", configuration.Protocol);
+        Assert.Equal("Xray", configuration.CoreName);
+    }
+
+    [Fact]
+    public void PolicyGroupWithOneExplicitMemberStillBindsItsConnection()
+    {
+        CreateProfiles(Profile("A"), PolicyGroup("A", ""));
+        Assert.Equal("Synthetic policy group", WindowsDiscovery.ReadProfile(Profiles, "G", Bytes(Gui),
+            Bytes(PolicyConfiguration(1)), out _, allowMemberStatistics: true));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task SelectedPolicyGroupProjectsOnlyMembersAndPreservesBaselineRatesAndGaps(int count)
+    {
+        CreateProfiles(Profile("A"), Profile("B"), count == 1 ? PolicyGroup("A", "") : PolicyGroup());
+        var config = Bytes(PolicyConfiguration(count));
+        var name = WindowsDiscovery.ReadProfile(Profiles, "G", Bytes(Gui), config, out var configuration, allowMemberStatistics: true);
+        var snapshot = Snapshot("G") with
+        {
+            NodeName = name, Generation = XrayParser.Hash(config) + ":1", SelectedPolicyGroup = true,
+            PolicyGroupSingleMemberName = configuration.PolicyGroupSingleMemberName
+        };
+        Assert.True(XrayParser.TryReadOutboundCatalog(snapshot, config, out var catalog, out _));
+        Assert.Equal(count, catalog!.Candidates.Count);
+        Assert.All(catalog.Candidates.Values, member =>
+        {
+            Assert.Equal("Same synthetic name", member.CapturedName!.OriginalName);
+            Assert.Equal(name, member.CapturedName.GroupLabel);
+        });
+        var capture = new ScopeCapture(snapshot, null, []) { XrayOutbounds = catalog };
+        using var discovery = new WindowsDiscovery();
+        using var ledger = ScopeLedger.CreateNew(History);
+        ScopeCollector.Commit(ledger, ScopeCollector.ProjectLegacy(Snapshot(), new(9000, 8000), Start.AddSeconds(-1), false));
+        async Task<ScopeCollectorReading> Read(long up, long down, bool omitLast = false) =>
+            await discovery.ReadScopesBoundAsync(() => capture, (_, _) =>
+                Task.FromResult<(V2RayMemberStatistics?, XrayCounters?, V2RayProbeStatistics?, V2RayOutboundStatistics?)>((null, null, null,
+                    new(catalog.Candidates.Keys.Take(count - (omitLast ? 1 : 0)).ToDictionary(tag => tag, _ => new XrayCounters(up, down)),
+                        new Dictionary<string, string>()))), CancellationToken.None, includeProbes: true);
+        var first = await Read(100, 200);
+        Assert.Equal("connected", first.State);
+        Assert.Equal(name, first.CurrentNode);
+        Assert.Equal("unsupported", first.Probes!.State);
+        Assert.All(first.Batch!.Readings, member =>
+        {
+            Assert.Equal("actual_member", member.Scope.Basis);
+            Assert.Null(member.Scope.NodeId);
+        });
+        var firstBatch = first.Batch with { At = Start };
+        Assert.All(ScopeCollector.Commit(ledger, firstBatch).Scopes.Values, state => Assert.Equal("baseline", state));
+        Assert.Equal("0", ledger.Query(new ScopeQuery("local_proxy", Start.AddMinutes(-1), Start.AddMinutes(1), "UTC")).Upload);
+        discovery.AcknowledgePersistence();
+        var second = await Read(113, 229);
+        var secondBatch = second.Batch! with { At = Start.AddSeconds(1) };
+        ScopeCollector.Commit(ledger, secondBatch);
+        var result = ledger.Query(new ScopeQuery("local_proxy", Start.AddMinutes(-1), Start.AddMinutes(1), "UTC"));
+        Assert.Equal((count * 13).ToString(CultureInfo.InvariantCulture), result.Upload);
+        Assert.Equal((count * 29).ToString(CultureInfo.InvariantCulture), result.Download);
+        Assert.Equal((result.Upload, result.Download), ScopeCollector.Rates(firstBatch, secondBatch));
+        Assert.Single(ledger.GetScopes("legacy_proxy"));
+        var missing = await Read(120, 240, omitLast: true);
+        Assert.Equal("partial", missing.State);
+        var missingBatch = missing.Batch! with { At = Start.AddSeconds(2) };
+        ScopeCollector.Commit(ledger, missingBatch);
+        Assert.Equal((null, null), ScopeCollector.Rates(secondBatch, missingBatch));
+        Assert.Contains(ledger.Query(new ScopeQuery("local_proxy", Start.AddMinutes(-1), Start.AddMinutes(1), "UTC")).Gaps,
+            gap => gap.Reason == "missing_counter" && gap.IsOpen);
+    }
+
+    [Theory]
+    [InlineData("credential")]
+    [InlineData("transport")]
+    [InlineData("member")]
+    [InlineData("selector")]
+    [InlineData("strategy")]
+    [InlineData("chain")]
+    public void SelectedPolicyGroupDoesNotBypassMemberOrConfigurationBinding(string change)
+    {
+        CreateProfiles(Profile("A"), Profile("B"), PolicyGroup());
+        var config = Change(PolicyConfiguration(), root =>
+        {
+            switch (change)
+            {
+                case "credential": Proxy(root)["settings"]!["id"] = "00000000-0000-0000-0000-000000000002"; break;
+                case "transport": Proxy(root)["streamSettings"]!["tlsSettings"]!["serverName"] = "other.synthetic.invalid"; break;
+                case "member": root["outbounds"]!.AsArray().RemoveAt(1); break;
+                case "selector": root["routing"]!["balancers"]![0]!["selector"]![0] = "other"; break;
+                case "strategy": root["routing"]!["balancers"]![0]!["strategy"]!["type"] = "random"; break;
+                case "chain": Proxy(root)["proxySettings"] = new JsonObject { ["tag"] = "direct" }; break;
+            }
+        });
+        var failure = Assert.Throws<WindowsDiscovery.DiscoveryException>(() =>
+            WindowsDiscovery.ReadProfile(Profiles, "G", Bytes(Gui), Bytes(config), out _, allowMemberStatistics: true));
+        Assert.Equal(change == "chain" ? "unsupported_configuration" : "mapping_changed", failure.State);
+    }
+
+    [Fact]
+    public void PolicyGroupFilterAndLegacyModeAreNotIgnored()
+    {
+        var group = PolicyGroup();
+        group["ProtoExtra"] = """{"SubChildItems":"one","Filter":"does-not-match","MultipleLoad":1}""";
+        CreateProfiles(Profile("A"), Profile("B"), group);
+        Assert.Equal("mapping_changed", Assert.Throws<WindowsDiscovery.DiscoveryException>(() =>
+            WindowsDiscovery.ReadProfile(Profiles, "G", Bytes(Gui), Bytes(PolicyConfiguration()), out _, allowMemberStatistics: true)).State);
+        Assert.Equal("unsupported_mode", Assert.Throws<WindowsDiscovery.DiscoveryException>(() =>
+            WindowsDiscovery.ReadProfile(Profiles, "G", Bytes(Gui), Bytes(PolicyConfiguration()), out _)).State);
+    }
+
     private static XraySnapshot Snapshot(string node = "A", string process = "core-1", string generation = "same-configuration")
         => new("instance", node, "Same synthetic name", process, generation, Start.AddMinutes(-1), Start.AddMinutes(-2),
             "listener-1", new Uri("http://127.0.0.1:12345/debug/vars"));

@@ -123,7 +123,10 @@ public static class XrayParser
         catalog = null; reason = "snapshot_changed";
         if (snapshot.CoreName != "Xray" || string.IsNullOrEmpty(snapshot.InstanceId) ||
             !snapshot.Generation.StartsWith(Hash(json.Span) + ":", StringComparison.Ordinal)) return false;
-        if (!TryReadConfiguration(json, out var configuration, out reason) || configuration!.MetricsEndpoint != snapshot.MetricsEndpoint)
+        var parsed = snapshot.SelectedPolicyGroup
+            ? TryReadPolicyGroupConfiguration(json, out var configuration, out reason)
+            : TryReadConfiguration(json, out configuration, out reason);
+        if (!parsed || configuration!.MetricsEndpoint != snapshot.MetricsEndpoint)
             return false;
         try
         {
@@ -157,7 +160,9 @@ public static class XrayParser
                 if (!SupportedProtocol(protocol) || !TryServerIdentity(entry, protocol, out _))
                 { unavailable.Add(tag, "unsupported_member_type"); continue; }
                 CapturedNodeName? name = null;
-                if (tag == "proxy") name = new(snapshot.NodeName);
+                if (tag == "proxy") name = snapshot.SelectedPolicyGroup
+                    ? snapshot.PolicyGroupSingleMemberName is { } memberName ? new(memberName, snapshot.NodeName) : null
+                    : new(snapshot.NodeName);
                 else
                 {
                     var parents = groups.Where(x => x.Any(prefix => tag.StartsWith(prefix, StringComparison.Ordinal))).ToArray();
@@ -173,14 +178,14 @@ public static class XrayParser
                             {
                                 var separator = prefix.IndexOf("-proxy-", StringComparison.Ordinal);
                                 var label = separator > 0 && prefix[..separator].All(char.IsAsciiDigit) ? prefix[(separator + 7)..] : prefix;
-                                name = new(member[(split + 1)..], label);
+                                name = new(member[(split + 1)..], snapshot.SelectedPolicyGroup && prefix == "proxy" ? snapshot.NodeName : label);
                             }
                         }
                     }
                 }
                 candidates.Add(tag, new(tag, protocol, name));
             }
-            if (!candidates.ContainsKey("proxy")) return false;
+            if (candidates.Count == 0 || (!snapshot.SelectedPolicyGroup && !candidates.ContainsKey("proxy"))) return false;
             catalog = new(snapshot.InstanceId, snapshot.Generation, snapshot.ProcessIdentity,
                 new ReadOnlyDictionary<string, XrayOutboundIdentity>(candidates),
                 new ReadOnlyDictionary<string, string>(unavailable), groups.Count);
@@ -190,6 +195,15 @@ public static class XrayParser
     }
 
     public static bool TryReadConfiguration(ReadOnlyMemory<byte> json,
+        out XrayEffectiveConfiguration? configuration, out string reason)
+        => TryReadConfiguration(json, false, out configuration, out reason);
+
+    // The caller must additionally bind the selected group's definition and leaf connections.
+    public static bool TryReadPolicyGroupConfiguration(ReadOnlyMemory<byte> json,
+        out XrayEffectiveConfiguration? configuration, out string reason)
+        => TryReadConfiguration(json, true, out configuration, out reason);
+
+    private static bool TryReadConfiguration(ReadOnlyMemory<byte> json, bool selectedPolicyGroup,
         out XrayEffectiveConfiguration? configuration, out string reason)
     {
         configuration = null;
@@ -234,6 +248,14 @@ public static class XrayParser
                     proxy = outbound;
                 }
                 else if (protocol is not ("freedom" or "blackhole")) uncollected++;
+            }
+            if (selectedPolicyGroup)
+            {
+                if (!UniqueKeys(root) || !tags.Any(x => x == "proxy" || x.StartsWith("proxy-", StringComparison.Ordinal)))
+                    return false;
+                configuration = new(endpoint!, "policy-group", "");
+                reason = "ready";
+                return true;
             }
             if (!proxy.HasValue || !Text(proxy.Value, "protocol", out var proxyProtocol)
                 || !TryServerIdentity(proxy.Value, proxyProtocol, out var serverIdentity)) return false;
@@ -284,13 +306,32 @@ public static class XrayParser
     public static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     public static string Hash(ReadOnlySpan<byte> value) => Convert.ToHexString(SHA256.HashData(value));
 
+    public static bool MatchesSelectedOutbound(IReadOnlyDictionary<string, string?> profile,
+        ReadOnlyMemory<byte> guiJson, ReadOnlyMemory<byte> configurationJson, string tag, out string reason)
+    {
+        reason = "mapping_changed";
+        string P(string key) => profile.GetValueOrDefault(key) ?? "";
+        try
+        {
+            using var document = JsonDocument.Parse(configurationJson);
+            var outbound = Read(document.RootElement, "outbounds").EnumerateArray().Single(x => Value(x, "tag") == tag);
+            if (!int.TryParse(P("ConfigType"), out var type) || !int.TryParse(P("Port"), out var port) ||
+                !TryProfileIdentity(type, 2, P("Address"), port, P("Password"), P("Username"), out var identity) ||
+                ProtocolForConfigType(type) != Value(outbound, "protocol") ||
+                !TryServerIdentity(outbound, Value(outbound, "protocol"), out var actual) || identity != actual) return false;
+            return MatchesSelectedConnection(profile, guiJson, configurationJson, out reason, tag);
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException)
+        { return false; }
+    }
+
     /// <summary>
     /// Checks the selected 95f68d9 profile's connection fields, not uniqueness among profiles.
     /// Inputs are transient: neither profile values nor their fingerprints enter the ledger.
     /// This is a bounded projection of the pinned generator, not a replacement generator.
     /// </summary>
     public static bool MatchesSelectedConnection(IReadOnlyDictionary<string, string?> profile,
-        ReadOnlyMemory<byte> guiJson, ReadOnlyMemory<byte> configurationJson, out string reason)
+        ReadOnlyMemory<byte> guiJson, ReadOnlyMemory<byte> configurationJson, out string reason, string outboundTag = "proxy")
     {
         reason = "mapping_changed";
         try
@@ -303,7 +344,7 @@ public static class XrayParser
             var proto = protocol.RootElement;
             var trans = transport.RootElement;
             var defaults = Read(gui.RootElement, "CoreBasicItem");
-            var proxy = Read(config.RootElement, "outbounds").EnumerateArray().Single(x => Value(x, "tag") == "proxy");
+            var proxy = Read(config.RootElement, "outbounds").EnumerateArray().Single(x => Value(x, "tag") == outboundTag);
             var settings = Read(proxy, "settings");
             var stream = Read(proxy, "streamSettings");
             var kind = Value(proxy, "protocol");
