@@ -1689,5 +1689,111 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.NotEqual(command, probes);
     }
 
+    private static CoreComponent SyntheticComponent(byte[] bytes) => new("synthetic", "synthetic-1", "synthetic.exe",
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)), SingboxParser.ClientVersion,
+        "win-x64", "synthetic-source", "synthetic-only", bytes.Length);
+
+    [Fact]
+    public void ComponentCatalogReusesApprovedIdentitiesWithoutClaimingDeployment()
+    {
+        Assert.Equal(2, CoreComponents.Catalog.Count);
+        var singbox = Assert.Single(CoreComponents.Catalog, x => x.Id == "sing-box-statistics");
+        Assert.True(WindowsDiscovery.IsApprovedExtension(singbox.Sha256, true));
+        Assert.False(WindowsDiscovery.IsApprovedExtension(singbox.Sha256, false));
+        Assert.Equal(WindowsDiscovery.ApprovedProbeXraySha256,
+            Assert.Single(CoreComponents.Catalog, x => x.Id == "xray-probes").Sha256);
+        Assert.All(CoreComponents.Catalog, x =>
+        {
+            Assert.Equal(SingboxParser.ClientVersion, x.ClientVersion);
+            Assert.Equal("win-x64", x.Runtime);
+            Assert.Null(x.ExpectedBytes); // Release ZIP sizes must not become EXE sizes.
+            Assert.False(string.IsNullOrWhiteSpace(x.Version));
+            Assert.False(string.IsNullOrWhiteSpace(x.License));
+        });
+        Assert.Equal(CoreFileState.UnknownComponent,
+            CoreComponents.Verify("untrusted", directory, SingboxParser.ClientVersion, "win-x64").State);
+    }
+
+    [Fact]
+    public void ComponentFileIdentityMatchIsReadOnlyAndDoesNotRunTheFile()
+    {
+        Directory.CreateDirectory(directory);
+        var content = Bytes("synthetic non-executable core contents");
+        var path = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(path, content);
+        var written = File.GetLastWriteTimeUtc(path);
+        var result = CoreComponents.VerifyFile(SyntheticComponent(content), path, SingboxParser.ClientVersion, "win-x64");
+        Assert.Equal(CoreFileState.IdentityMatched, result.State);
+        Assert.Equal(content.Length, result.ActualBytes);
+        foreach (var component in CoreComponents.Catalog)
+            Assert.Equal(CoreFileState.DigestMismatch,
+                CoreComponents.Verify(component.Id, path, SingboxParser.ClientVersion, "win-x64").State);
+        Assert.Equal(content, File.ReadAllBytes(path));
+        Assert.Equal(written, File.GetLastWriteTimeUtc(path));
+        Assert.Single(Directory.GetFiles(directory));
+    }
+
+    [Theory]
+    [InlineData("truncated", nameof(CoreFileState.SizeMismatch))]
+    [InlineData("extended", nameof(CoreFileState.SizeMismatch))]
+    [InlineData("different-version", nameof(CoreFileState.DigestMismatch))]
+    public void ComponentFileMismatchNeverRepairsOrOverwrites(string mutation, string expected)
+    {
+        Directory.CreateDirectory(directory);
+        var original = Bytes("synthetic-version-1");
+        var changed = mutation switch
+        {
+            "truncated" => original[..^1],
+            "extended" => [.. original, (byte)'!'],
+            _ => Bytes("synthetic-version-2")
+        };
+        var path = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(path, changed);
+        Assert.Equal(expected,
+            CoreComponents.VerifyFile(SyntheticComponent(original), path, SingboxParser.ClientVersion, "win-x64").State.ToString());
+        Assert.Equal(changed, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void ComponentFileWithNoPublishedExeSizeStillRequiresTheExactDigest()
+    {
+        Directory.CreateDirectory(directory);
+        var bytes = Bytes("synthetic");
+        var path = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(path, bytes);
+        var component = SyntheticComponent(bytes) with { ExpectedBytes = null };
+        Assert.Equal(CoreFileState.IdentityMatched,
+            CoreComponents.VerifyFile(component, path, SingboxParser.ClientVersion, "win-x64").State);
+        File.AppendAllText(path, "different-version");
+        Assert.Equal(CoreFileState.DigestMismatch,
+            CoreComponents.VerifyFile(component, path, SingboxParser.ClientVersion, "win-x64").State);
+    }
+
+    [Theory]
+    [InlineData("missing", nameof(CoreFileState.Missing))]
+    [InlineData("client", nameof(CoreFileState.UnsupportedClient))]
+    [InlineData("runtime", nameof(CoreFileState.UnsupportedRuntime))]
+    [InlineData("digest", nameof(CoreFileState.InvalidDescriptor))]
+    [InlineData("size", nameof(CoreFileState.InvalidDescriptor))]
+    public void ComponentUnavailableInputsRemainUnavailableWithoutCreatingFiles(string kind, string expected)
+    {
+        var component = SyntheticComponent(Bytes("synthetic"));
+        if (kind == "digest") component = component with { Sha256 = "not-a-digest" };
+        if (kind == "size") component = component with { ExpectedBytes = 0 };
+        var result = CoreComponents.VerifyFile(component, Path.Combine(directory, "missing.exe"),
+            kind == "client" ? "unknown-client" : SingboxParser.ClientVersion, kind == "runtime" ? "linux-x64" : "win-x64");
+        Assert.Equal(expected, result.State.ToString());
+        Assert.False(Directory.Exists(directory));
+    }
+
+    [Fact]
+    public void ComponentUnreadablePathDoesNotEscapeAsAnUncaughtIoError()
+    {
+        Directory.CreateDirectory(directory);
+        Assert.Equal(CoreFileState.Unreadable,
+            CoreComponents.VerifyFile(SyntheticComponent(Bytes("synthetic")), directory, SingboxParser.ClientVersion, "win-x64").State);
+        Assert.Empty(Directory.GetFiles(directory));
+    }
+
     public void Dispose() { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
 }
