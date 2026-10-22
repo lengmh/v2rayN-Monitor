@@ -2488,10 +2488,13 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Contains(f.Component.Sha256, prompts[0].Message);
         var operation = Guid.ParseExact(installed.OperationId!, "N");
         Assert.Equal(f.Backup(operation), installed.BackupDirectory);
+        Assert.Contains(installed.BackupDirectory!, prompts[0].Message);
         var restored = await service.ExecuteAsync(f.DataRoot, new("restore", component, installed.OperationId), CancellationToken.None);
         Assert.Equal("Restored", restored.State);
         Assert.Equal(2, prompts.Count);
         Assert.Contains(installed.OperationId!, prompts[1].Message);
+        Assert.Contains(ComponentDigest(SyntheticCoreBytes), prompts[1].Message);
+        Assert.Contains(ComponentDigest(ExistingCoreBytes), prompts[1].Message);
         Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
         f.Preserved();
     }
@@ -2533,6 +2536,41 @@ public sealed class ActiveConfigurationTests : IDisposable
         var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), CancellationToken.None);
         Assert.Equal(preparation.ToString(), result.State);
         Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentActionDoesNotChangeTheConfirmedBackupLocationIfItBecomesOccupied()
+    {
+        var f = Installation();
+        string? backup = null;
+        var service = ComponentActions(f, (prompt, _) =>
+        {
+            backup = prompt.Message.Split('\n').Single(x => x.StartsWith("新备份位置：", StringComparison.Ordinal))["新备份位置：".Length..];
+            Directory.CreateDirectory(backup);
+            File.WriteAllText(Path.Combine(backup, "synthetic-sentinel"), "owned by another operation");
+            return Task.FromResult(true);
+        });
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), CancellationToken.None);
+        Assert.Equal("StorageFailed", result.State);
+        Assert.Null(result.OperationId);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(new[] { backup }, Directory.GetDirectories(Path.GetDirectoryName(backup!)!));
+        Assert.Equal("owned by another operation", File.ReadAllText(Path.Combine(backup!, "synthetic-sentinel")));
+    }
+
+    [Fact]
+    public async Task ComponentActionRestoreConfirmationContainsBothFileIdentities()
+    {
+        var f = Installation();
+        var installer = f.Installer();
+        var installed = await installer.InstallAsync(await Ready(installer, f), CancellationToken.None);
+        CoreActionPrompt? shown = null;
+        var service = ComponentActions(f, (prompt, _) => { shown = prompt; return Task.FromResult(false); });
+        Assert.Equal("Cancelled", (await service.ExecuteAsync(f.DataRoot,
+            new("restore", f.Component.Id, installed.OperationId!.Value.ToString("N")), CancellationToken.None)).State);
+        Assert.Contains(ComponentDigest(SyntheticCoreBytes), shown!.Message);
+        Assert.Contains(ComponentDigest(ExistingCoreBytes), shown.Message);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
     }
 
     [Fact]
