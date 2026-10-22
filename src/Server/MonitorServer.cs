@@ -25,6 +25,7 @@ public sealed class MonitorServer : IAsyncDisposable
     private readonly SemaphoreSlim capabilityGate = new(1, 1);
     private readonly Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities;
     private readonly Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction;
+    private readonly Action? invalidateCoreActions;
     private bool coreActionActive;
     public sealed class CoreActionBusyException : InvalidOperationException { }
     private long settingsRevision;
@@ -47,10 +48,11 @@ public sealed class MonitorServer : IAsyncDisposable
 
     private MonitorServer(string directory, bool demoMode, bool useScopeLedger, bool useProbeLedger,
         Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities,
-        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction)
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction, Action? invalidateCoreActions)
     {
         this.inspectCoreCapabilities = inspectCoreCapabilities;
         this.coreAction = coreAction;
+        this.invalidateCoreActions = invalidateCoreActions;
         dataDir = directory; demo = demoMode; Directory.CreateDirectory(directory);
         var zone = TimeZoneInfo.Local.Id;
         if (TimeZoneInfo.TryConvertWindowsIdToIanaId(zone, out var iana)) zone = iana;
@@ -80,15 +82,16 @@ public sealed class MonitorServer : IAsyncDisposable
     public static Task<MonitorServer> StartAsync(string directory, string webRoot, bool demo = false, CancellationToken ct = default,
         bool useScopeLedger = false, bool useProbeLedger = false,
         Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities = null,
-        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction = null)
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction = null,
+        Action? invalidateCoreActions = null)
         // The WinForms tray joins this task synchronously; nested framework awaits must not
         // inherit its UI synchronization context (the same applies to Kestrel shutdown).
-        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction), ct);
+        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction, invalidateCoreActions), ct);
     private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger, bool useProbeLedger,
         Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities,
-        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction)
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction, Action? invalidateCoreActions)
     {
-        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction);
+        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction, invalidateCoreActions);
         try { await server.StartWebAsync(webRoot, ct).ConfigureAwait(false); return server; }
         catch { await server.DisposeAsync().ConfigureAwait(false); throw; }
     }
@@ -112,6 +115,7 @@ public sealed class MonitorServer : IAsyncDisposable
             var target = Path.Combine(dataDir, "settings.json"); var temp = target + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(next, Json)); File.Move(temp, target, true); settings = next;
             settingsRevision++;
+            invalidateCoreActions?.Invoke();
         }
     }
     private async Task StartWebAsync(string webRoot, CancellationToken ct)
@@ -337,7 +341,7 @@ public sealed class MonitorServer : IAsyncDisposable
         using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
         if (body.RootElement.ValueKind != JsonValueKind.Object) return Results.BadRequest();
         var properties = body.RootElement.EnumerateObject().ToArray();
-        if (properties.Any(x => x.Name is not ("action" or "componentId" or "operationId")) ||
+        if (properties.Any(x => x.Name is not ("action" or "componentId" or "operationId" or "planId")) ||
             properties.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length)
             return Results.BadRequest();
         var request = body.RootElement.Deserialize<CoreActionRequest>(Json);

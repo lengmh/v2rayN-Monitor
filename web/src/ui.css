@@ -209,6 +209,9 @@ tbody tr:hover { background: var(--hover); }
 #core-action-result { color: var(--muted); }
 #core-action-result.error { color: var(--error); }
 #core-action-record { white-space: pre-line; overflow-wrap: anywhere; }
+#core-sidecar-result, #core-runtime-result { color: var(--muted); }
+#core-sidecar-result.error, #core-runtime-result.error { color: var(--error); }
+#core-sidecar-record, #core-sidecar-details, #core-runtime-details { white-space: pre-line; overflow-wrap: anywhere; }
 .core-ledger-help { margin-top: 16px; }
 .setup-list { padding-left: 20px; font-size: 12px; color: var(--muted); line-height: 2.2; margin: 0 0 16px; }
 .import-help { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; }

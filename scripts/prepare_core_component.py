@@ -142,6 +142,11 @@ def prepare(component_id: str, build_root: Path, output: Path) -> dict:
     files = {spec["binary"]: binary, Path(spec["archive"]).name: source}
     if spec["extension"] == "sing-box":
         files["NOTICE.txt"] = read_file(extension / "LICENSE")
+        copying = read_file(extension / "COPYING")
+        if len(copying) != 35149:
+            raise ValueError("GPLv3 COPYING size mismatch")
+        require_hash(copying, "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986", "GPLv3 COPYING")
+        files["COPYING"] = copying
     for name in spec["patches"]:
         patch = read_file(extension / name)
         expected = provenance["patchSha256"]

@@ -46,7 +46,7 @@ function discloseGroups(button: HTMLButtonElement, groups: string[], key: string
 class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
 let expired = false;
 let ready = false;
-const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo', 'check-core-capabilities', 'prepare-core-install', 'prepare-core-restore'];
+const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo', 'check-core-capabilities', 'prepare-core-install', 'prepare-core-restore', 'prepare-core-sidecar', 'apply-core-sidecar', 'restore-core-sidecar', 'verify-core-runtime'];
 for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 let refreshController: AbortController | null = null;
 let statusController: AbortController | null = null;
@@ -62,6 +62,8 @@ let coreCapabilitiesRevision = 0;
 let coreCapabilitiesController: AbortController | null = null;
 let coreActionRevision = 0;
 let coreActionController: AbortController | null = null;
+let coreSidecarPlanId = '';
+type CoreAction = 'install' | 'restore' | 'prepare-sidecar' | 'apply-sidecar' | 'restore-sidecar' | 'verify-runtime';
 let period: Period = 'month';
 let anchor = dateInZone(new Date(), 'UTC');
 let range: Range;
@@ -133,25 +135,47 @@ function coreDirectoryChanged(): boolean {
 function updateCoreControls(): void {
   const actionBusy = coreActionController !== null;
   const disabled = !ready || expired || savingSettings || coreCapabilitiesController !== null || actionBusy || coreDirectoryChanged();
-  for (const id of ['check-core-capabilities', 'prepare-core-install', 'prepare-core-restore'])
+  for (const id of ['check-core-capabilities', 'prepare-core-install', 'prepare-core-restore', 'verify-core-runtime'])
     el<HTMLButtonElement>(id).disabled = disabled;
+  const sidecarDisabled = disabled || el<HTMLSelectElement>('core-action-component').value !== 'sing-box-statistics';
+  el<HTMLButtonElement>('prepare-core-sidecar').disabled = sidecarDisabled;
+  for (const id of ['apply-core-sidecar', 'restore-core-sidecar'])
+    el<HTMLButtonElement>(id).disabled = sidecarDisabled || !coreSidecarPlanId;
   for (const id of ['core-action-component', 'core-restore-operation', 'v2rayn-path', 'time-zone'])
     el<HTMLInputElement | HTMLSelectElement>(id).disabled = expired || actionBusy;
   el<HTMLButtonElement>('save-settings').disabled = !ready || expired || savingSettings || actionBusy;
 }
-function invalidateCoreAction(message = '尚未发起安装或恢复。'): void {
+function invalidateCoreAction(message = '尚未发起安装或恢复。', clearExtensions = true): void {
   coreActionRevision++;
   coreActionController?.abort(); coreActionController = null;
   el('core-actions').setAttribute('aria-busy', 'false');
   put('core-action-record', ''); show('core-action-record', false);
   formResult('core-action-result', message);
+  if (clearExtensions) {
+    clearCoreExtensions();
+    el<HTMLInputElement>('core-restore-operation').value = '';
+  }
   updateCoreControls();
 }
-function renderCoreAction(result: CoreActionResult): void {
+function clearCoreRuntime(): void {
+  formResult('core-runtime-result', '尚未核验运行核心。');
+  put('core-runtime-details', ''); show('core-runtime-details', false);
+}
+function clearCoreExtensions(): void {
+  coreSidecarPlanId = '';
+  formResult('core-sidecar-result', '尚未准备统计配置。');
+  for (const id of ['core-sidecar-details', 'core-sidecar-record']) { put(id, ''); show(id, false); }
+  clearCoreRuntime();
+}
+function coreActionMessage(state: string): { message: string; isError: boolean } {
   const labels: Record<string, string> = {
     AssetUnavailable: '独立组件尚未发布，未下载或安装。',
     ExistingFileMatched: '现有文件摘要一致，无需替换；运行核心与统计接口仍待核实。',
     AlreadyMatched: '现有文件摘要一致，无需替换；运行核心与统计接口仍待核实。',
+    SidecarPrepared: '统计配置已准备。请自行停止目标核心，再打开写入确认；尚未修改统计配置。',
+    SidecarAlreadyMatched: '现有统计配置与准备结果一致。未改文件；运行核心与统计接口仍需另行核验。',
+    SidecarInstalledPendingReload: '统计配置已写入，等待你手动重载 v2rayN；运行核心与统计接口仍需另行核验。',
+    SidecarRestored: '本次操作的统计配置已恢复，等待你手动重载 v2rayN。账本未改动。',
     Unavailable: '当前环境未提供配套核心操作能力，未执行安装或恢复。',
     UnsafePath: '目标路径未通过安全核验，未继续执行。',
     InvalidCandidate: '候选组件未通过核验，未继续执行。',
@@ -177,39 +201,94 @@ function renderCoreAction(result: CoreActionResult): void {
     ConfirmationRequired: '尚需 Host 原生窗口确认，未完成文件操作。'
   };
   const errorStates = ['FailedRestored', 'TimedOut', 'DownloadFailed', 'InvalidArchive', 'PermissionDenied', 'FileBusy', 'StorageFailed', 'RecoveryRequired', 'InvalidRequest', 'UnsafePath', 'InvalidCandidate', 'UnsupportedExisting'];
-  formResult('core-action-result', labels[result.state] ?? '返回状态未知。请核对 Host 操作记录，勿据此认为安装或恢复完成。',
-    errorStates.includes(result.state) || !labels[result.state]);
+  return { message: labels[state] ?? '返回状态未知。请核对 Host 操作记录，勿据此认为安装或恢复完成。',
+    isError: errorStates.includes(state) || !labels[state] };
+}
+function renderCoreAction(result: CoreActionResult): void {
+  const { message, isError } = coreActionMessage(result.state);
+  formResult('core-action-result', message, isError);
   const record = [result.operationId ? `操作 ID：${result.operationId}` : '', result.backupDirectory ? `备份目录：${result.backupDirectory}` : ''].filter(Boolean).join('\n');
   put('core-action-record', record); show('core-action-record', !!record);
 }
-async function prepareCoreAction(action: 'install' | 'restore'): Promise<void> {
+function renderCoreSidecar(result: CoreActionResult): void {
+  const keepPlan = ['SidecarPrepared', 'SidecarAlreadyMatched', 'CoreRunning', 'Cancelled', 'FileBusy', 'PortUnavailable'].includes(result.state);
+  coreSidecarPlanId = keepPlan && result.planId && /^[0-9a-f]{32}$/i.test(result.planId) && !/^0{32}$/.test(result.planId)
+    ? result.planId.toLowerCase() : '';
+  const { message, isError } = coreActionMessage(result.state);
+  formResult('core-sidecar-result', message, isError);
+  put('core-sidecar-details', result.details ?? ''); show('core-sidecar-details', !!result.details);
+  const record = [result.operationId ? `操作 ID：${result.operationId}` : '', result.backupDirectory ? `备份目录：${result.backupDirectory}` : ''].filter(Boolean).join('\n');
+  put('core-sidecar-record', record); show('core-sidecar-record', !!record);
+}
+function renderCoreRuntime(result: CoreActionResult): void {
+  const runtime = result.runtime;
+  if (result.state !== 'RuntimeChecked' || !runtime) {
+    const { message, isError } = coreActionMessage(result.state);
+    formResult('core-runtime-result', result.state === 'RuntimeChecked' ? '未取得完整运行核验结果。' : message, isError || !runtime);
+    return;
+  }
+  const verified = runtime.state === 'verified' && runtime.fileIdentityVerified && runtime.statisticsAvailable;
+  const states: Record<string, string> = {
+    different_core: '运行的是另一种核心，所选配套核心未通过本次核验。',
+    unverified_core: '运行文件身份尚未核实，不能确认所选配套核心。',
+    core_not_running: '目标核心未运行，请手动重载后重新核验。',
+    ambiguous_instance: '运行实例归属不明确，未通过本次核验。',
+    statistics_unavailable: '普通统计接口暂不可用，未通过本次核验。'
+  };
+  formResult('core-runtime-result', verified ? '当前所选配套核心与普通统计接口已核实。'
+    : states[runtime.state] ?? '当前运行状态未通过完整核验，请核对核心与统计接口。', !verified);
+  const probes: Record<string, string> = { available: '计数可用', partial: '部分计数可用', unavailable: '计数不可用', unsupported: '当前核心不支持', disabled: '未启用', waiting: '等待采样' };
+  const members = runtime.statisticsAvailable && Number.isSafeInteger(runtime.memberCount) && runtime.memberCount >= 0 ? String(runtime.memberCount) : '未知';
+  put('core-runtime-details', `运行核心：${runtime.coreName ?? '未知'}\n运行文件身份：${runtime.fileIdentityVerified ? '已核实' : '未核实'}\n普通统计接口：${runtime.statisticsAvailable ? '可读（reset=false）' : '不可用'} · 成员数：${members}\n独立探测：${probes[runtime.probeState] ?? '状态未知'}\n核验时间：${timestamp(runtime.checkedAt, settings.timeZoneId)}`);
+  show('core-runtime-details', true);
+}
+async function prepareCoreAction(action: CoreAction): Promise<void> {
   if (!ready || expired || savingSettings || coreCapabilitiesController || coreActionController || coreDirectoryChanged()) return;
   const componentId = el<HTMLSelectElement>('core-action-component').value;
   if (!['sing-box-statistics', 'xray-probes'].includes(componentId)) {
     formResult('core-action-result', '请选择支持的配套组件。', true); return;
   }
+  const sidecar = action.endsWith('-sidecar'), runtime = action === 'verify-runtime';
+  const resultId = runtime ? 'core-runtime-result' : sidecar ? 'core-sidecar-result' : 'core-action-result';
+  if (sidecar && componentId !== 'sing-box-statistics') return;
+  const needsPlan = action === 'apply-sidecar' || action === 'restore-sidecar';
+  if (needsPlan && !coreSidecarPlanId) { formResult(resultId, '请先在目标核心运行时准备统计配置。', true); return; }
   const enteredOperationId = el<HTMLInputElement>('core-restore-operation').value.trim();
   const operationId = enteredOperationId.replaceAll('-', '').toLowerCase();
   const validOperationId = /^[0-9a-f]{32}$/i.test(enteredOperationId) ||
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(enteredOperationId);
-  if (action === 'restore' && (!validOperationId || /^0{32}$/.test(operationId))) {
-    formResult('core-action-result', '请输入有效的恢复操作 ID（GUID），不能填写路径。', true); return;
+  const restore = action === 'restore' || action === 'restore-sidecar';
+  if (restore && (!validOperationId || /^0{32}$/.test(operationId))) {
+    formResult(resultId, '请输入有效的恢复操作 ID（GUID），不能填写路径。', true); return;
   }
-  invalidateCoreCapabilities('配套核心操作已开始，请在结束后重新只读检查。');
+  if (!runtime) invalidateCoreCapabilities('配套核心操作已开始，请在结束后重新只读检查。');
+  if (!sidecar && !runtime) clearCoreExtensions();
+  else clearCoreRuntime();
+  const planId = coreSidecarPlanId;
+  if (action === 'prepare-sidecar') coreSidecarPlanId = '';
   const revision = ++coreActionRevision, controller = new AbortController();
   coreActionController = controller; updateCoreControls();
   el('core-actions').setAttribute('aria-busy', 'true');
-  put('core-action-record', ''); show('core-action-record', false);
-  formResult('core-action-result', `正在准备${action === 'install' ? '安装' : '恢复'}…满足条件后，Host 将打开原生确认窗口，请核对目标、备份及连接风险。此处不会自动停止核心。`);
+  if (!runtime) {
+    const recordId = sidecar ? 'core-sidecar-record' : 'core-action-record';
+    put(recordId, ''); show(recordId, false);
+  }
+  const pending = runtime ? '正在只读核验当前进程与普通统计接口，不写账本…'
+    : action === 'prepare-sidecar' ? '正在准备统计配置，请保持目标核心运行以核实真实基线…'
+    : sidecar ? '正在准备统计配置操作…请自行停止目标核心，并在 Host 原生窗口核对目标、备份及连接风险。此处不会停止核心。'
+    : `正在准备${action === 'install' ? '安装' : '恢复'}…满足条件后，Host 将打开原生确认窗口，请核对目标、备份及连接风险。此处不会自动停止核心。`;
+  formResult(resultId, pending);
   try {
     const result = await api<CoreActionResult>('/api/core-actions', {
-      method: 'POST', body: JSON.stringify({ action, componentId, ...(action === 'restore' ? { operationId } : {}) }), signal: controller.signal
+      method: 'POST', body: JSON.stringify({ action, componentId, ...(restore ? { operationId } : {}), ...(needsPlan ? { planId } : {}) }), signal: controller.signal
     }, 390000);
     if (revision !== coreActionRevision || expired || coreDirectoryChanged()) return;
-    renderCoreAction(result);
+    if (runtime) renderCoreRuntime(result); else if (sidecar) renderCoreSidecar(result); else renderCoreAction(result);
   } catch (error) {
-    if (revision === coreActionRevision && !expired)
-      formResult('core-action-result', `未能取得最终结果。${errorText(error)} 请核对 Host 原生窗口和操作记录后再继续，不会自动重试。`, true);
+    if (revision === coreActionRevision && !expired) {
+      if (sidecar) coreSidecarPlanId = '';
+      formResult(resultId, `未能取得最终结果。${errorText(error)} 请核对 Host 原生窗口和操作记录后再继续，不会自动重试。`, true);
+    }
   } finally {
     if (coreActionController === controller) {
       coreActionController = null; el('core-actions').setAttribute('aria-busy', 'false'); updateCoreControls();
@@ -239,7 +318,7 @@ function renderCoreCapabilities(result: CoreCapabilities): void {
   el('core-components').replaceChildren(...result.components.map(component => {
     const item = element('li');
     item.append(element('strong', `${component.name} · ${component.version}`),
-      element('p', `文件：${files[component.fileState] ?? '文件状态未知'} · 下载：${component.downloadState === 'asset_unavailable' ? '独立组件尚未发布' : '状态未知'} · 许可：${component.license}`, 'muted'));
+      element('p', `文件：${files[component.fileState] ?? '文件状态未知'} · 下载：${component.downloadState === 'asset_unavailable' ? '独立组件尚未发布' : component.downloadState === 'available' ? '固定兼容版本可下载' : '状态未知'} · 许可：${component.license}`, 'muted'));
     if (component.id === 'xray-probes')
       item.append(element('p', '仅用于可选的独立探测计量；文件不匹配不影响原生 Xray 普通统计，无需为普通统计替换核心。', 'muted'));
     return item;
@@ -1287,13 +1366,17 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-exact]'
 el('check-core-capabilities').addEventListener('click', () => { void checkCoreCapabilities(); });
 el('prepare-core-install').addEventListener('click', () => { void prepareCoreAction('install'); });
 el('prepare-core-restore').addEventListener('click', () => { void prepareCoreAction('restore'); });
+el('prepare-core-sidecar').addEventListener('click', () => { void prepareCoreAction('prepare-sidecar'); });
+el('apply-core-sidecar').addEventListener('click', () => { void prepareCoreAction('apply-sidecar'); });
+el('restore-core-sidecar').addEventListener('click', () => { void prepareCoreAction('restore-sidecar'); });
+el('verify-core-runtime').addEventListener('click', () => { void prepareCoreAction('verify-runtime'); });
 for (const event of ['input', 'change']) el('v2rayn-path').addEventListener(event, () => {
   invalidateCoreCapabilities();
   invalidateCoreAction('目录已修改，旧操作结果已清除。请保存设置后再发起操作；若有待确认操作，请先核对 Host。');
 });
 el('time-zone').addEventListener('change', () => invalidateCoreAction('设置已修改，旧操作结果已清除。请保存设置后再发起操作。'));
 el('core-action-component').addEventListener('change', () => invalidateCoreAction());
-el('core-restore-operation').addEventListener('input', () => invalidateCoreAction());
+el('core-restore-operation').addEventListener('input', () => invalidateCoreAction(undefined, false));
 el('settings-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (coreActionController) { formResult('settings-result', '请先完成或取消 Host 中的配套核心确认，操作结束后再保存设置。', true); return; }
