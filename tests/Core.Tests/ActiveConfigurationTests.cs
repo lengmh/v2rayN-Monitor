@@ -2459,6 +2459,114 @@ public sealed class ActiveConfigurationTests : IDisposable
             CoreCapabilityInspector.InspectAsync(f.Observation, [f.Component], new CancellationToken(true)));
     }
 
+    private static CoreComponentActions ComponentActions(InstallFixture fixture,
+        Func<CoreActionPrompt, CancellationToken, Task<bool>> confirmation,
+        CorePreparationState preparation = CorePreparationState.DownloadVerified)
+    {
+        Directory.CreateDirectory(Path.Combine(fixture.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(fixture.DataRoot, "binConfigs"));
+        return new([fixture.Component], _ => fixture.Observation, confirmation,
+            (_, path, _, _) =>
+            {
+                Assert.Equal(fixture.Target, path);
+                return Task.FromResult(new CorePreparation(preparation, fixture.Candidate));
+            });
+    }
+
+    [Theory]
+    [InlineData("sing-box-statistics")]
+    [InlineData("xray-probes")]
+    public async Task ComponentActionRequiresNativeConfirmationThenInstallsAndRestoresOnlyItsFile(string component)
+    {
+        var f = Installation(component);
+        var prompts = new List<CoreActionPrompt>();
+        var service = ComponentActions(f, (prompt, _) => { prompts.Add(prompt); return Task.FromResult(true); });
+        var installed = await service.ExecuteAsync(f.DataRoot, new("install", component), CancellationToken.None);
+        Assert.Equal("InstalledPendingReload", installed.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Contains(f.Target, Assert.Single(prompts).Message);
+        Assert.Contains(f.Component.Sha256, prompts[0].Message);
+        var operation = Guid.ParseExact(installed.OperationId!, "N");
+        Assert.Equal(f.Backup(operation), installed.BackupDirectory);
+        var restored = await service.ExecuteAsync(f.DataRoot, new("restore", component, installed.OperationId), CancellationToken.None);
+        Assert.Equal("Restored", restored.State);
+        Assert.Equal(2, prompts.Count);
+        Assert.Contains(installed.OperationId!, prompts[1].Message);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("cancel", "Cancelled")]
+    [InlineData("running", "CoreRunning")]
+    [InlineData("changed", "PlanChanged")]
+    [InlineData("cancel-token", "Cancelled")]
+    public async Task ComponentActionDoesNotWriteWithoutFreshConsentAndStoppedUnchangedTarget(string scenario, string expected)
+    {
+        var f = Installation();
+        using var cancellation = new CancellationTokenSource();
+        if (scenario == "running") f.Running();
+        var prompts = 0;
+        var service = ComponentActions(f, (_, _) =>
+        {
+            prompts++;
+            if (scenario == "changed") File.WriteAllText(f.Target, "changed during confirmation");
+            if (scenario == "cancel-token") cancellation.Cancel();
+            return Task.FromResult(scenario != "cancel");
+        });
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), cancellation.Token);
+        Assert.Equal(expected, result.State);
+        Assert.Equal(scenario == "running" ? 0 : 1, prompts);
+        Assert.Equal(scenario == "changed" ? Bytes("changed during confirmation") : ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-core-backups")));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData(nameof(CorePreparationState.AssetUnavailable))]
+    [InlineData(nameof(CorePreparationState.ExistingFileMatched))]
+    public async Task ComponentActionUnavailableOrMatchedNeedsNoConfirmationOrFileWrites(string state)
+    {
+        var preparation = Enum.Parse<CorePreparationState>(state);
+        var f = Installation();
+        var service = ComponentActions(f, (_, _) => throw new Xunit.Sdk.XunitException("No confirmation expected"), preparation);
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), CancellationToken.None);
+        Assert.Equal(preparation.ToString(), result.State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentActionRestoreBindsTheJournalShownAtConfirmation()
+    {
+        var f = Installation();
+        var installer = f.Installer();
+        var installed = await installer.InstallAsync(await Ready(installer, f), CancellationToken.None);
+        var operation = installed.OperationId!.Value;
+        var path = Path.Combine(f.Backup(operation), "install.json");
+        var service = ComponentActions(f, (_, _) =>
+        {
+            var journal = JsonSerializer.Deserialize<CoreInstallJournal>(File.ReadAllText(path))!;
+            File.WriteAllText(path, JsonSerializer.Serialize(journal with { State = "ChangedAfterConsent" }));
+            return Task.FromResult(true);
+        });
+        var result = await service.ExecuteAsync(f.DataRoot, new("restore", f.Component.Id, operation.ToString("N")), CancellationToken.None);
+        Assert.Equal("PlanChanged", result.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("install", "arbitrary", null)]
+    [InlineData("execute", "sing-box-statistics", null)]
+    [InlineData("restore", "sing-box-statistics", "../install.json")]
+    [InlineData("install", "sing-box-statistics", "00000000000000000000000000000000")]
+    public async Task ComponentActionRejectsUnboundedRequestsBeforeDiscovery(string action, string component, string? operation)
+    {
+        var service = new CoreComponentActions(CoreComponents.Catalog, _ => throw new Xunit.Sdk.XunitException("No discovery"),
+            (_, _) => throw new Xunit.Sdk.XunitException("No confirmation"),
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("No preparation"));
+        Assert.Equal("InvalidRequest", (await service.ExecuteAsync("", new(action, component, operation), CancellationToken.None)).State);
+    }
+
     private sealed record SidecarFixture(InstallFixture Files, XraySnapshot Baseline, SidecarPlan Plan,
         string Target, string Candidate, byte[] Previous, IPEndPoint Endpoint)
     {

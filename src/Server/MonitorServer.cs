@@ -24,6 +24,9 @@ public sealed class MonitorServer : IAsyncDisposable
     private readonly object settingsGate = new();
     private readonly SemaphoreSlim capabilityGate = new(1, 1);
     private readonly Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities;
+    private readonly Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction;
+    private bool coreActionActive;
+    public sealed class CoreActionBusyException : InvalidOperationException { }
     private long settingsRevision;
     private AppSettings settings;
     private CollectorStatus status;
@@ -43,9 +46,11 @@ public sealed class MonitorServer : IAsyncDisposable
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private MonitorServer(string directory, bool demoMode, bool useScopeLedger, bool useProbeLedger,
-        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities)
+        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities,
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction)
     {
         this.inspectCoreCapabilities = inspectCoreCapabilities;
+        this.coreAction = coreAction;
         dataDir = directory; demo = demoMode; Directory.CreateDirectory(directory);
         var zone = TimeZoneInfo.Local.Id;
         if (TimeZoneInfo.TryConvertWindowsIdToIanaId(zone, out var iana)) zone = iana;
@@ -74,14 +79,16 @@ public sealed class MonitorServer : IAsyncDisposable
     }
     public static Task<MonitorServer> StartAsync(string directory, string webRoot, bool demo = false, CancellationToken ct = default,
         bool useScopeLedger = false, bool useProbeLedger = false,
-        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities = null)
+        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities = null,
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction = null)
         // The WinForms tray joins this task synchronously; nested framework awaits must not
         // inherit its UI synchronization context (the same applies to Kestrel shutdown).
-        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger, inspectCoreCapabilities), ct);
+        => Task.Run(() => StartCoreAsync(directory, webRoot, demo, ct, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction), ct);
     private static async Task<MonitorServer> StartCoreAsync(string directory, string webRoot, bool demo, CancellationToken ct, bool useScopeLedger, bool useProbeLedger,
-        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities)
+        Func<string, CancellationToken, Task<CoreCapabilityInspection>>? inspectCoreCapabilities,
+        Func<string, CoreActionRequest, CancellationToken, Task<CoreActionResult>>? coreAction)
     {
-        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger, inspectCoreCapabilities);
+        var server = new MonitorServer(directory, demo, useScopeLedger, useProbeLedger, inspectCoreCapabilities, coreAction);
         try { await server.StartWebAsync(webRoot, ct).ConfigureAwait(false); return server; }
         catch { await server.DisposeAsync().ConfigureAwait(false); throw; }
     }
@@ -100,6 +107,7 @@ public sealed class MonitorServer : IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(value.V2rayNPath) && !Directory.Exists(value.V2rayNPath)) throw new ArgumentException("找不到该目录。请选择包含 guiConfigs 和 binConfigs 的 v2rayN 数据根目录。");
         lock (settingsGate)
         {
+            if (coreActionActive) throw new CoreActionBusyException();
             var next = value with { Demo = demo, V2rayNPath = value.V2rayNPath.Trim() };
             var target = Path.Combine(dataDir, "settings.json"); var temp = target + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(next, Json)); File.Move(temp, target, true); settings = next;
@@ -134,6 +142,10 @@ public sealed class MonitorServer : IAsyncDisposable
                 { response.StatusCode = 401; await response.WriteAsJsonAsync(new { error = "会话已过期，请从托盘重新打开页面。" }); return; }
             }
             try { await next(context); }
+            catch (CoreActionBusyException)
+            {
+                if (!response.HasStarted) { response.StatusCode = 409; await response.WriteAsJsonAsync(new { error = "核心操作尚未结束，请先完成或取消确认，再保存设置。" }); }
+            }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
                 // The client abandoned this read; do not turn it into an application failure.
@@ -166,6 +178,7 @@ public sealed class MonitorServer : IAsyncDisposable
         app.MapGet("/api/settings", () => Settings);
         app.MapPost("/api/settings", (AppSettings value) => { UpdateSettings(value); return Results.Ok(Settings); });
         app.MapGet("/api/core-capabilities", (Func<HttpContext, Task<IResult>>)InspectCoreCapabilitiesAsync);
+        app.MapPost("/api/core-actions", (Func<HttpContext, Task<IResult>>)CoreActionAsync);
         app.MapGet("/api/timezones", () => TimeZoneInfo.GetSystemTimeZones().Select(z => new { id = TimeZoneInfo.TryConvertWindowsIdToIanaId(z.Id, out var iana) ? iana : z.Id, name = z.DisplayName }).DistinctBy(z => z.id));
         app.MapGet("/api/nodes", (HttpRequest request) =>
         {
@@ -315,6 +328,40 @@ public sealed class MonitorServer : IAsyncDisposable
         finally { capabilityGate.Release(); }
     }
 
+    private async Task<IResult> CoreActionAsync(HttpContext context)
+    {
+        if (context.Request.Query.Count != 0 || context.Request.ContentLength is <= 0 or > 1024)
+            return Results.BadRequest(new { error = "核心操作只接受有限组件和操作编号。" });
+        var limit = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (limit is { IsReadOnly: false }) limit.MaxRequestBodySize = 1024;
+        using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        if (body.RootElement.ValueKind != JsonValueKind.Object) return Results.BadRequest();
+        var properties = body.RootElement.EnumerateObject().ToArray();
+        if (properties.Any(x => x.Name is not ("action" or "componentId" or "operationId")) ||
+            properties.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length)
+            return Results.BadRequest();
+        var request = body.RootElement.Deserialize<CoreActionRequest>(Json);
+        if (request is null || !request.IsValid()) return Results.BadRequest();
+        if (demo || coreAction is null) return Results.Ok(new CoreActionResult("Unavailable"));
+        if (!await capabilityGate.WaitAsync(0, context.RequestAborted))
+            return Results.Conflict(new { error = "配套核心操作正在进行，请稍后重试。" });
+        try
+        {
+            string selected;
+            lock (settingsGate) { selected = settings.V2rayNPath; coreActionActive = true; }
+            if (string.IsNullOrWhiteSpace(selected)) return Results.Ok(new CoreActionResult("UnknownTarget"));
+            // Never abandon a partially completed replacement: Host finishes verification/recovery after commit.
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, Stopping);
+            deadline.CancelAfter(TimeSpan.FromMinutes(6));
+            return Results.Ok(await coreAction(selected, request, deadline.Token).ConfigureAwait(false));
+        }
+        finally
+        {
+            lock (settingsGate) coreActionActive = false;
+            capabilityGate.Release();
+        }
+    }
+
     private QuerySpec ParseQuery(HttpRequest request)
     {
         var q = request.Query;
@@ -345,5 +392,16 @@ public sealed class MonitorServer : IAsyncDisposable
     private static string SafeError(Exception ex) => ex is ArgumentException && ex.Message.Length < 300 && !ex.Message.Contains("Parameter") ? ex.Message : "请检查输入格式、时区和数值范围。";
     private sealed record SessionRequest(string Token);
     public ValueTask DisposeAsync() => new(Task.Run(DisposeCoreAsync));
-    private async Task DisposeCoreAsync() { if (app is not null) { await app.StopAsync().ConfigureAwait(false); await app.DisposeAsync().ConfigureAwait(false); } imports.Dispose(); legacyLedger?.Dispose(); Scopes?.Dispose(); }
+    private async Task DisposeCoreAsync()
+    {
+        if (app is not null)
+        {
+            await app.StopAsync().ConfigureAwait(false);
+            // A committed core replacement finishes verification/recovery even after HTTP cancellation.
+            await capabilityGate.WaitAsync().ConfigureAwait(false);
+            capabilityGate.Release();
+            await app.DisposeAsync().ConfigureAwait(false);
+        }
+        imports.Dispose(); legacyLedger?.Dispose(); Scopes?.Dispose();
+    }
 }

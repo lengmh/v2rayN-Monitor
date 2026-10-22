@@ -118,6 +118,96 @@ test('core results are invalidated by unsaved directory edits and settings saves
   await expect(page.locator('#core-components')).toHaveText('');
   expect(calls.filter(c => c.path === '/api/core-capabilities')).toHaveLength(2);
 });
+test('core install waits for Host confirmation and retains its outcome across status checks', async ({ page }) => {
+  let finish;
+  const calls = await mock(page, {
+    '/api/core-capabilities': route => route.fulfill(json(coreCapabilities)),
+    '/api/core-actions': async route => {
+      await new Promise(resolve => { finish = resolve; });
+      await route.fulfill(json({ state: 'InstalledPendingReload',
+        operationId: '11111111-2222-3333-4444-555555555555', backupDirectory: 'Synthetic <img src=x> backup' }));
+    }
+  });
+  await page.click('.nav-item[data-view=settings]');
+  await page.click('#core-actions > summary');
+  expect(calls.filter(c => c.path === '/api/core-actions')).toHaveLength(0);
+  await page.click('#prepare-core-install');
+  await expect(page.locator('#core-action-result')).toContainText('原生确认窗口');
+  await expect(page.locator('#core-action-result')).not.toContainText('已替换');
+  await expect(page.locator('#save-settings')).toBeDisabled();
+  await expect(page.locator('#v2rayn-path')).toBeDisabled();
+  await expect(page.locator('#time-zone')).toBeDisabled();
+  await expect(page.locator('#prepare-core-restore')).toBeDisabled();
+  await expect(page.locator('#check-core-capabilities')).toBeDisabled();
+  const request = calls.find(c => c.path === '/api/core-actions');
+  expect(request.body).toEqual({ action: 'install', componentId: 'sing-box-statistics' });
+  expect(request.headers['x-monitor-request']).toBe('1'); expect(request.url.search).toBe('');
+  finish();
+  await expect(page.locator('#core-action-result')).toContainText('核心文件已替换');
+  await expect(page.locator('#core-action-result')).toContainText('手动重载');
+  await expect(page.locator('#core-action-result')).not.toContainText('已生效');
+  await expect(page.locator('#core-action-record')).toContainText('Synthetic <img src=x> backup');
+  await expect(page.locator('#core-action-record img')).toHaveCount(0);
+  await expect(page.locator('#save-settings')).toBeEnabled();
+  await page.click('#check-core-capabilities');
+  await expect(page.locator('#core-components')).toContainText('文件摘要一致');
+  await expect(page.locator('#core-action-result')).toContainText('核心文件已替换');
+  await expect(page.locator('#core-action-record')).toContainText('11111111-2222-3333-4444-555555555555');
+  for (const [width, height, theme] of [[1440, 1100, 'light'], [390, 844, 'dark']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+});
+test('core restore accepts only an operation GUID and keeps recovery outcomes explicit', async ({ page }) => {
+  let result = { state: 'RecoveryRequired', operationId: '11111111222233334444555555555555', backupDirectory: 'Synthetic backup' };
+  const calls = await mock(page, { '/api/core-actions': route => route.fulfill(json(result)) });
+  await page.click('.nav-item[data-view=settings]'); await page.click('#core-actions > summary');
+  await page.fill('#core-restore-operation', 'F:\\Synthetic\\backup');
+  await page.click('#prepare-core-restore');
+  await expect(page.locator('#core-action-result')).toContainText('GUID');
+  expect(calls.filter(c => c.path === '/api/core-actions')).toHaveLength(0);
+  await page.selectOption('#core-action-component', 'xray-probes');
+  await page.fill('#core-restore-operation', '11111111-2222-3333-4444-555555555555');
+  await page.click('#prepare-core-restore');
+  await expect(page.locator('#core-action-result')).toContainText('需要恢复处理');
+  expect(calls.filter(c => c.path === '/api/core-actions').at(-1).body).toEqual({
+    action: 'restore', componentId: 'xray-probes', operationId: '11111111222233334444555555555555'
+  });
+  const returnedId = (await page.locator('#core-action-record').textContent()).match(/[0-9a-f]{32}/i)[0];
+  await page.fill('#core-restore-operation', returnedId);
+  result = { ...result, state: 'FailedRestored' };
+  await page.click('#prepare-core-restore');
+  await expect(page.locator('#core-action-result')).toContainText('操作失败，原核心文件已恢复');
+  expect(calls.filter(c => c.path === '/api/core-actions').at(-1).body.operationId).toBe(returnedId);
+  await expect(page.locator('#core-action-record')).toContainText('Synthetic backup');
+  result = { ...result, state: 'Restored' };
+  await page.click('#prepare-core-restore');
+  await expect(page.locator('#core-action-result')).toContainText('账本未改动');
+  await expect(page.locator('#core-actions')).toContainText('所选组件及该操作 ID 对应的核心文件');
+  await expect(page.locator('#core-capabilities-panel')).toContainText('离线升级账本…');
+  expect(calls.some(c => /ledger.*(upgrade|migrat)/i.test(c.path))).toBe(false);
+});
+test('core actions disclose unavailable assets and clear stale records on settings changes or expiry', async ({ page }) => {
+  let expired = false;
+  const calls = await mock(page, { '/api/core-actions': route => route.fulfill(expired ? { status: 403, body: '{}' }
+    : json({ state: 'AssetUnavailable', operationId: '11111111-2222-3333-4444-555555555555' })) });
+  await page.click('.nav-item[data-view=settings]'); await page.click('#core-actions > summary');
+  await page.click('#prepare-core-install');
+  await expect(page.locator('#core-action-result')).toContainText('未下载或安装');
+  await page.fill('#v2rayn-path', 'D:\\Synthetic changed');
+  await expect(page.locator('#core-action-record')).toBeHidden();
+  await expect(page.locator('#core-action-result')).toContainText('旧操作结果已清除');
+  await expect(page.locator('#prepare-core-install')).toBeDisabled();
+  await page.click('#save-settings'); await expect(page.locator('#settings-result')).toContainText('设置已保存');
+  await expect(page.locator('#prepare-core-install')).toBeEnabled();
+  expect(calls.filter(c => c.path === '/api/core-actions')).toHaveLength(1);
+  expired = true; await page.click('#prepare-core-install');
+  await expect(page.locator('#session-alert')).toBeVisible();
+  await expect(page.locator('#prepare-core-install')).toBeDisabled();
+  await expect(page.locator('#prepare-core-restore')).toBeDisabled();
+  await expect(page.locator('#core-action-record')).toHaveText('');
+  await expect(page.locator('#core-action-result')).toContainText('托盘');
+});
 test('raw and billing comparisons switch both sources and disclose missing multiplier coverage', async ({ page }) => {
   let reads = 0;
   const display = { originalName: 'Synthetic known multiplier', groups: [], mergeKey: null, rate: null, rateStatus: 'partial',
