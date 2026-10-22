@@ -28,7 +28,17 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     internal sealed record Snapshot(string OriginalName, string? GroupLabel, string? MergeKey, string? Rate);
     internal sealed record Part(Snapshot Snapshot, long Upload, long Download);
     internal sealed record Slice(string? Name, string Upload, string Download, TrafficDisplay Display);
+    internal readonly record struct ValueSlice(long Upload, long Download, DisplayValues Display);
+    internal readonly record struct DisplayValues(string? OriginalName, string? GroupLabel, string? MergeKey, string? Rate,
+        BigInteger Covered, BigInteger Unknown, BigInteger? Units)
+    {
+        internal TrafficDisplay Result() => new(OriginalName, GroupLabel is null ? [] : [GroupLabel], MergeKey, Rate,
+            Units is null ? "unknown" : Unknown != 0 ? "partial" : "known",
+            Units is { } units ? ProviderDecimal.FormatScaledUnits(units) : null,
+            Covered.ToString(CultureInfo.InvariantCulture), Unknown.ToString(CultureInfo.InvariantCulture));
+    }
     internal readonly record struct RecordKey(string Entity, int Kind, long Start, long End);
+    internal readonly record struct StoredPart(RecordKey Key, string Snapshot, long Upload, long Download);
     internal static string MergeKey(string basis, string key) => basis + ":" + XrayParser.Hash(key);
 
     // Older member records saved the friendly label and generated tag before display snapshots existed.
@@ -58,14 +68,16 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
             ? new(value.OriginalName, value.GroupLabel) : null;
     }
 
-    internal static TrafficDisplayStore? Open(SqliteConnection db)
+    internal static TrafficDisplayStore? Open(SqliteConnection db, SqliteTransaction? transaction = null)
     {
         using var count = db.CreateCommand();
+        count.Transaction = transaction;
         count.CommandText = "SELECT count(*) FROM sqlite_schema WHERE name IN ('ui_display_cursors','ui_display_records');";
         if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return null;
         foreach (Match m in Regex.Matches(Schema, @"CREATE TABLE (\w+)[\s\S]*?;"))
         {
             using var command = db.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name;";
             command.Parameters.AddWithValue("$name", m.Groups[1].Value);
             static string Normalize(string x) => Regex.Replace(x.Trim().TrimEnd(';'), @"\s+", " ");
@@ -120,20 +132,47 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
         command.ExecuteNonQuery();
     }
 
-    internal Dictionary<RecordKey, List<Part>> Read(SqliteTransaction? transaction, long start, long end)
+    internal List<StoredPart> ReadRaw(SqliteTransaction? transaction, long start, long end,
+        IReadOnlyList<string>? entities = null, CancellationToken cancellationToken = default, bool scan = false)
     {
-        using var command = Command(transaction, """
-            SELECT entity_key,kind,start_ticks,end_ticks,snapshot,upload,download FROM ui_display_records
-            WHERE start_ticks<$end AND end_ticks>$start;
-            """, ("$start", start), ("$end", end));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (entities is { Count: 0 }) return [];
+        // Preserve the original table-scan part order even when the entity index is used.
+        // Broad local-proxy queries avoid entity-index lookups followed by a rowid sort.
+        using var command = Command(transaction, $"""
+            SELECT entity_key,kind,start_ticks,end_ticks,snapshot,upload,download FROM ui_display_records{(scan ? " NOT INDEXED" : "")}
+            WHERE start_ticks<$end AND end_ticks>$start
+            """ + (entities is null ? "" : " AND entity_key IN (SELECT value FROM json_each($entities))") + " ORDER BY rowid;",
+            ("$start", start), ("$end", end),
+            ("$entities", entities is null ? null : JsonSerializer.Serialize(entities)));
         using var reader = command.ExecuteReader();
-        var result = new Dictionary<RecordKey, List<Part>>();
+        var result = new List<StoredPart>();
         while (reader.Read())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var key = new RecordKey(reader.GetString(0), reader.GetInt32(1), reader.GetInt64(2), reader.GetInt64(3));
-            if (!result.TryGetValue(key, out var parts)) result.Add(key, parts = []);
-            parts.Add(new(JsonSerializer.Deserialize<Snapshot>(reader.GetString(4))
-                ?? throw new InvalidOperationException("Invalid stored display snapshot."), reader.GetInt64(5), reader.GetInt64(6)));
+            result.Add(new(key, reader.GetString(4), reader.GetInt64(5), reader.GetInt64(6)));
+        }
+        return result;
+    }
+
+    internal Dictionary<RecordKey, List<Part>> Read(SqliteTransaction? transaction, long start, long end,
+        CancellationToken cancellationToken = default) =>
+        Parse(ReadRaw(transaction, start, end, cancellationToken: cancellationToken), cancellationToken);
+
+    internal static Dictionary<RecordKey, List<Part>> Parse(IReadOnlyList<StoredPart> rows,
+        CancellationToken cancellationToken = default, Dictionary<string, Snapshot>? snapshots = null)
+    {
+        snapshots ??= new(StringComparer.Ordinal);
+        var result = new Dictionary<RecordKey, List<Part>>();
+        foreach (var row in rows)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!snapshots.TryGetValue(row.Snapshot, out var snapshot))
+                snapshots.Add(row.Snapshot, snapshot = JsonSerializer.Deserialize<Snapshot>(row.Snapshot)
+                    ?? throw new InvalidOperationException("Invalid stored display snapshot."));
+            if (!result.TryGetValue(row.Key, out var parts)) result.Add(row.Key, parts = []);
+            parts.Add(new(snapshot, row.Upload, row.Download));
         }
         return result;
     }
@@ -168,9 +207,12 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
     {
         // One minute can contain two names/rates. Preserve their captured contributions rather
         // than labelling the whole minute with the latest name or multiplying a mixed total.
-        _ = Describe(parts, upload, download, mergeKey);
         var remainingUp = BigInteger.Parse(upload, CultureInfo.InvariantCulture);
         var remainingDown = BigInteger.Parse(download, CultureInfo.InvariantCulture);
+        BigInteger capturedUp = 0, capturedDown = 0;
+        foreach (var part in parts ?? []) { capturedUp += part.Upload; capturedDown += part.Download; }
+        if (capturedUp > remainingUp || capturedDown > remainingDown)
+            throw new InvalidOperationException("Display evidence exceeds its history record.");
         foreach (var part in parts ?? [])
         {
             var up = part.Upload.ToString(CultureInfo.InvariantCulture); var down = part.Download.ToString(CultureInfo.InvariantCulture);
@@ -184,20 +226,67 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
         }
     }
 
+    internal static IEnumerable<ValueSlice> SplitValues(IReadOnlyList<Part>? parts, long upload, long download,
+        string? mergeKey, Dictionary<string, BigInteger> rates)
+    {
+        BigInteger capturedUp = 0, capturedDown = 0;
+        foreach (var part in parts ?? []) { capturedUp += part.Upload; capturedDown += part.Download; }
+        if (capturedUp > upload || capturedDown > download)
+            throw new InvalidOperationException("Display evidence exceeds its history record.");
+        foreach (var part in parts ?? [])
+        {
+            upload -= part.Upload; download -= part.Download;
+            var total = (BigInteger)part.Upload + part.Download;
+            BigInteger? units = null;
+            if (part.Snapshot.Rate is { } text)
+            {
+                if (!rates.TryGetValue(text, out var rate))
+                {
+                    if (!ProviderDecimal.TryParse(text, out var parsed))
+                        throw new InvalidOperationException("Invalid captured multiplier.");
+                    rates.Add(text, rate = parsed.ScaledUnits);
+                }
+                units = total * rate;
+            }
+            yield return new(part.Upload, part.Download,
+                new(part.Snapshot.OriginalName, part.Snapshot.GroupLabel, mergeKey, part.Snapshot.Rate,
+                    units is null ? 0 : total, units is null ? total : 0, units));
+        }
+        if (upload != 0 || download != 0 || parts is not { Count: > 0 })
+            yield return new(upload, download, new(null, null, mergeKey, null, 0, (BigInteger)upload + download, null));
+    }
+
     internal sealed class Summary
     {
         private BigInteger covered, unknown, units;
         private bool seen, hasEstimate, mixedName, mixedRate;
         private string? name, rate;
         private readonly HashSet<string> groups = new(StringComparer.Ordinal);
-        internal void Add(TrafficDisplay value)
+        internal static (BigInteger Covered, BigInteger Unknown, BigInteger? Units) Amounts(TrafficDisplay value) =>
+            (BigInteger.Parse(value.EstimateCoveredBytes, CultureInfo.InvariantCulture),
+                BigInteger.Parse(value.EstimateUnknownBytes, CultureInfo.InvariantCulture),
+                value.EstimatedBilledBytes is { } estimate ? Units(estimate) : null);
+        internal void Add(TrafficDisplay value) => Add(value, Amounts(value));
+        internal void Add(TrafficDisplay value, (BigInteger Covered, BigInteger Unknown, BigInteger? Units) amounts)
         {
-            covered += BigInteger.Parse(value.EstimateCoveredBytes, CultureInfo.InvariantCulture);
-            unknown += BigInteger.Parse(value.EstimateUnknownBytes, CultureInfo.InvariantCulture);
-            if (value.EstimatedBilledBytes is { } estimate) { units += Units(estimate); hasEstimate = true; }
-            if (seen) { mixedName |= name != value.OriginalName; mixedRate |= rate != value.Rate; }
-            else { name = value.OriginalName; rate = value.Rate; seen = true; }
+            covered += amounts.Covered;
+            unknown += amounts.Unknown;
+            if (amounts.Units is { } estimate) { units += estimate; hasEstimate = true; }
+            Observe(value.OriginalName, value.Rate);
             foreach (var group in value.Groups) groups.Add(group);
+        }
+        internal void Add(DisplayValues value)
+        {
+            covered += value.Covered;
+            unknown += value.Unknown;
+            if (value.Units is { } estimate) { units += estimate; hasEstimate = true; }
+            Observe(value.OriginalName, value.Rate);
+            if (value.GroupLabel is { } group) groups.Add(group);
+        }
+        private void Observe(string? originalName, string? capturedRate)
+        {
+            if (seen) { mixedName |= name != originalName; mixedRate |= rate != capturedRate; }
+            else { name = originalName; rate = capturedRate; seen = true; }
         }
         internal TrafficDisplay Result(string? mergeKey = null)
         {

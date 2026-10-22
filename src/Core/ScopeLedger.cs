@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.Numerics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -10,7 +11,7 @@ namespace V2rayNMonitor.Core;
 public sealed class ScopeLedger : IDisposable
 {
     private const long Minute = TimeSpan.TicksPerMinute;
-    private const long ShortInterval = 10 * TimeSpan.TicksPerSecond;
+    internal const long ShortInterval = 10 * TimeSpan.TicksPerSecond;
     private readonly object gate = new();
     private readonly SqliteConnection connection;
     private readonly TrafficDisplayStore? display;
@@ -255,11 +256,16 @@ public sealed class ScopeLedger : IDisposable
         }
     }
 
-    public IReadOnlyList<ScopeInfo> GetScopes(string basis)
+    public IReadOnlyList<ScopeInfo> GetScopes(string basis) => GetScopes(basis, default);
+
+    public IReadOnlyList<ScopeInfo> GetScopes(string basis, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ValidateQueryBasis(basis);
-        lock (gate)
+        EnterQueryGate(cancellationToken);
+        try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ThrowIfDisposed();
             using var command = Command(null, """
                 SELECT s.scope_id,s.instance_id,s.basis,s.identity_kind,s.identity_value,s.name,n.node_id,s.outbound_tag
@@ -268,22 +274,28 @@ public sealed class ScopeLedger : IDisposable
             using var reader = command.ExecuteReader();
             var result = new List<ScopeInfo>();
             while (reader.Read())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
                 result.Add(new(reader.GetInt64(0), reader.GetString(1),
                     new(reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5),
                         reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7))));
+            }
             return result;
         }
+        finally { Monitor.Exit(gate); }
     }
 
-    public IReadOnlyList<NodeInfo> GetDisplayNodes(string basis)
+    public IReadOnlyList<NodeInfo> GetDisplayNodes(string basis, CancellationToken cancellationToken = default)
     {
-        lock (gate)
+        EnterQueryGate(cancellationToken);
+        try
         {
-            var directory = GetScopes(basis);
+            var directory = GetScopes(basis, cancellationToken);
             return directory.GroupBy(x => x.Scope.NodeId is null ? "scope:" + x.Id :
                     "merge:" + TrafficDisplayStore.MergeKey(x.Scope.Basis, Key(x.InstanceId, x.Scope.NodeId)), StringComparer.Ordinal)
                 .Select(group =>
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var first = group.First();
                     var name = display?.CurrentName("scope:" + first.Id)?.OriginalName ??
                         TrafficDisplayStore.HistoricalMemberName(first.Scope.Basis, first.Scope.Name, first.Scope.OutboundTag)?.OriginalName ??
@@ -291,10 +303,21 @@ public sealed class ScopeLedger : IDisposable
                     return new NodeInfo(group.Count() > 1 ? group.Key : "scope:" + first.Id, name);
                 }).ToArray();
         }
+        finally { Monitor.Exit(gate); }
     }
 
-    public ScopeHistory Query(ScopeQuery query)
+    private void EnterQueryGate(CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        while (!Monitor.TryEnter(gate, 25)) cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    public ScopeHistory Query(ScopeQuery query, CancellationToken cancellationToken = default,
+        Action<ScopeQueryMetrics>? observer = null)
+    {
+        if (cancellationToken.IsCancellationRequested)
+            observer?.Invoke(new(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, 0, 0));
+        cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(query);
         ValidateQueryBasis(query.Basis);
         if (query.End <= query.Start || query.Bucket is not ("hour" or "day" or "week" or "month" or "year"))
@@ -302,46 +325,214 @@ public sealed class ScopeLedger : IDisposable
         if (query.Page < 0 || query.PageSize is < 1 or > 1000 || query.ScopeId is <= 0)
             throw new ArgumentOutOfRangeException(nameof(query));
         var zone = TimeZoneInfo.FindSystemTimeZoneById(query.TimeZoneId);
+        var ids = query.ScopeIds is null ? null : JsonSerializer.Serialize(query.ScopeIds);
         var parameters = new (string, object?)[]
         {
-            ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", null), ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks)
+            ("$basis", query.Basis), ("$id", query.ScopeId), ("$ids", ids), ("$name", null),
+            ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks)
         };
-        lock (gate)
+        var clock = Stopwatch.StartNew();
+        TimeSpan? wait = null;
+        var held = TimeSpan.Zero; var aggregation = TimeSpan.Zero;
+        long rowsRead = 0, metadataRowsRead = 0;
+        var entered = false; var aggregationStarted = false;
+        var phaseStart = TimeSpan.Zero;
+        try
         {
-            ThrowIfDisposed();
-            using var transaction = connection.BeginTransaction();
+            while (!(entered = Monitor.TryEnter(gate, 25))) cancellationToken.ThrowIfCancellationRequested();
+            wait = clock.Elapsed; phaseStart = wait.Value;
+            var storedRows = new List<StoredTraffic>();
+            var directory = new Dictionary<long, StoredScope>();
+            var projections = new Dictionary<long, ScopeProjection>();
+            var snapshots = new Dictionary<string, TrafficDisplayStore.Snapshot>(StringComparer.Ordinal);
+            var rates = new Dictionary<string, BigInteger>(StringComparer.Ordinal);
+            var rawMetadata = new List<TrafficDisplayStore.StoredPart>();
+            Dictionary<TrafficDisplayStore.RecordKey, List<TrafficDisplayStore.Part>>? metadata = null;
+            var matchingScopes = new HashSet<long>();
+            var storedGaps = new List<StoredGap>();
+            string? earliest = null;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ThrowIfDisposed();
+                // Copy every component from one transaction before releasing the single-writer gate.
+                using var transaction = connection.BeginTransaction();
+                var recordParameters = parameters;
+                var selectedIds = ids;
+                if (query.ScopeName is not null)
+                {
+                    using (var command = Command(transaction, """
+                        SELECT scope_id,basis,name,node_key,outbound_tag FROM measurement_scopes
+                        WHERE (basis=$basis OR ($basis='local_proxy' AND basis IN ('actual_member','legacy_proxy')))
+                            AND ($id IS NULL OR scope_id=$id)
+                            AND ($ids IS NULL OR scope_id IN (SELECT value FROM json_each($ids)));
+                        """, parameters))
+                    using (var reader = command.ExecuteReader())
+                        while (reader.Read())
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            directory.Add(reader.GetInt64(0), new(reader.GetString(1), reader.GetString(2),
+                                reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4)));
+                        }
+                    var candidates = new HashSet<long>();
+                    foreach (var (id, scope) in directory)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (scope.Name == query.ScopeName) { matchingScopes.Add(id); candidates.Add(id); }
+                        if (Projection(id, directory, projections).Historical?.OriginalName == query.ScopeName)
+                            candidates.Add(id);
+                    }
+                    if (display is not null)
+                    {
+                        var entities = directory.Keys.ToDictionary(id => "scope:" + id.ToString(CultureInfo.InvariantCulture), id => id, StringComparer.Ordinal);
+                        var namedProbe = query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal);
+                        rawMetadata = display.ReadRaw(transaction, namedProbe ? 0 : query.Start.UtcTicks,
+                            namedProbe ? DateTimeOffset.MaxValue.UtcTicks : query.End.UtcTicks, entities.Keys.ToArray(), cancellationToken,
+                            scan: query.Basis == "local_proxy" && query.ScopeId is null && query.ScopeIds is null);
+                        metadataRowsRead += rawMetadata.Count;
+                        foreach (var part in rawMetadata)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (!snapshots.TryGetValue(part.Snapshot, out var snapshot))
+                                snapshots.Add(part.Snapshot, snapshot = JsonSerializer.Deserialize<TrafficDisplayStore.Snapshot>(part.Snapshot)
+                                    ?? throw new InvalidOperationException("Invalid stored display snapshot."));
+                            if (snapshot.OriginalName == query.ScopeName) candidates.Add(entities[part.Key.Entity]);
+                        }
+                        rawMetadata.RemoveAll(part => !candidates.Contains(entities[part.Key.Entity]));
+                    }
+                    // Names select candidate identities only; each stored fragment is still checked below.
+                    selectedIds = JsonSerializer.Serialize(candidates.Order().ToArray());
+                    recordParameters = parameters.Select(x => x.Item1 == "$ids" ? ("$ids", (object?)selectedIds) : x).ToArray();
+                }
+                using (var command = Command(transaction, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id;", recordParameters))
+                using (var reader = command.ExecuteReader())
+                    while (reader.Read())
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        storedRows.Add(ReadStoredTraffic(reader, directory));
+                        rowsRead++;
+                    }
+                if (display is not null)
+                {
+                    if (query.ScopeName is not null)
+                    {
+                        if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal))
+                        {
+                            // Earliest named-probe lookup needs captured names outside the requested interval.
+                            metadata = TrafficDisplayStore.Parse(rawMetadata, cancellationToken, snapshots);
+                            rawMetadata.Clear();
+                        }
+                    }
+                    else
+                    {
+                        var entities = new List<string>();
+                        foreach (var id in directory.Keys)
+                            entities.Add("scope:" + id.ToString(CultureInfo.InvariantCulture));
+                        rawMetadata = display.ReadRaw(transaction, query.Start.UtcTicks, query.End.UtcTicks, entities, cancellationToken,
+                            scan: query.Basis == "local_proxy" && query.ScopeId is null && query.ScopeIds is null);
+                        metadataRowsRead += rawMetadata.Count;
+                    }
+                }
+                using (var command = Command(transaction, """
+                    SELECT g.scope_id,g.origin,g.start_ticks,g.end_ticks,g.reason,g.is_open
+                    FROM scope_gaps g LEFT JOIN measurement_scopes s ON s.scope_id=g.scope_id
+                    WHERE (g.scope_id IS NULL OR ((s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id)
+                        AND ($ids IS NULL OR s.scope_id IN (SELECT value FROM json_each($ids)))))
+                        AND ((g.start_ticks < $end AND (g.end_ticks > $start OR g.is_open=1))
+                            OR (g.start_ticks=g.end_ticks AND g.start_ticks >= $start AND g.start_ticks < $end))
+                    ORDER BY g.start_ticks,g.id;
+                    """, parameters))
+                using (var reader = command.ExecuteReader())
+                    while (reader.Read())
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        storedGaps.Add(new(reader.IsDBNull(0) ? null : reader.GetInt64(0), reader.GetString(1),
+                            reader.GetInt64(2), reader.GetInt64(3), reader.GetString(4), reader.GetInt64(5) != 0));
+                    }
+                if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal) && query.ScopeName is not null)
+                {
+                    using var command = Command(transaction, RecordsSql + " ORDER BY start_ticks,scope_id,kind,row_id;",
+                        ("$basis", query.Basis), ("$id", query.ScopeId), ("$ids", selectedIds), ("$name", null),
+                        ("$start", 0), ("$end", DateTimeOffset.MaxValue.UtcTicks));
+                    using var reader = command.ExecuteReader();
+                    while (earliest is null && reader.Read())
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var record = ReadStoredTraffic(reader, directory);
+                        rowsRead++;
+                        var projection = Projection(record.ScopeId, directory, projections);
+                        foreach (var row in Project(record, projection, metadata, rates))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if ((row.Display.OriginalName ?? projection.Name) == query.ScopeName) { earliest = Iso(record.Start); break; }
+                        }
+                    }
+                }
+                else if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using var command = Command(transaction, """
+                        SELECT MIN(r.start_ticks) FROM (
+                            SELECT scope_id,start_ticks FROM scope_minutes
+                            UNION ALL SELECT scope_id,start_ticks FROM scope_unallocated
+                        ) r JOIN measurement_scopes s ON s.scope_id=r.scope_id
+                        WHERE s.basis=$basis AND ($id IS NULL OR s.scope_id=$id)
+                            AND ($ids IS NULL OR s.scope_id IN (SELECT value FROM json_each($ids)));
+                        """, parameters);
+                    if (command.ExecuteScalar() is long ticks) earliest = Iso(ticks);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                transaction.Commit();
+            }
+            finally
+            {
+                held = clock.Elapsed - phaseStart;
+                Monitor.Exit(gate);
+                entered = false;
+            }
+            phaseStart = clock.Elapsed; aggregationStarted = true;
+            metadata ??= TrafficDisplayStore.Parse(rawMetadata, cancellationToken, snapshots);
+            rawMetadata.Clear();
+            var gaps = new List<ScopeGap>(storedGaps.Count);
+            foreach (var gap in storedGaps)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                gaps.Add(new(gap.ScopeId, gap.Origin, Iso(gap.Start), Iso(gap.End), gap.Reason, gap.IsOpen));
+            }
             var total = new Bytes(); var recovered = new Bytes(); var partial = new Bytes(); var unbucketed = new Bytes();
             var series = new Dictionary<string, (long At, Bytes Total, Bytes Recovered, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var scopes = new Dictionary<long, (string Name, Bytes Total, Bytes Recovered)>();
-            var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
             var estimate = new TrafficDisplayStore.Summary();
             var scopeDisplay = new Dictionary<long, TrafficDisplayStore.Summary>();
             var scopeMerge = new Dictionary<long, string?>();
             var comparisons = new Dictionary<string, (Bytes Bytes, TrafficDisplayStore.Summary Display)>(StringComparer.Ordinal);
             var rows = new List<ScopeTrafficRow>();
-            long count = 0;
-            var matchingScopes = new HashSet<long>();
-            if (query.ScopeName is not null)
+            var labels = new Dictionary<long, string>();
+            string Label(long ticks)
             {
-                using var names = Command(transaction, "SELECT scope_id FROM measurement_scopes WHERE name=$name COLLATE BINARY;", ("$name", query.ScopeName));
-                using var named = names.ExecuteReader();
-                while (named.Read()) matchingScopes.Add(named.GetInt64(0));
+                if (!labels.TryGetValue(ticks, out var label))
+                    labels.Add(ticks, label = Ledger.BucketLabel(new(ticks, TimeSpan.Zero), zone, query.Bucket));
+                return label;
             }
-            using (var command = Command(transaction, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id;", parameters))
-            using (var reader = command.ExecuteReader())
-                while (reader.Read())
-                foreach (var row in ReadDisplayRecords(reader, metadata))
+            long count = 0;
+            foreach (var record in storedRows)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var projection = Projection(record.ScopeId, directory, projections);
+                foreach (var row in Project(record, projection, metadata, rates))
                 {
-                    if (query.ScopeIds is not null && !query.ScopeIds.Contains(row.ScopeId)) continue;
-                    var comparisonName = row.Display!.OriginalName ?? row.Name;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var comparisonName = row.Display.OriginalName ?? projection.Name;
                     if (query.ScopeName is not null && comparisonName != query.ScopeName) continue;
-                    matchingScopes.Add(row.ScopeId);
-                    var start = reader.GetInt64(0); var end = reader.GetInt64(1); var id = reader.GetInt64(2);
-                    var up = long.Parse(row.Upload, CultureInfo.InvariantCulture); var down = long.Parse(row.Download, CultureInfo.InvariantCulture);
-                    var recovery = reader.GetInt64(7) == 1;
+                    matchingScopes.Add(record.ScopeId);
+                    var start = record.Start; var end = record.End; var id = record.ScopeId;
+                    var up = row.Upload; var down = row.Download;
+                    var recovery = record.Kind == 1;
                     if (!query.NonZeroRecords || up != 0 || down != 0)
                     {
-                        if (count >= (long)query.Page * query.PageSize && rows.Count < query.PageSize) rows.Add(row);
+                        if (count >= (long)query.Page * query.PageSize && rows.Count < query.PageSize)
+                            rows.Add(new(projection.Basis, id, comparisonName, Iso(start), Iso(end),
+                                Text(up), Text(down), record.Quality, record.PartialCoverage) { Display = row.Display.Result() });
                         count++;
                     }
                     if (recovery && (start < query.Start.UtcTicks || end > query.End.UtcTicks)) { partial.Add(up, down); continue; }
@@ -354,11 +545,11 @@ public sealed class ScopeLedger : IDisposable
                     comparison.Display.Add(row.Display);
                     if (recovery) recovered.Add(up, down);
                     if (!scopes.TryGetValue(id, out var scope))
-                        scopes.Add(id, scope = (row.Name, new Bytes(), new Bytes()));
+                        scopes.Add(id, scope = (comparisonName, new Bytes(), new Bytes()));
                     scope.Total.Add(up, down);
                     if (recovery) scope.Recovered.Add(up, down);
-                    var label = Ledger.BucketLabel(new(start, TimeSpan.Zero), zone, query.Bucket);
-                    if (recovery && label != Ledger.BucketLabel(new(end - 1, TimeSpan.Zero), zone, query.Bucket))
+                    var label = Label(start);
+                    if (recovery && label != Label(end - 1))
                     { unbucketed.Add(up, down); continue; }
                     if (!series.TryGetValue(label, out var bucket))
                         series.Add(label, bucket = (start, new Bytes(), new Bytes(), new()));
@@ -367,49 +558,10 @@ public sealed class ScopeLedger : IDisposable
                     if (recovery) bucket.Recovered.Add(up, down);
                     if (start < bucket.At) series[label] = (start, bucket.Total, bucket.Recovered, bucket.Display);
                 }
-            // Gaps are not paged with traffic. NULL legacy gaps remain disclosed as unassigned history.
-            var gaps = new List<ScopeGap>();
-            using (var command = Command(transaction, """
-                SELECT g.scope_id,g.origin,g.start_ticks,g.end_ticks,g.reason,g.is_open
-                FROM scope_gaps g LEFT JOIN measurement_scopes s ON s.scope_id=g.scope_id
-                WHERE (g.scope_id IS NULL OR ((s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id)
-                    AND ($name IS NULL OR s.name=$name COLLATE BINARY)))
-                    AND ((g.start_ticks < $end AND (g.end_ticks > $start OR g.is_open=1))
-                        OR (g.start_ticks=g.end_ticks AND g.start_ticks >= $start AND g.start_ticks < $end))
-                ORDER BY g.start_ticks,g.id;
-                """, parameters))
-            using (var reader = command.ExecuteReader())
-                while (reader.Read())
-                    if ((query.ScopeIds is null || reader.IsDBNull(0) || query.ScopeIds.Contains(reader.GetInt64(0))) &&
-                        (query.ScopeName is null || reader.IsDBNull(0) || matchingScopes.Contains(reader.GetInt64(0))))
-                        gaps.Add(new(reader.IsDBNull(0) ? null : reader.GetInt64(0), reader.GetString(1),
-                        Iso(reader.GetInt64(2)), Iso(reader.GetInt64(3)), reader.GetString(4), reader.GetInt64(5) != 0));
-            string? earliest = null;
-            if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal) && query.ScopeName is not null)
-            {
-                var allMetadata = display?.Read(transaction, 0, DateTimeOffset.MaxValue.UtcTicks);
-                using var command = Command(transaction, RecordsSql + " ORDER BY start_ticks,scope_id,kind,row_id;",
-                    ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", null), ("$start", 0), ("$end", DateTimeOffset.MaxValue.UtcTicks));
-                using var reader = command.ExecuteReader();
-                while (earliest is null && reader.Read())
-                    foreach (var row in ReadDisplayRecords(reader, allMetadata))
-                        if ((query.ScopeIds is null || query.ScopeIds.Contains(row.ScopeId)) &&
-                            (row.Display!.OriginalName ?? row.Name) == query.ScopeName) { earliest = row.Start; break; }
             }
-            else if (query.Basis.StartsWith("probe_urltest_", StringComparison.Ordinal))
-            {
-                using var command = Command(transaction, """
-                    SELECT MIN(r.start_ticks) FROM (
-                        SELECT scope_id,start_ticks FROM scope_minutes
-                        UNION ALL SELECT scope_id,start_ticks FROM scope_unallocated
-                    ) r JOIN measurement_scopes s ON s.scope_id=r.scope_id
-                    WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id)
-                        AND ($ids IS NULL OR s.scope_id IN (SELECT value FROM json_each($ids)));
-                    """, ("$basis", query.Basis), ("$id", query.ScopeId),
-                    ("$ids", query.ScopeIds is null ? null : JsonSerializer.Serialize(query.ScopeIds)));
-                if (command.ExecuteScalar() is long ticks) earliest = Iso(ticks);
-            }
-            transaction.Commit();
+            if (query.ScopeName is not null)
+                gaps.RemoveAll(x => x.ScopeId is { } id && !matchingScopes.Contains(id));
+            cancellationToken.ThrowIfCancellationRequested();
             return new(query.Basis, total.Up, total.Down, recovered.Up, recovered.Down, partial.Up, partial.Down,
                 unbucketed.Up, unbucketed.Down,
                 series.OrderBy(x => x.Value.At).Select(x => new SeriesPoint(x.Key, x.Value.Total.Up, x.Value.Total.Down,
@@ -423,27 +575,78 @@ public sealed class ScopeLedger : IDisposable
                     { Display = x.Value.Display.Result() }).ToArray()
             };
         }
+        finally
+        {
+            if (entered) Monitor.Exit(gate);
+            if (aggregationStarted) aggregation = clock.Elapsed - phaseStart;
+            observer?.Invoke(new(wait ?? clock.Elapsed, held, aggregation, clock.Elapsed, rowsRead, metadataRowsRead));
+        }
+    }
+
+    private readonly record struct StoredTraffic(long Start, long End, long ScopeId, long Upload, long Download,
+        string Quality, int Kind, bool PartialCoverage);
+    private readonly record struct StoredGap(long? ScopeId, string Origin, long Start, long End, string Reason, bool IsOpen);
+    private sealed record StoredScope(string Basis, string Name, string? NodeKey, string? Tag);
+    private sealed record ScopeProjection(string Basis, string Name, string Entity, string? MergeKey, CapturedNodeName? Historical);
+
+    private static StoredTraffic ReadStoredTraffic(SqliteDataReader reader, Dictionary<long, StoredScope> directory)
+    {
+        var id = reader.GetInt64(2);
+        if (!directory.ContainsKey(id))
+            directory.Add(id, new(reader.GetString(10), reader.GetString(3),
+                reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12)));
+        return new(reader.GetInt64(0), reader.GetInt64(1), id, reader.GetInt64(4), reader.GetInt64(5),
+            reader.GetString(6), reader.GetInt32(7), reader.GetInt64(9) != 0);
+    }
+
+    private static ScopeProjection Projection(long id, Dictionary<long, StoredScope> directory,
+        Dictionary<long, ScopeProjection> projections)
+    {
+        if (!projections.TryGetValue(id, out var projection))
+        {
+            var scope = directory[id];
+            projections.Add(id, projection = new(scope.Basis, scope.Name, "scope:" + id.ToString(CultureInfo.InvariantCulture),
+                scope.NodeKey is null ? null : TrafficDisplayStore.MergeKey(scope.Basis, scope.NodeKey),
+                TrafficDisplayStore.HistoricalMemberName(scope.Basis, scope.Name, scope.Tag)));
+        }
+        return projection;
+    }
+
+    private static IEnumerable<TrafficDisplayStore.ValueSlice> Project(StoredTraffic row, ScopeProjection scope,
+        Dictionary<TrafficDisplayStore.RecordKey, List<TrafficDisplayStore.Part>>? metadata,
+        Dictionary<string, BigInteger> rates)
+    {
+        var parts = metadata?.GetValueOrDefault(new(scope.Entity, row.Kind, row.Start, row.End));
+        foreach (var part in TrafficDisplayStore.SplitValues(parts, row.Upload, row.Download, scope.MergeKey, rates))
+            yield return part.Display.OriginalName is null && scope.Historical is not null
+                ? part with { Display = part.Display with { OriginalName = scope.Historical.OriginalName, GroupLabel = scope.Historical.GroupLabel } }
+                : part;
     }
 
     private const string RecordsSql = """
+        WITH coverage_gaps AS MATERIALIZED (
+            SELECT scope_id,start_ticks,end_ticks FROM scope_gaps WHERE reason='uncollected_outbounds'
+        )
         SELECT m.start_ticks AS start_ticks,m.start_ticks+600000000 AS end_ticks,m.scope_id AS scope_id,s.name,
             m.upload,m.download,
             CASE WHEN m.synthetic=1 THEN 'synthetic' WHEN m.approximate=1 THEN 'approximate' ELSE 'measured' END AS quality,
             0 AS kind,0 AS row_id,
-            EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=m.scope_id AND g.reason='uncollected_outbounds'
+            EXISTS(SELECT 1 FROM coverage_gaps g WHERE g.scope_id=m.scope_id
                 AND g.start_ticks < m.start_ticks+600000000 AND g.end_ticks > m.start_ticks) AS partial_coverage,
             s.basis AS basis,s.node_key AS node_key,s.outbound_tag AS outbound_tag
         FROM scope_minutes m JOIN measurement_scopes s ON s.scope_id=m.scope_id
         WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
+            AND ($ids IS NULL OR s.scope_id IN (SELECT value FROM json_each($ids)))
             AND m.start_ticks >= $start AND m.start_ticks < $end
         UNION ALL
         SELECT u.start_ticks,u.end_ticks,u.scope_id,s.name,u.upload,u.download,
             CASE WHEN u.start_ticks >= $start AND u.end_ticks <= $end THEN 'recovered-contained' ELSE 'recovered-partial' END,
             1,u.id,
-            EXISTS(SELECT 1 FROM scope_gaps g WHERE g.scope_id=u.scope_id AND g.reason='uncollected_outbounds'
+            EXISTS(SELECT 1 FROM coverage_gaps g WHERE g.scope_id=u.scope_id
                 AND g.start_ticks < u.end_ticks AND g.end_ticks > u.start_ticks), s.basis,s.node_key,s.outbound_tag
         FROM scope_unallocated u JOIN measurement_scopes s ON s.scope_id=u.scope_id
         WHERE (s.basis=$basis OR ($basis='local_proxy' AND s.basis IN ('actual_member','legacy_proxy'))) AND ($id IS NULL OR s.scope_id=$id) AND ($name IS NULL OR s.name=$name COLLATE BINARY)
+            AND ($ids IS NULL OR s.scope_id IN (SELECT value FROM json_each($ids)))
             AND u.start_ticks < $end AND u.end_ticks > $start
         """;
 
@@ -459,6 +662,7 @@ public sealed class ScopeLedger : IDisposable
             var metadata = display?.Read(transaction, query.Start.UtcTicks, query.End.UtcTicks);
             using var command = Command(transaction, RecordsSql + " ORDER BY start_ticks DESC,scope_id,kind,row_id;",
                 ("$basis", query.Basis), ("$id", query.ScopeId), ("$name", null),
+                ("$ids", query.ScopeIds is null ? null : JsonSerializer.Serialize(query.ScopeIds)),
                 ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks));
             using var reader = command.ExecuteReader();
             var rows = new List<ScopeTrafficRow>();

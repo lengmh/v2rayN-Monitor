@@ -19,6 +19,10 @@ test('provider units round with integer arithmetic and preserve exact text indep
   assert.equal(formatProviderBytes('0', 'GB'), '0.000 GB');
   assert.equal(formatProviderBytes('0.0000000000000000000000000001', 'GB'), '< 0.001 GB');
   assert.equal(formatProviderBytes('79228162514264337593543950335', 'GB'), '79,228,162,514,264,337,593.544 GB');
+  assert.equal(formatProviderBytes('1000000.0000000001', 'MB'), '1.000 MB');
+  assert.equal(formatProviderBytes('1048576.5', 'MiB'), '1.000 MiB');
+  assert.equal(formatProviderTotal('1048576.5', 'MB'), '1.049 MB');
+  assert.equal(exactProviderBytes('1048576.5'), '1,048,576.5 bytes');
 });
 
 test('provider decimals do not loosen local integer accounting or accept malformed payloads', () => {

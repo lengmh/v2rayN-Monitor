@@ -55,7 +55,10 @@ public sealed record XrayGuiSelection(string IndexId, bool EnableStatistics, boo
     public bool StatisticsRequested => EnableStatistics || DisplayRealTimeSpeed;
 }
 public sealed record XrayEffectiveConfiguration(Uri MetricsEndpoint, string Protocol, string ServerIdentity,
-    string CoreName = "Xray", ProxyCollectionScope? Scope = null);
+    string CoreName = "Xray", ProxyCollectionScope? Scope = null)
+{
+    public string? PolicyGroupSingleMemberName { get; init; }
+}
 
 // This is route-tag coverage, not the selected member of a group or a chain hop.
 public sealed record ProxyCollectionScope(int UncollectedOutbounds, int UncollectedGroups,
@@ -88,4 +91,6 @@ public sealed record XraySnapshot(
     string ListenerIdentity, Uri MetricsEndpoint, string CoreName = "Xray", ProxyCollectionScope? Scope = null)
 {
     public bool XrayProbeExtensionVerified { get; init; }
+    public bool SelectedPolicyGroup { get; init; }
+    public string? PolicyGroupSingleMemberName { get; init; }
 }

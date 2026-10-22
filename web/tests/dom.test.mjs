@@ -7,10 +7,18 @@ const asset = (await readdir(new URL('../dist/assets/', import.meta.url))).find(
 const script = await readFile(new URL(`../dist/assets/${asset}`, import.meta.url), 'utf8');
 const history = { upload: '1073741824', download: '15032385536', unallocatedUpload: '0', unallocatedDownload: '0', gapCount: 0, series: [{ label: '2026-10-09', upload: '1073741824', download: '15032385536' }], nodes: [{ key: 'a', name: 'Synthetic A', upload: '1073741824', download: '15032385536' }], records: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', nodeKey: 'a', nodeName: 'Synthetic A', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51 };
 async function until(condition, timeout = 1000) { for (let i = 0; i < timeout / 5; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('DOM condition not reached'); }
-async function fixture(t, overrides = {}) {
+async function fixture(t, overrides = {}, savedUnits = {}, timers = null) {
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4173/#synthetic-once', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const w = dom.window, calls = [], errors = [];
+  if (timers) {
+    const originalTimeout = w.setTimeout.bind(w);
+    w.setTimeout = (callback, delay, ...args) => {
+      if (delay === 2000 || delay === 30000) { timers.set(delay, () => callback(...args)); return 0; }
+      return originalTimeout(callback, delay, ...args);
+    };
+  }
+  for (const [view, unit] of Object.entries(savedUnits)) w.localStorage.setItem(`v2rayn-monitor-unit-${view}`, unit);
   w.addEventListener('error', event => errors.push(event.error));
   w.AbortSignal = AbortSignal; w.AbortController = AbortController;
   w.fetch = async (url, options = {}) => {
@@ -22,7 +30,7 @@ async function fixture(t, overrides = {}) {
     return Response.json(routes[parsed.pathname] || {});
   };
   w.eval(script);
-  await until(() => w.document.getElementById('total-value').textContent === '16.106 GB').catch(error => { throw new Error(`${error.message}; alert=${w.document.getElementById('global-error').textContent}; calls=${calls.map(c=>c.path).join(',')}; errors=${errors.map(e=>String(e)).join(',')}`); });
+  await until(() => w.document.getElementById('total-exact').textContent === '16,106,127,360 bytes').catch(error => { throw new Error(`${error.message}; alert=${w.document.getElementById('global-error').textContent}; calls=${calls.map(c=>c.path).join(',')}; errors=${errors.map(e=>String(e)).join(',')}`); });
   return { w, calls, errors, get: id => w.document.getElementById(id), change: (id, value) => { const el = w.document.getElementById(id); el.value = value; el.dispatchEvent(new w.Event('change')); }, submit: id => w.document.getElementById(id).dispatchEvent(new w.Event('submit', { cancelable: true })) };
 }
 test('production DOM exchanges fragment once, keeps integer bytes, separates missing rate from zero', async t => {
@@ -31,6 +39,221 @@ test('production DOM exchanges fragment once, keeps integer bytes, separates mis
   assert.equal(calls.find(c => c.path === '/api/session').headers['x-monitor-request'], '1');
   assert.equal(get('live-upload').textContent, '↑ —'); assert.equal(get('live-download').textContent, '↓ 0 B/s');
   change('unit', 'GiB'); assert.equal(get('total-value').textContent, '15.000 GiB'); assert.equal(get('total-exact').textContent, '16,106,127,360 bytes'); assert.equal(errors.length, 0);
+});
+test('ordinary history dimensions keep directory, filters, pagination and export aligned without adding totals', async t => {
+  const bases = ['local_proxy', 'actual_member', 'business', 'excluded', 'unknown', 'legacy_proxy', 'routed_outbound'];
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, historyBases: bases,
+      uploadPerSecond: '0', downloadPerSecond: '0' }),
+    '/api/nodes': url => Response.json([{ key: `scope:${url.searchParams.get('basis') || 'local_proxy'}`,
+      name: url.searchParams.get('basis') || 'Synthetic A' }]),
+    '/api/history': url => {
+      const basis = url.searchParams.get('basis');
+      if (!basis) return Response.json(history);
+      const missing = basis === 'unknown', upload = basis === 'excluded' || missing ? '0' : '123';
+      return Response.json({ ...history, basis, upload, download: '0',
+        nodes: missing ? [] : [{ key: `scope:${basis}`, name: basis, upload, download: '0' }],
+        records: missing ? [] : [{ ...history.records[0], nodeKey: `scope:${basis}`, nodeName: basis, upload, download: '0' }],
+        series: missing ? [] : [{ label: '2026-10-09', upload, download: '0' }], recordCount: missing ? 0 : 51 });
+    }
+  });
+  assert.ok(get('history-basis'), 'ordinary history has a dimension selector');
+  assert.equal(get('history-basis-control').hidden, false);
+  assert.equal(get('history-basis').value, 'local_proxy');
+  assert.equal(calls.find(c => c.path === '/api/history').query.has('basis'), false);
+  w.URL.createObjectURL = () => 'blob:synthetic-history';
+  w.URL.revokeObjectURL = () => {};
+  const downloads = [];
+  w.HTMLAnchorElement.prototype.click = function () { downloads.push(this.download); };
+  for (const basis of bases.slice(1)) {
+    change('history-basis', basis);
+    await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === basis &&
+      get('summary').getAttribute('aria-busy') === 'false');
+    await until(() => Array.from(get('node-filter').options).some(option => option.value === `scope:${basis}`));
+    assert.equal(calls.filter(c => c.path === '/api/nodes').at(-1).query.get('basis'), basis);
+    const query = calls.filter(c => c.path === '/api/history').at(-1).query;
+    assert.equal(query.get('page'), '0');
+    assert.equal(query.has('nodeKey'), false);
+    assert.ok(get('attribution-note').textContent.includes('不相加'));
+    assert.equal(get('live-upload').textContent, '↑ 0 B/s');
+    if (basis === 'unknown') {
+      assert.equal(get('total-value').textContent, '—');
+      assert.ok(get('chart').textContent.includes('缺失记录不等于零流量'));
+    } else {
+      assert.equal(get('total-exact').textContent, basis === 'excluded' ? '0 bytes' : '123 bytes');
+      change('node-filter', `scope:${basis}`);
+      await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === `scope:${basis}`);
+      get('next-page').click();
+      await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('page') === '1');
+    }
+    const count = calls.filter(c => c.path === '/api/export').length;
+    get('export-button').click();
+    await until(() => calls.filter(c => c.path === '/api/export').length === count + 1);
+    const exported = calls.filter(c => c.path === '/api/export').at(-1).query;
+    assert.equal(exported.get('basis'), basis);
+    assert.equal(exported.has('nonZeroRecords'), false);
+    await until(() => get('export-button').disabled === false);
+    assert.ok(downloads.at(-1).startsWith(`v2rayN-local-${basis}-`));
+  }
+  change('history-basis', 'local_proxy');
+  await until(() => get('total-exact').textContent === '16,106,127,360 bytes');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+});
+test('ordinary dimension stays separate from probe dimensions and the default provider comparison', async t => {
+  const provider = { source: 'Synthetic provider', rawBytes: '100', billedBytes: '100', recordCount: 0, nodes: [], series: [], records: [] };
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, historyBases: ['local_proxy', 'actual_member'],
+      uploadPerSecond: null, downloadPerSecond: null, probes: { historyEnabled: true, state: 'available' } }),
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('history-basis', 'actual_member');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  change('statistics-source', provider.source);
+  await until(() => calls.some(c => c.path === '/api/provider/history') && get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(get('history-basis-control').hidden, true);
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.has('basis'), false);
+  assert.equal(calls.filter(c => c.path === '/api/provider/history').at(-1).query.has('basis'), false);
+  change('statistics-source', '');
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  assert.equal(get('history-basis').value, 'actual_member');
+  assert.equal(get('history-basis-control').hidden, false);
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'probe_urltest_member');
+  assert.equal(get('history-basis-control').hidden, true);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('basis') === 'actual_member');
+  assert.equal(get('history-basis').value, 'actual_member');
+});
+test('ordinary dimension changes ignore late history and directory responses', async t => {
+  let finishHistory, finishNodes;
+  const { get, calls, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false,
+      historyBases: ['local_proxy', 'business', 'excluded'], uploadPerSecond: null, downloadPerSecond: null }),
+    '/api/history': url => url.searchParams.get('basis') === 'business'
+      ? new Promise(resolve => { finishHistory = () => resolve(Response.json({ ...history, upload: '999', download: '0' })); })
+      : Response.json(history),
+    '/api/nodes': url => url.searchParams.get('basis') === 'business'
+      ? new Promise(resolve => { finishNodes = () => resolve(Response.json([{ key: 'scope:old', name: 'Stale business' }])); })
+      : Response.json([{ key: 'scope:new', name: 'Current dimension' }])
+  });
+  change('history-basis', 'business');
+  await until(() => finishHistory && finishNodes);
+  change('history-basis', 'excluded');
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  finishHistory(); finishNodes();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('history-basis').value, 'excluded');
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  assert.ok(!get('node-filter').textContent.includes('Stale business'));
+  assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.get('basis'), 'excluded');
+});
+test('legacy or older servers keep the ordinary history selector hidden', async t => {
+  const { get } = await fixture(t);
+  assert.ok(get('history-basis-control'));
+  assert.equal(get('history-basis-control').hidden, true);
+});
+test('statistics and probes default to GB and MB and retain independent display units', async t => {
+  const { w, calls, get, change, errors } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled: true, state: 'available' } })
+  });
+  assert.deepEqual(Array.from(get('unit').options, option => option.value).sort(), ['GB', 'GiB', 'MB', 'MiB'].sort());
+  assert.equal(get('unit').value, 'GB');
+  change('unit', 'GiB');
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('statistics-title').textContent === '探测流量' && get('summary').getAttribute('aria-busy') === 'false');
+  assert.equal(get('unit').value, 'MB');
+  assert.equal(get('total-value').textContent, '16,106.127 MB');
+  assert.equal(get('total-value').querySelector('.metric-unit').textContent, ' MB');
+  const historyReads = calls.filter(call => call.path === '/api/history').length;
+  change('unit', 'MiB');
+  assert.equal(get('total-value').textContent, '15,360.000 MiB');
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  assert.equal(calls.filter(call => call.path === '/api/history').length, historyReads);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '15.000 GiB');
+  assert.equal(get('unit').value, 'GiB');
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => get('total-value').textContent === '15,360.000 MiB');
+  assert.equal(get('unit').value, 'MiB');
+  assert.equal(w.localStorage.getItem('v2rayn-monitor-unit-overview'), 'GiB');
+  assert.equal(w.localStorage.getItem('v2rayn-monitor-unit-probes'), 'MiB');
+  assert.deepEqual(errors, []);
+});
+test('saved page units restore on a new page and invalid preferences retain the defaults', async t => {
+  const overrides = { '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+    probes: { historyEnabled: true, state: 'available' } }) };
+  const saved = await fixture(t, overrides, { overview: 'MB', probes: 'MiB' });
+  assert.equal(saved.get('unit').value, 'MB');
+  assert.equal(saved.get('total-value').textContent, '16,106.127 MB');
+  saved.w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => saved.get('total-value').textContent === '15,360.000 MiB');
+  const invalid = await fixture(t, overrides, { overview: 'TB', probes: 'NaN' });
+  assert.equal(invalid.get('unit').value, 'GB');
+  invalid.w.document.querySelector('.nav-item[data-view=probes]').click();
+  await until(() => invalid.get('total-value').textContent === '16,106.127 MB');
+  assert.equal(invalid.get('unit').value, 'MB');
+});
+test('closed gap details defer all list rows and expansion preserves the complete history', async t => {
+  const gaps = Array.from({ length: 1500 }, () => ({ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z',
+    reason: 'snapshot_changed', isOpen: false }));
+  const { get, change } = await fixture(t, { '/api/history': () => Response.json({ ...history, gapCount: gaps.length, gaps }) });
+  assert.equal(get('gap-details').open, false);
+  assert.equal(get('gap-list').children.length, 0);
+  assert.ok(get('gap-summary').textContent.includes('1500 段'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').children.length === gaps.length);
+  assert.ok(get('gap-list').lastElementChild.textContent.includes('配置快照变化'));
+  const first = get('gap-list').firstElementChild;
+  change('unit', 'MB');
+  assert.equal(get('gap-list').firstElementChild, first);
+  assert.equal(get('gap-list').children.length, gaps.length);
+  get('gap-details').open = false;
+  await until(() => get('gap-list').children.length === 0);
+  get('gap-details').open = true;
+  await until(() => get('gap-list').children.length === gaps.length);
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+});
+test('changing gap context closes and releases old rows, including disabled probe history', async t => {
+  let historyEnabled = true;
+  const gaps = Array.from({ length: 1500 }, () => ({ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z',
+    reason: 'snapshot_changed', isOpen: false }));
+  const provider = { source: 'Synthetic provider', rawBytes: '1000000', billedBytes: '1000000', recordCount: 0, series: [], nodes: [], records: [] };
+  const { w, get, change } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', demo: false, uploadPerSecond: null, downloadPerSecond: null,
+      probes: { historyEnabled, state: historyEnabled ? 'available' : 'disabled' } }),
+    '/api/history': () => Response.json({ ...history, gapCount: gaps.length, gaps }),
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  const expand = async () => { get('gap-details').open = true; await until(() => get('gap-list').children.length === gaps.length); };
+  const closed = () => { assert.equal(get('gap-details').open, false); assert.equal(get('gap-list').children.length, 0); };
+  await until(() => get('statistics-source').options.length === 2);
+  await expand();
+  change('statistics-source', provider.source);
+  closed();
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  change('statistics-source', '');
+  await until(() => get('total-value').textContent === '16.106 GB');
+  closed();
+  await expand();
+  w.document.querySelector('.nav-item[data-view=probes]').click();
+  closed();
+  await until(() => get('total-value').textContent === '16,106.127 MB');
+  await expand();
+  historyEnabled = false;
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  await until(() => get('refresh-note').textContent === '探测未启用 · 2 秒检查');
+  closed();
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => get('total-value').textContent === '16.106 GB');
+  closed();
 });
 test('partial route coverage stays explicit in live status and historical records', async t => {
   const description = '仅采集路由直接匹配 proxy 的字节。其他 37 个出站（含 4 个策略组）未采集，其流量未知；当前合计不是全部代理流量。';
@@ -42,10 +265,12 @@ test('partial route coverage stays explicit in live status and historical record
       gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T11:00:00Z', reason: 'uncollected_outbounds', isOpen: false }] })
   });
   assert.equal(get('collector-state').textContent, '部分采集');
-  assert.ok(get('collector-message').textContent.includes(description));
+  assert.equal(get('collector-message').textContent, description);
   assert.ok(get('settings-collector-status').textContent.includes(description));
   assert.equal(get('status-dot').classList.contains('connected'), false);
   assert.ok(get('quality-notice').textContent.includes('未覆盖范围的流量未知'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').textContent.includes('其他出站未采集，流量未知'));
   assert.ok(get('gap-list').textContent.includes('其他出站未采集，流量未知'));
   assert.ok(get('records').textContent.includes('部分出站'));
   assert.equal(get('total-value').textContent, '16.106 GB');
@@ -60,9 +285,140 @@ test('Xray verified outbound coverage remains distinct from internal probe suppo
       probes: { historyEnabled: true, state: 'unsupported', message: 'Xray 尚未拆分内部探测' } })
   });
   assert.equal(get('collector-state').textContent, '正在采集');
-  assert.ok(get('collector-message').textContent.includes(description));
+  assert.equal(get('collector-message').textContent, 'Xray · 3 个代理出站 · 1 个策略组 · 不含直连和阻断');
+  assert.ok(!get('collector-message').textContent.includes('联合采样'));
+  assert.ok(get('settings-collector-status').textContent.includes(description));
+  assert.ok(!get('settings-collector-status').textContent.includes('联合采样'));
   assert.equal(get('status-dot').classList.contains('connected'), true);
   assert.equal(get('probe-state').textContent, '当前核心未支持探测计量');
+});
+test('collector failure keeps the diagnostic visible even with a known scope', async t => {
+  const message = '统计接口暂不可用，请检查 v2rayN 是否运行。';
+  const description = 'Xray 出站可能包含探测，不能与探测量相加或直接相减。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'error', message, currentNode: null, lastSample: null,
+      uploadPerSecond: null, downloadPerSecond: null, demo: false,
+      scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 3, collectedGroups: 1,
+        uncollectedOutbounds: 0, uncollectedGroups: 0, description } })
+  });
+  assert.equal(get('collector-state').textContent, '采集暂不可用');
+  assert.equal(get('collector-message').textContent, `${message} ${description}`);
+  assert.ok(get('settings-collector-status').textContent.includes(message));
+  assert.equal(get('live-upload').textContent, '↑ —');
+  assert.equal(get('live-download').textContent, '↓ —');
+});
+for (const [state, label] of [['baseline', '正在采样'], ['reset', '正在采样'], ['ready', '已连接']])
+  test(`${state} keeps the collector strip concise while retaining scope details`, async t => {
+    const description = '采集 64 个 Xray 独立代理出站，包含 3 个策略组；排除直连和阻断，内部探测未单独区分。';
+    const { get } = await fixture(t, {
+      '/api/status': () => Response.json({ state, message: 'Xray 策略组联合采样；各独立代理出站分别记账，不叠加组汇总。',
+        currentNode: 'Synthetic group', lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false,
+        scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 64, collectedGroups: 3,
+          uncollectedOutbounds: 0, uncollectedGroups: 0, description } })
+    });
+    assert.equal(get('collector-state').textContent, label);
+    assert.equal(get('collector-message').textContent, 'Xray · 64 个代理出站 · 3 个策略组 · 不含直连和阻断');
+    assert.ok(get('settings-collector-status').textContent.includes(description));
+    assert.ok(!get('settings-collector-status').textContent.includes('联合采样'));
+    assert.ok(get('settings-collector-status').textContent.includes('尚无有效采样'));
+    assert.equal(get('live-upload').textContent, '↑ —');
+    assert.equal(get('live-download').textContent, '↓ —');
+  });
+test('first sampling without scope explains the missing rate rather than exposing baseline jargon', async t => {
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'baseline', message: '已建立采样基线；节点切换后从新基线开始记录。',
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null, demo: false })
+  });
+  assert.equal(get('collector-state').textContent, '正在采样');
+  assert.equal(get('collector-message').textContent, '正在读取累计流量，连续采样后显示速率。');
+  assert.equal(get('live-upload').textContent, '↑ —');
+});
+for (const state of ['duplicate', 'stale']) test(`${state} waits for a fresh sample without showing an internal state code`, async t => {
+  const message = '等待更新的有效采样，已有历史保留。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state, message, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null })
+  });
+  assert.equal(get('collector-state').textContent, '等待新采样');
+  assert.equal(get('collector-message').textContent, message);
+  assert.equal(get('live-download').textContent, '↓ —');
+});
+test('member collection without scope uses a plain summary and retains its detailed message', async t => {
+  const message = '按独立代理成员记账；业务汇总、直连和未知归属分别保存，不相加。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message, collectionBasis: 'actual_member',
+      lastSample: null, uploadPerSecond: '0', downloadPerSecond: '0', demo: false })
+  });
+  assert.equal(get('collector-message').textContent, '按独立代理成员统计 · 不叠加汇总和直连');
+  assert.ok(get('settings-collector-status').textContent.includes(message));
+  assert.equal(get('live-upload').textContent, '↑ 0 B/s');
+});
+for (const [state, label] of [['error', '采集暂不可用'], ['snapshot_changed', '正在切换配置']])
+  test(`retained partial scope cannot replace the ${state} diagnostic`, async t => {
+    const message = '统计暂不可用，请检查 v2rayN 后重试。';
+    const description = '其他出站未采集，其流量未知。';
+    const { get } = await fixture(t, {
+      '/api/status': () => Response.json({ state, message, demo: false,
+        lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+        scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 2,
+          uncollectedGroups: 1, description } })
+    });
+    assert.equal(get('collector-state').textContent, label);
+    assert.equal(get('collector-message').textContent, `${message} ${description}`);
+    assert.ok(get('settings-collector-status').textContent.includes(message));
+    assert.equal(get('status-dot').classList.contains('partial'), false);
+    assert.equal(get('status-dot').classList.contains('error'), state === 'error');
+    assert.equal(get('live-upload').textContent, '↑ —');
+  });
+test('partial counters retain both the unavailable count and coverage warning', async t => {
+  const message = '4 个范围计数未知，未补零。';
+  const description = '其他出站未采集，其流量未知。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'partial', message, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      scope: { basis: 'routed_proxy', isPartial: true, uncollectedOutbounds: 2,
+        uncollectedGroups: 1, description } })
+  });
+  assert.equal(get('collector-state').textContent, '部分采集');
+  assert.equal(get('collector-message').textContent, `${message} ${description}`);
+  assert.ok(get('status-dot').classList.contains('partial'));
+});
+test('identical status and scope descriptions are not repeated', async t => {
+  const description = '统计接口不可用，请检查 v2rayN。';
+  const { get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'error', message: description, demo: false,
+      lastSample: null, uploadPerSecond: null, downloadPerSecond: null,
+      scope: { basis: 'routed_proxy', isPartial: false, uncollectedOutbounds: 0,
+        uncollectedGroups: 0, description } })
+  });
+  assert.equal(get('collector-message').textContent, description);
+  assert.equal(get('settings-collector-status').textContent.split(description).length - 1, 1);
+});
+test('empty historical trend does not promise that reconnecting will fill old records', async t => {
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, series: [], unbucketedUpload: '1073741824',
+      unbucketedDownload: '0', recoveredUpload: '1073741824', recoveredDownload: '0' })
+  });
+  assert.ok(get('chart').textContent.includes('所选范围没有可分时的记录'));
+  assert.ok(!get('chart').textContent.includes('连接后'));
+  assert.ok(get('chart').textContent.includes('缺失记录不等于零流量'));
+  assert.ok(get('quality-notice').textContent.includes('尚未分配到当前趋势图'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('saved collector outages have readable reasons without changing their history', async t => {
+  const reasons = ['collector_stopped', 'collector_error', 'unsupported_mode'];
+  const { get } = await fixture(t, {
+    '/api/history': () => Response.json({ ...history, gapCount: 3, gaps: reasons.map(reason => ({
+      start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', reason, isOpen: false
+    })) })
+  });
+  get('gap-details').open = true;
+  await until(() => get('gap-list').children.length === reasons.length);
+  for (const label of ['采集器已停止', '采集或保存失败', '当时的模式不支持'])
+    assert.ok(get('gap-list').textContent.includes(label));
+  for (const reason of reasons) assert.ok(!get('gap-list').textContent.includes(reason));
+  assert.ok(get('gap-list').textContent.includes('不代表流量全部恢复'));
+  assert.equal(get('total-value').textContent, '16.106 GB');
 });
 for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`disabling probe history on a collector tick closes ${target} details`, async t => {
   let historyEnabled = true;
@@ -84,7 +440,7 @@ for (const target of ['#ranking .rank-value', '#records .has-groups']) test(`dis
   const historyCalls = calls.filter(call => call.path === '/api/history').length;
 
   historyEnabled = false;
-  await until(() => get('refresh-note').textContent === '探测未启用 · 5 秒检查', 8000);
+  await until(() => get('refresh-note').textContent === '探测未启用 · 2 秒检查', 8000);
   assert.equal(anchor.isConnected, false);
   assert.equal(get('detail-popover').hidden, true);
   assert.equal(anchor.getAttribute('aria-expanded'), 'false');
@@ -104,7 +460,7 @@ test('Xray partial scope keeps outbound semantics and probe limitation visible',
       probes: { historyEnabled: true, state: 'unsupported', message: '当前 Xray 路径未接入内部探测计量。' } })
   });
   assert.equal(get('collector-state').textContent, '部分采集');
-  assert.ok(get('collector-message').textContent.includes(description));
+  assert.equal(get('collector-message').textContent, description);
   assert.ok(get('settings-collector-status').textContent.includes(description));
   assert.equal(get('probe-state').textContent, '当前核心未支持探测计量');
 });
@@ -152,7 +508,7 @@ test('probe page keeps basis, filters, export and business navigation separate',
   assert.equal(get('source-controls').hidden, true);
   assert.equal(get('probe-controls').hidden, false);
   assert.ok(get('probe-coverage').textContent.includes('2026-10-01'));
-  assert.ok(get('probe-coverage').textContent.includes('不是精确的首次基线'));
+  assert.ok(get('probe-coverage').textContent.includes('按分钟保存，并非精确的首次采样时间'));
   assert.ok(get('probe-notice').textContent.includes('不能直接换算服务商计费'));
   change('node-filter', 'scope:99');
   await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('nodeKey') === 'scope:99');
@@ -215,6 +571,8 @@ test('zero-only local details explain that records are hidden without hiding qua
       gaps: [{ start: '2026-10-09T10:00:00Z', end: '2026-10-09T10:01:00Z', reason: 'snapshot_changed', isOpen: false }] })
   });
   assert.ok(get('records').textContent.includes('零字节记录已隐藏'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').textContent.includes('快照'));
   assert.ok(get('gap-list').textContent.includes('快照'));
 });
 test('custom dates, bucket, node and pagination retain independent semantics', async t => {
@@ -230,6 +588,150 @@ test('newer navigation cancels and supersedes earlier API responses', async t =>
   change('node-filter', 'a'); await until(() => resolve); const older = calls.filter(c => c.path === '/api/history').at(-1);
   change('node-filter', 'b'); assert.equal(older.signal.aborted, true); resolve(Response.json({ ...history, download: '1', upload: '1' }));
   await new Promise(r => setTimeout(r, 10)); assert.equal(get('total-value').textContent, '16.106 GB');
+});
+test('history renders while status and the directory are pending, and period changes reuse both', async t => {
+  let completeStatus, completeNodes;
+  const { w, calls, get } = await fixture(t, {
+    '/api/status': () => new Promise(resolve => { completeStatus = resolve; }),
+    '/api/nodes': () => new Promise(resolve => { completeNodes = resolve; })
+  });
+  assert.equal(get('summary').getAttribute('aria-busy'), 'false');
+  assert.equal(get('node-filter').options.length, 1);
+  const before = calls.length;
+  w.document.querySelector('[data-period=day]').click();
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.deepEqual(calls.slice(before).map(call => call.path), ['/api/history']);
+  assert.equal(calls.filter(call => call.path === '/api/status').length, 1);
+  assert.equal(calls.filter(call => call.path === '/api/nodes').length, 1);
+  completeStatus(Response.json({ state: 'collecting', demo: false, uploadPerSecond: '1', downloadPerSecond: '2' }));
+  completeNodes(Response.json([{ key: 'a', name: 'Synthetic A' }]));
+  await until(() => get('node-filter').options.length === 2 && get('live-upload').textContent === '↑ 1 B/s');
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+});
+test('rapid period changes cancel only obsolete history and render the final range', async t => {
+  const pending = [];
+  let hold = false;
+  const { w, calls, get } = await fixture(t, {
+    '/api/history': (url, options) => hold ? new Promise(resolve => pending.push({ url, options, resolve })) : Response.json(history)
+  });
+  await until(() => get('node-filter').options.length === 3);
+  const before = calls.length;
+  hold = true;
+  for (const period of ['year', 'month', 'day']) w.document.querySelector(`[data-period=${period}]`).click();
+  assert.equal(pending.length, 3);
+  assert.equal(pending[0].options.signal.aborted, true);
+  assert.equal(pending[1].options.signal.aborted, true);
+  assert.equal(pending[2].options.signal.aborted, false);
+  pending[2].resolve(Response.json(history));
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  for (const request of pending.slice(0, 2)) request.resolve(Response.json({ ...history, upload: '1', download: '1' }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  assert.deepEqual(calls.slice(before).map(call => call.path), ['/api/history', '/api/history', '/api/history']);
+});
+test('comparison renders both histories before directories, then switches periods with two requests', async t => {
+  const pending = [];
+  let hold = false;
+  const provider = { source: 'Synthetic provider', rawBytes: '10', billedBytes: '12.5', recordCount: 1, series: [], nodes: [], records: [] };
+  const { w, calls, get, change } = await fixture(t, {
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/nodes': () => hold ? new Promise(resolve => pending.push(resolve)) : Response.json([{ key: 'a', name: 'Synthetic A' }]),
+    '/api/provider/nodes': () => hold ? new Promise(resolve => pending.push(resolve)) : Response.json([]),
+    '/api/provider/history': () => Response.json(provider)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  hold = true;
+  change('statistics-source', provider.source);
+  await until(() => get('total-exact').textContent === '10 bytes');
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => get('comparison-local-exact').textContent === '16,106,127,360 bytes');
+  assert.equal(get('comparison-billed-exact').textContent, '12.5 bytes');
+  const before = calls.length;
+  w.document.querySelector('[data-period=day]').click();
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  assert.deepEqual(calls.slice(before).map(call => call.path).sort(), ['/api/history', '/api/provider/history']);
+  for (const resolve of pending) resolve(Response.json([{ key: 'a', name: 'Synthetic A' }]));
+  await until(() => [...get('node-filter').options].some(option => option.value === 'Synthetic A'));
+  assert.equal(get('comparison-billed-exact').textContent, '12.5 bytes');
+});
+test('two-second rate updates do not query history before its thirty-second tick', async t => {
+  const timers = new Map();
+  let upload = '1';
+  const { w, calls, get } = await fixture(t, {
+    '/api/status': () => Response.json({ state: 'collecting', message: 'Synthetic rates', demo: false,
+      currentNode: 'Synthetic group selection', lastSample: null, uploadPerSecond: upload, downloadPerSecond: '0' })
+  }, {}, timers);
+  const historyReads = () => calls.filter(call => call.path === '/api/history').length;
+  const before = historyReads();
+  upload = '2'; timers.get(2000)();
+  await until(() => get('live-upload').textContent === '↑ 2 B/s');
+  assert.equal(get('live-download').textContent, '↓ 0 B/s');
+  assert.equal(historyReads(), before);
+  timers.get(30000)();
+  await until(() => historyReads() === before + 1 && get('summary').getAttribute('aria-busy') === 'false');
+  Object.defineProperty(w.document, 'hidden', { configurable: true, value: true });
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  const count = calls.length;
+  timers.get(2000)(); timers.get(30000)();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls.length, count);
+});
+test('hidden tabs cancel requests and settings ticks refresh status without scanning history', async t => {
+  const pending = [];
+  let hold = false;
+  const { w, calls, get, change } = await fixture(t, {
+    '/api/history': (url, options) => hold ? new Promise(resolve => pending.push({ resolve, options })) : Response.json(history)
+  });
+  hold = true; change('bucket', 'hour');
+  assert.equal(pending.length, 1);
+  Object.defineProperty(w.document, 'hidden', { configurable: true, value: true });
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  assert.equal(pending[0].options.signal.aborted, true);
+  const before = calls.length;
+  w.document.querySelector('[data-period=year]').click();
+  assert.equal(calls.length, before);
+  pending[0].resolve(Response.json({ ...history, upload: '1', download: '1' }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('total-exact').textContent, '16,106,127,360 bytes');
+  hold = false;
+  let tick;
+  const originalTimeout = w.setTimeout.bind(w);
+  w.setTimeout = (callback, delay, ...args) => delay === 2000 ? (tick = callback, 0) : originalTimeout(callback, delay, ...args);
+  w.document.querySelector('.nav-item[data-view=settings]').click();
+  Object.defineProperty(w.document, 'hidden', { configurable: true, value: false });
+  w.document.dispatchEvent(new w.Event('visibilitychange'));
+  await until(() => calls.at(-1).path === '/api/status');
+  const historyReads = calls.filter(call => call.path === '/api/history').length;
+  tick();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls.filter(call => call.path === '/api/history').length, historyReads);
+  w.document.querySelector('.nav-item[data-view=overview]').click();
+  await until(() => calls.filter(call => call.path === '/api/history').length === historyReads + 1 && get('summary').getAttribute('aria-busy') === 'false');
+});
+test('a failed comparison cancels its remaining history request and the next selection recovers', async t => {
+  let failing = false, pending;
+  const provider = { source: 'Synthetic provider', rawBytes: '10', billedBytes: '12.5', recordCount: 1, series: [], nodes: [], records: [] };
+  const { w, get, change } = await fixture(t, {
+    '/api/provider/sources': () => Response.json([provider.source]),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => failing ? new Response('{}', { status: 500 }) : Response.json(provider),
+    '/api/history': (url, options) => failing ? new Promise(resolve => { pending = { options, resolve }; }) : Response.json(history)
+  });
+  await until(() => get('statistics-source').options.length === 2);
+  change('statistics-source', provider.source);
+  await until(() => get('summary').getAttribute('aria-busy') === 'false');
+  failing = true;
+  get('compare-toggle').checked = true; get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(() => !get('global-error').hidden);
+  assert.equal(pending.options.signal.aborted, true);
+  assert.equal(get('summary').getAttribute('aria-busy'), 'false');
+  failing = false;
+  w.document.querySelector('[data-period=day]').click();
+  await until(() => get('comparison-local-exact').textContent === '16,106,127,360 bytes');
+  pending.resolve(Response.json({ ...history, upload: '1', download: '1' }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(get('comparison-local-exact').textContent, '16,106,127,360 bytes');
+  assert.equal(get('global-error').hidden, true);
 });
 test('401 disables writes and asks to reopen tray', async t => {
   let expired = false;
@@ -278,6 +780,8 @@ test('recovery is disclosed as already included while partial overlap stays excl
   assert.ok(get('quality-notice').textContent.includes('已包含恢复量 3.000 GB'));
   assert.ok(get('quality-notice').textContent.includes('尚未分配到当前趋势图'));
   assert.ok(get('quality-notice').textContent.includes('本范围内用量未知，未计入合计'));
+  get('gap-details').open = true;
+  await until(() => get('gap-list').textContent.includes('已结束（不代表流量全部恢复）'));
   assert.ok(get('gap-list').textContent.includes('已结束（不代表流量全部恢复）'));
 });
 
@@ -405,9 +909,10 @@ test('ranking without recovery keeps the same value target and shows directions 
 });
 
 for (const empty of [false, true]) test(`share group details close when polling returns ${empty ? 'no nodes' : 'only zero totals'}`, async t => {
+  const timers = new Map();
   let result = { ...history, nodes: history.nodes.map(node => ({ ...node,
     display: { originalName: node.name, groups: ['Synthetic initial group'], mergeKey: null } })) };
-  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) });
+  const { w, get, errors } = await fixture(t, { '/api/history': () => Response.json(result) }, {}, timers);
   get('ranking-share').click();
   const firstAnchor = get('ranking').querySelector('.has-groups');
   firstAnchor.focus();
@@ -415,10 +920,11 @@ for (const empty of [false, true]) test(`share group details close when polling 
   assert.equal(popup.hidden, false);
   assert.equal(popup.querySelector('li').textContent, 'Synthetic initial group');
 
-  // A normal collector tick must reconnect the same item and refresh its details.
+  // A history tick must reconnect the same item and refresh its details.
   result = { ...result, nodes: result.nodes.map(node => ({ ...node,
     display: { ...node.display, groups: ['Synthetic updated group'] } })) };
-  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group', 8000);
+  timers.get(30000)();
+  await until(() => popup.querySelector('li')?.textContent === 'Synthetic updated group');
   const previousAnchor = get('ranking').querySelector('.has-groups');
   assert.equal(firstAnchor.isConnected, false);
   assert.equal(popup.hidden, false);
@@ -427,7 +933,8 @@ for (const empty of [false, true]) test(`share group details close when polling 
 
   result = { ...result, upload: '0', download: '0', series: [], records: [], recordCount: 0,
     nodes: empty ? [] : result.nodes.map(node => ({ ...node, upload: '0', download: '0' })) };
-  await until(() => !!get('ranking').querySelector('.empty-state'), 8000);
+  timers.get(30000)();
+  await until(() => !!get('ranking').querySelector('.empty-state'));
   assert.equal(get('ranking').textContent, empty ? '所选范围尚无节点记录' : '所选范围只有零值记录');
   assert.equal(popup.hidden, true);
   assert.equal(previousAnchor.isConnected, false);
@@ -877,4 +1384,98 @@ test('comparison shares and node ranking keep independent exact denominators and
   assert.equal(get('comparison-buckets-shares').children.length, 0);
   assert.equal(get('comparison-view').hidden, true);
   assert.deepEqual(errors, []);
+});
+
+test('polished metrics preserve exact text and mobile filters disclose current selections', async t => {
+  const { w, get, change, errors } = await fixture(t);
+  assert.equal(get('total-value').textContent, '16.106 GB');
+  assert.equal(get('total-value').querySelector('.metric-unit').textContent, ' GB');
+  assert.equal(get('filter-disclosure').getAttribute('aria-expanded'), 'false');
+  assert.match(get('filter-disclosure').textContent, /全部节点.*按日.*GB/);
+  get('filter-disclosure').click();
+  assert.equal(get('filter-extra').classList.contains('expanded'), true);
+  assert.equal(get('filter-disclosure').getAttribute('aria-expanded'), 'true');
+  change('unit', 'GiB');
+  assert.equal(get('total-value').textContent, '15.000 GiB');
+  assert.match(get('filter-disclosure').textContent, /GiB/);
+  get('filter-disclosure').click();
+  assert.equal(get('filter-extra').classList.contains('expanded'), false);
+  assert.equal(get('filter-disclosure').getAttribute('aria-expanded'), 'false');
+  assert.equal(get('ranking').classList.contains('user-view-change'), false);
+  get('ranking-share').click();
+  assert.equal(w.document.querySelector('.motion-snapshot'), null); // No WAAPI in JSDOM: synchronous fallback.
+  get('ranking').dispatchEvent(new w.Event('animationend'));
+  assert.equal(get('ranking').classList.contains('user-view-change'), false);
+  assert.deepEqual(errors, []);
+});
+
+test('node sorting sits before list/share in the card heading without duplicate controls', async t => {
+  const { w, get } = await fixture(t);
+  assert.equal(w.document.querySelectorAll('#comparison-node-sort').length, 1);
+  assert.ok(get('comparison-node-sort').closest('.panel-heading-actions'));
+  assert.equal(get('comparison-node-sort-control').nextElementSibling.getAttribute('aria-label'), '同名节点对照显示方式');
+  assert.equal(get('comparison-nodes-list').querySelector('#comparison-node-sort'), null);
+});
+
+test('same-name footer pages whole node pairs, keeps full share denominators, and resets on sort and filters', async t => {
+  let reads=0, empty=false;
+  const nodes=Array.from({length:52},(_,i)=>({key:`n${i}`,name:`Node ${String(i+1).padStart(2,'0')}`,upload:String(i+1),download:'0'}));
+  const providerNodes=[...nodes.map((n,i)=>({name:n.name,rawBytes:String(100-i),billedBytes:`${100-i}.000123`})),{name:'Provider only',rawBytes:'999',billedBytes:'999.000123'}];
+  const local={...history,upload:'1378',download:'0',nodes,records:[],recordCount:52};
+  const provider={source:'paged',rawBytes:'4873',billedBytes:'4873.006519',recordCount:53,nodes:providerNodes,series:[],records:[]};
+  const {get,change,w,errors}=await fixture(t,{
+    '/api/provider/sources':()=>Response.json(['paged']),
+    '/api/provider/nodes':()=>Response.json(providerNodes.map(n=>({key:n.name,name:n.name}))),
+    '/api/provider/history':u=>Response.json({...provider,nodes:empty?[]:u.searchParams.has('nodeKey')?providerNodes.filter(n=>n.name===u.searchParams.get('nodeKey')):providerNodes}),
+    '/api/history':u=>Response.json(reads++?{...local,nodes:empty?[]:u.searchParams.has('nodeName')?nodes.filter(n=>n.name===u.searchParams.get('nodeName')):nodes}:history)
+  });
+  await until(()=>get('statistics-source').options.length===2);
+  change('statistics-source','paged');await until(()=>get('summary').getAttribute('aria-busy')==='false');
+  get('compare-toggle').checked=true;get('compare-toggle').dispatchEvent(new w.Event('change'));
+  await until(()=>get('comparison-node-page').textContent.includes('共 53'));
+  assert.match(get('comparison-node-page').textContent,/第 1 \/ 2 页.*每页 50 个/);
+  assert.equal(get('comparison-nodes').children.length,100);assert.equal(get('comparison-node-previous').disabled,true);
+  get('comparison-node-next').click();
+  assert.equal(get('comparison-nodes').children.length,6);assert.match(get('comparison-node-page').textContent,/第 2 \/ 2 页/);
+  const keys=[...get('comparison-nodes').children].map(r=>JSON.parse(r.dataset.motionKey));
+  for(let i=0;i<keys.length;i+=2){assert.equal(keys[i][0],keys[i+1][0]);assert.deepEqual([keys[i][1],keys[i+1][1]],[0,1]);}
+  assert.ok(parseFloat(get('comparison-nodes').querySelector('.paired-bar').style.width)<10); // Full-query scale, not current page.
+  assert.equal(get('comparison-node-next').disabled,true);
+  w.document.querySelector('[data-comparison-section=nodes][data-comparison-mode=share]').click();
+  assert.equal(get('comparison-nodes-shares').querySelector('[data-source=local]').querySelectorAll('.rank-row').length,52);
+  assert.equal(get('comparison-nodes-shares').querySelector('[data-source=provider]').querySelectorAll('.rank-row').length,53);
+  w.document.querySelector('[data-comparison-section=nodes][data-comparison-mode=list]').click();
+  assert.match(get('comparison-node-page').textContent,/第 2 \/ 2 页/);
+  change('comparison-node-sort','provider');assert.match(get('comparison-node-page').textContent,/第 1 \/ 2 页/);
+  assert.equal(get('comparison-nodes').querySelector('.comparison-name').textContent,'Provider only');
+  get('comparison-node-next').click();change('provider-metric','billed');assert.match(get('comparison-node-page').textContent,/第 1 \/ 2 页/);
+  get('comparison-node-next').click();change('node-filter','Node 01');
+  await until(()=>get('comparison-node-page').textContent.includes('共 1 个节点'));
+  assert.equal(get('comparison-nodes').children.length,2);assert.equal(get('comparison-node-next').disabled,true);
+  empty=true;change('bucket','hour');await until(()=>get('comparison-node-page').textContent.includes('共 0 个节点'));
+  assert.match(get('comparison-node-page').textContent,/第 1 \/ 1 页/);assert.equal(get('comparison-node-previous').disabled,true);assert.equal(get('comparison-node-next').disabled,true);
+  change('statistics-source','');
+  assert.equal(get('comparison-node-page').textContent,'正在读取…');
+  assert.equal(get('comparison-node-previous').disabled,true);assert.equal(get('comparison-node-next').disabled,true);
+  assert.deepEqual(errors,[]);
+});
+
+test('comparison list flex layout anchors pagination without stretching table rows', async () => {
+  const css = await readFile(new URL('../src/ui.css', import.meta.url), 'utf8');
+  const dom = new JSDOM(html);
+  try {
+    const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
+    for (const kind of ['nodes', 'buckets']) {
+      const list = dom.window.document.getElementById(`comparison-${kind}-list`);
+      const computed = el => dom.window.getComputedStyle(el);
+      assert.equal(computed(list.parentElement).flexDirection, 'column');
+      assert.equal(computed(list).display, 'flex');
+      assert.equal(computed(list).flexGrow, '1');
+      assert.equal(computed(list.querySelector('.pagination')).marginTop, 'auto');
+      assert.equal(computed(list.querySelector('.table-scroll')).flexGrow, '0');
+      assert.equal(computed(list.querySelector('.table-scroll')).maxHeight, '450px');
+      list.hidden = true;
+      assert.notEqual(computed(list).display, 'flex');
+    }
+  } finally { dom.window.close(); }
 });
