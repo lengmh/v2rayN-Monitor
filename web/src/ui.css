@@ -25,10 +25,10 @@ main { min-width: 0; flex: 1; }
 .collector-strip strong { font-size: 12px; font-weight: 600; }
 .collector-copy { min-width: 0; flex: 1; }
 .collector-strip p { color: var(--muted); font-size: 10px; line-height: 1.5; }
-.current-node { display: flex; flex-direction: column; max-width: 150px; min-width: 0; padding-left: 12px; border-left: 1px solid var(--line); }
-.current-node span { color: var(--muted); font-size: 10px; }
-.current-node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.live-rate { display: grid; gap: 1px; white-space: nowrap; padding-left: 12px; border-left: 1px solid var(--line); color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.current-node { display: flex; align-items: baseline; gap: 8px; max-width: min(50%,480px); min-width: 0; padding-left: 12px; border-left: 1px solid var(--line); }
+.current-node span { flex-shrink: 0; color: var(--muted); font-size: 10px; }
+.current-node strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-rate { display: flex; gap: 12px; white-space: nowrap; padding-left: 12px; border-left: 1px solid var(--line); color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .status-dot { background: var(--warning); margin: 0; }
 .status-dot.connected { background: var(--teal); }
 .status-dot.error { background: var(--error); }
@@ -85,7 +85,7 @@ main { min-width: 0; flex: 1; }
 .upload-color, .bar-upload, .rank-upload { background: var(--upload); }
 .provider-color, .bar-provider { background: var(--provider); }
 .local-estimate { background: var(--blue); }
-.chart { min-height: 222px; margin: 0 17px; display: flex; gap: 4px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); background: repeating-linear-gradient(to top, transparent 0, transparent 46px, var(--line) 47px, transparent 48px); }
+.chart { min-height: 222px; margin: 0 17px; display: flex; gap: 4px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); background: repeating-linear-gradient(to top, transparent 0, transparent 46px, var(--grid) 47px, transparent 48px); }
 .chart.empty { display: grid; place-items: center; background: none; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.8; white-space: pre-line; }
 .chart-column { display: flex; flex: 1 0 8px; min-width: 8px; max-width: 100px; flex-direction: column; justify-content: end; align-items: stretch; position: relative; height: 222px; padding-bottom: 26px; }
 .chart-stack { width: min(80%,24px); margin: 0 auto; display: flex; flex-direction: column-reverse; height: 100%; justify-content: flex-start; }
@@ -126,7 +126,7 @@ main { min-width: 0; flex: 1; }
 .share-legend .rank-index { text-align: right; white-space: nowrap; }
 .share-legend .rank-row { margin: 9px 0; }
 .share-swatch { display: block; width: 6px; height: 6px; border-radius: 50%; }
-.detail-popover { position: fixed; z-index: 60; width: 300px; max-width: calc(100vw - 24px); padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; box-shadow: 0 8px 28px #10182020; color: var(--ink); }
+.detail-popover { position: fixed; z-index: 60; width: 300px; max-width: calc(100vw - 24px); padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; box-shadow: var(--float-shadow); color: var(--ink); }
 .detail-popover h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; }
 .detail-popover dl { display: grid; grid-template-columns: 1fr auto; gap: 7px 18px; font-size: 12px; margin: 0; }
 .detail-popover dt, .detail-popover dd { margin: 0; }
@@ -166,6 +166,11 @@ tbody tr:hover { background: var(--hover); }
 .comparison-panel { margin-bottom: 14px; }
 .comparison-tables { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
 .comparison-tables .comparison-panel { margin: 0; }
+/* Stretch the list, not its rows: paired-card footers share the bottom edge. */
+.comparison-tables .comparison-panel, .motion-comparison-context { display: flex; flex-direction: column; }
+.comparison-list:not([hidden]) { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.comparison-list > .table-scroll { flex: none; }
+.comparison-list > .pagination { margin-top: auto; }
 .comparison-tables table { min-width: 535px; }
 .comparison-tables th, .comparison-tables td { padding: 5px 10px; font-size: 11px; }
 .comparison-name { width: 25%; white-space: normal; overflow-wrap: anywhere; }
@@ -224,7 +229,6 @@ tbody tr:hover { background: var(--hover); }
   .sidebar nav { gap: 16px; }
   .sidebar-bottom { display: none; }
   .content { padding-inline: 22px; }
-  .current-node { display: none; }
   .collector-strip { flex-basis: 430px; }
   .analysis-grid { grid-template-columns: minmax(0,1.3fr) minmax(0,1fr); }
   .date-navigation strong { min-width: 120px; }
@@ -319,3 +323,81 @@ tbody tr:hover { background: var(--hover); }
 .comparison-sort { display: flex; align-items: center; gap: 8px; padding: 0 17px 12px; color: var(--muted); font-size: 11px; }
 .comparison-sort select { width: auto; min-width: 0; }
 .comparison-shares .empty-state { white-space: normal; }
+
+/* Quiet, compact surfaces: data remains still during collector refreshes. */
+.sidebar { background: var(--page); }
+.content { padding-top: 26px; }
+.page-heading { column-gap: 20px; row-gap: 12px; }
+.page-heading .collector-strip { flex-basis: 100%; order: 4; flex-wrap: wrap; gap: 6px 12px; padding: 10px 0 0; border-top: 1px solid var(--line); }
+.page-heading .collector-strip.is-partial { padding: 10px 12px; border-top: 0; }
+.collector-copy { display: contents; }
+.collector-strip > .status-dot, #collector-state { flex-shrink: 0; }
+#collector-message { order: 1; flex: 1 0 calc(100% - 20px); margin-left: 20px; overflow-wrap: anywhere; }
+.collector-strip .text-button { margin-left: auto; }
+.collector-strip p, .current-node span, .live-rate { font-size: 11px; }
+.filter-first { padding-block: 12px; }
+.filter-extra { display: contents; }
+.filter-disclosure { display: none; }
+.summary-grid { border-color: transparent; padding-block: 17px; }
+.metric-value { font-weight: 600; letter-spacing: -.8px; }
+.metric-unit { font-size: .48em; font-weight: 500; letter-spacing: 0; color: var(--muted); }
+.metric-note { font-size: 11px; margin-top: 8px; }
+.quality-panel, .history-details { border-color: transparent; background: var(--surface); font-size: 12px; }
+.panel-heading { padding-top: 17px; }
+.panel-heading p, .comparison-share-note { font-size: 11px; }
+.rank-row { margin-block: 10px; }
+.rank-node, .rank-value { font-size: 13px; }
+.share-chart { width: min(100%, 208px); }
+.share-legend .rank-row { margin-block: 10px; }
+.detail-popover:not([hidden]) { animation: surface-in 180ms ease-out; }
+#exact-value-dialog[open] { box-shadow: var(--float-shadow); animation: surface-in 180ms ease-out; }
+@keyframes surface-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+.motion-snapshot { user-select: none; }
+.comparison-warning { padding: 10px 13px; border-radius: 6px; background: var(--surface); font-size: 12px; }
+.comparison-share-source h3 { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.comparison-share-source h3::before { content: ''; width: 3px; height: 12px; border-radius: 2px; background: var(--teal); }
+.comparison-share-source + .comparison-share-source h3::before { background: var(--provider); }
+@media (max-width: 640px) {
+  .content { padding-top: 18px; }
+  .page-heading .collector-strip { padding-top: 9px; }
+  .collector-strip .current-node { order: 1; flex-basis: 100%; max-width: 100%; border-left: 0; padding-left: 0; }
+  #collector-message { order: 2; flex-basis: 100%; margin-left: 0; }
+  .collector-strip .text-button { margin-left: auto; }
+  .filter-first { gap: 10px 8px; }
+  .date-navigation { flex: 1 1 auto; justify-content: space-between; }
+  .date-navigation strong { min-width: 112px; }
+  .filter-disclosure { display: block; width: 100%; min-width: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; border-top: 1px solid var(--line); padding-top: 8px; }
+  .filter-extra { display: none; width: 100%; flex-wrap: wrap; gap: 10px; padding-top: 2px; }
+  .filter-extra.expanded { display: flex; }
+  .summary-grid { padding-block: 0; }
+  .metric-value { font-size: 25px; }
+  .metric-note { font-size: 11px; }
+  .comparison-summary .metric-card { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 10px; align-items: center; padding-block: 12px; }
+  .comparison-summary .metric-title { margin: 0; }
+  .comparison-summary .metric-value { font-size: 24px; text-align: right; }
+  .comparison-summary .metric-note { grid-column: 1 / -1; margin-top: 0; }
+  .ranking, .ranking.show-shares { height: 208px; max-height: 208px; }
+  .ranking.show-shares { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; }
+  .share-chart { width: min(100%, 148px); }
+  .share-legend { max-height: 184px; }
+  .share-legend .rank-node, .share-legend .rank-index { font-size: 11px; }
+  .share-legend .rank-row { margin-block: 7px; }
+  .comparison-share-source .ranking { height: 172px; max-height: 172px; }
+  .comparison-share-source .share-legend { max-height: 156px; }
+  .comparison-share-source h3 { margin: 12px 13px 2px; }
+  .comparison-share-note { margin: 0 13px 10px; }
+  .panel-heading { padding-top: 13px; }
+}
+
+/* Body-mounted outgoing comparison snapshots retain their table context. */
+.motion-comparison-context table { min-width: 535px; }
+.motion-comparison-context th, .motion-comparison-context td { padding: 5px 10px; font-size: 11px; }
+
+/* Sort sits immediately before the list/share switch, as requested. */
+.comparison-heading-actions { flex-shrink: 0; }
+.comparison-heading-actions .comparison-sort { padding: 0; margin: 0; }
+.comparison-heading-actions .comparison-sort select { min-height: 29px; max-width: 132px; font-size: 12px; }
+@media (max-width: 640px) {
+  .comparison-panel > .panel-heading:has(.comparison-heading-actions) { flex-wrap: wrap; }
+  .comparison-heading-actions { margin-left: auto; }
+}

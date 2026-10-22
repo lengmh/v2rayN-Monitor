@@ -24,6 +24,9 @@ public sealed record ScopeQuery(string Basis, DateTimeOffset Start, DateTimeOffs
     public bool NonZeroRecords { get; init; }
     public IReadOnlyList<long>? ScopeIds { get; init; }
 }
+/// <summary>Per-query diagnostics only; no ledger writes or HTTP response fields.</summary>
+public sealed record ScopeQueryMetrics(TimeSpan LockWait, TimeSpan LockHeld, TimeSpan Aggregation,
+    TimeSpan Total, long RowsRead, long MetadataRowsRead);
 public sealed record ScopeTrafficRow(string Basis, long ScopeId, string Name, string Start, string End,
     string Upload, string Download, string Quality, bool PartialCoverage)
 {

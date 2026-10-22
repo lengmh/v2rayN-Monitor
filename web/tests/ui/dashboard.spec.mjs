@@ -30,6 +30,12 @@ async function mock(page, overrides = {}) {
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+async function settledScreenshot(page, path) {
+  await expect(page.locator('.motion-snapshot')).toHaveCount(0);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(() => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').length)).toBe(0);
+  await page.screenshot({ path, fullPage: true, animations: 'disabled' });
+}
 test('raw and billing comparisons switch both sources and disclose missing multiplier coverage', async ({ page }) => {
   let reads = 0;
   const display = { originalName: 'Synthetic known multiplier', groups: [], mergeKey: null, rate: null, rateStatus: 'partial',
@@ -62,11 +68,11 @@ test('raw and billing comparisons switch both sources and disclose missing multi
   for (const [width, height, theme, suffix] of [[1440, 1100, 'light', 'desktop'], [390, 844, 'dark', 'mobile']]) {
     await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await page.screenshot({ path: `test-results/billing-comparison-${suffix}.png`, fullPage: true });
+    await settledScreenshot(page, `test-results/billing-comparison-${suffix}.png`);
     await page.click('[data-comparison-section="nodes"][data-comparison-mode="share"]');
     await expect(page.locator('#comparison-nodes-shares [data-source="local"] h3')).toHaveText('本机估算计费量');
     await expect(page.locator('#comparison-nodes-shares [data-source="local"] circle')).toHaveCount(1);
-    await page.screenshot({ path: `test-results/billing-shares-${suffix}.png`, fullPage: true });
+    await settledScreenshot(page, `test-results/billing-shares-${suffix}.png`);
     await page.click('[data-comparison-section="nodes"][data-comparison-mode="list"]');
   }
   await page.selectOption('#provider-metric', 'raw');
@@ -104,6 +110,40 @@ test('probe view separates dimensions and keeps a readable desktop and mobile la
   await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   expect(calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.has('basis')).toBe(false);
 });
+test('statistics and probes keep separate megabyte preferences across navigation and reload', async ({ page }) => {
+  const calls = await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Synthetic unit preferences', demo: false,
+      currentNode: 'Synthetic member', lastSample: null, uploadPerSecond: '524288', downloadPerSecond: '2097152',
+      probes: { historyEnabled: true, state: 'available' } }))
+  });
+  await expect(page.locator('#unit option')).toHaveText(['GB', 'GiB', 'MB', 'MiB']);
+  await page.selectOption('#unit', 'GiB');
+  await expect(page.locator('#total-value')).toHaveText('15.000 GiB');
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#total-value')).toHaveText('16,106.127 MB');
+  await expect(page.locator('#unit')).toHaveValue('MB');
+  await expect(page.locator('#total-value .metric-unit')).toHaveText(' MB');
+  await settledScreenshot(page, 'test-results/probe-units-mb-desktop.png');
+  const reads = calls.filter(call => call.path === '/api/history').length;
+  await page.selectOption('#unit', 'MiB');
+  await expect(page.locator('#total-value')).toHaveText('15,360.000 MiB');
+  await expect(page.locator('#live-download')).toHaveText('↓ 2.00 MiB/s');
+  expect(calls.filter(call => call.path === '/api/history').length).toBe(reads);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.selectOption('#theme', 'dark');
+  await page.click('#filter-disclosure');
+  await settledScreenshot(page, 'test-results/probe-units-mib-mobile.png');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.click('.nav-item[data-view=overview]');
+  await expect(page.locator('#total-value')).toHaveText('15.000 GiB');
+  await expect(page.locator('#unit')).toHaveValue('GiB');
+  await page.reload();
+  await expect(page.locator('#total-value')).toHaveText('15.000 GiB');
+  await page.click('.nav-item[data-view=probes]');
+  await expect(page.locator('#total-value')).toHaveText('15,360.000 MiB');
+  await expect(page.locator('#unit')).toHaveValue('MiB');
+  await expect(page.locator('#total-exact')).toHaveText('16,106,127,360 bytes');
+});
 test('member group labels wrap fully and local details request nonzero rows', async ({ page }) => {
   const name = '【US-1x】 1-Synthetic member with a deliberately long readable name for the ranking';
   const calls = await mock(page, {
@@ -137,15 +177,17 @@ test('issue23 shares and recovery keep directions, exact values and mobile layou
   for (const [width, height, suffix] of [[1440, 1100, 'desktop'], [390, 844, 'mobile']]) {
     await page.setViewportSize({ width, height });
     await page.click('[data-ranking-mode=ranking]');
+    await expect(page.locator('.motion-snapshot')).toHaveCount(0);
     const panel = page.locator('.ranking-panel');
     const rankingHeight = (await panel.boundingBox()).height;
-    const marker = await page.locator('.rank-recovery-marker:not(.vacant)').boundingBox();
+    const marker = await page.locator('#ranking .rank-recovery-marker:not(.vacant)').boundingBox();
     const value = await page.locator('.rank-value').first().boundingBox();
     expect(Math.abs(marker.y + marker.height / 2 - value.y - value.height / 2)).toBeLessThanOrEqual(1);
     expect(marker.width).toBeLessThanOrEqual(4);
     expect((await page.locator('.rank-row').first().boundingBox()).height).toBeLessThan(64);
     await page.screenshot({ path: `test-results/issue23-ranking-${suffix}.png`, fullPage: true });
     await page.click('[data-ranking-mode=share]');
+    await expect(page.locator('.motion-snapshot')).toHaveCount(0);
     await expect(page.locator('.share-chart circle')).toHaveCount(3);
     await expect(page.locator('#ranking .rank-value, #ranking .rank-track, .share-total')).toHaveCount(0);
     expect(Math.abs((await panel.boundingBox()).height - rankingHeight)).toBeLessThanOrEqual(1);
@@ -328,7 +370,7 @@ test('issue23 captured rates, group names and exact copy work across business an
   expect(await page.evaluate(() => window.syntheticCopied)).toBe('8,053,063,680 bytes');
   await page.locator('#exact-value-dialog form button').click();
   await page.click('.nav-item[data-view=probes]');
-  await expect(page.locator('#billing-value')).toHaveText('8.053 GB');
+  await expect(page.locator('#billing-value')).toHaveText('8,053.064 MB');
   await page.screenshot({ path: 'test-results/issue23-captured-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -378,6 +420,37 @@ test('historical and captured group members use the same labels without merging 
   await page.locator('#ranking .has-groups').first().hover();
   await expect(page.getByRole('dialog', { name: '策略组', exact: true })).toContainText('Synthetic Route');
   await page.screenshot({ path: 'test-results/historical-probe-groups-mobile.png', fullPage: true, animations: 'disabled' });
+});
+test('collector strip aligns node and rates without repeating implementation details', async ({ page }) => {
+  const name = 'Synthetic · A deliberately long current member name '.repeat(4);
+  const description = '采集 35 个 Xray 独立代理出站，包含 2 个策略组；不叠加策略组，排除直连和阻断。内部探测未单独区分。';
+  await mock(page, {
+    '/api/status': route => route.fulfill(json({ state: 'collecting', message: 'Xray 多出站联合采样；proxy 延续原历史。',
+      currentNode: name, demo: false, lastSample: null, uploadPerSecond: null, downloadPerSecond: '0',
+      scope: { basis: 'xray_outbound_members', isPartial: false, collectedOutbounds: 35, collectedGroups: 2,
+        uncollectedOutbounds: 0, uncollectedGroups: 0, description } }))
+  });
+  await expect(page.locator('#collector-message')).toHaveText('Xray · 35 个代理出站 · 2 个策略组 · 不含直连和阻断');
+  await expect(page.locator('#live-upload')).toHaveText('↑ —');
+  await expect(page.locator('#live-download')).toHaveText('↓ 0 B/s');
+  await expect(page.locator('#current-node')).toHaveAttribute('title', name);
+  for (const width of [2089, 1440, 900, 640, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect(page.locator('#current-node')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const up = await page.locator('#live-upload').boundingBox(), down = await page.locator('#live-download').boundingBox();
+    expect(Math.abs(up.y - down.y)).toBeLessThan(2);
+    const label = await page.locator('.current-node > span').boundingBox(), node = await page.locator('#current-node').boundingBox();
+    expect(Math.abs(label.y + label.height - node.y - node.height)).toBeLessThan(3);
+    if (width > 640) {
+      const current = await page.locator('.current-node').boundingBox(), rates = await page.locator('.live-rate').boundingBox();
+      expect(rates.x - current.x - current.width).toBeLessThanOrEqual(16);
+      expect(Math.abs(rates.y - current.y)).toBeLessThan(3);
+    }
+  }
+  await page.getByRole('button', { name: '采集详情 →', exact: true }).click();
+  await expect(page.locator('#settings-collector-status')).toContainText(description);
+  await expect(page.locator('#settings-collector-status')).not.toContainText('联合采样');
 });
 test('cross-core history stays visible with Xray active and setup copy is current', async ({ page }) => {
   await mock(page, {
@@ -513,7 +586,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
   await expect(only).toHaveClass(/missing/); await expect(only).toContainText('0.000 GB');
   await expect(only.locator('button')).toHaveAttribute('aria-label', /没有记录/);
   const missingValue = only.locator('.paired-value'), missingCell = only.locator('.paired-traffic');
-  expect(await missingValue.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(242, 245, 247)');
+  expect(await missingValue.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(238, 239, 235)');
   expect(await missingCell.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
   expect((await missingValue.boundingBox()).width).toBeLessThan((await missingCell.boundingBox()).width / 2);
   await expect(only.locator('.paired-track')).toBeVisible();
@@ -549,6 +622,8 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
     await page.selectOption('#theme', theme);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
+      for (const section of ['nodes', 'buckets']) await page.click(`[data-comparison-section="${section}"][data-comparison-mode="list"]`);
+      await settledScreenshot(page, `test-results/comparison-list-${theme}-${width}.png`);
       for (const section of ['nodes', 'buckets']) {
         await page.click(`[data-comparison-section="${section}"][data-comparison-mode="share"]`);
         await expect(page.locator(`#comparison-${section}-shares svg`)).toHaveCount(2);
@@ -562,7 +637,7 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
         expect(chart.x + chart.width).toBeLessThanOrEqual(legend.x + 1);
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-      await page.screenshot({ path: `test-results/comparison-shares-${theme}-${width}.png`, fullPage: true });
+      await settledScreenshot(page, `test-results/comparison-shares-${theme}-${width}.png`);
     }
   }
   for (const section of ['nodes', 'buckets']) {
@@ -570,7 +645,9 @@ test('same-name comparison aligns sources by hour and keeps week month and missi
     await expect(page.locator(`#comparison-${section}-list`)).toBeVisible();
     await expect(page.locator(`#comparison-${section}-shares`)).toBeHidden();
   }
-  partialOnly = true; await page.selectOption('#bucket', 'hour');
+  partialOnly = true;
+  if (await page.locator('#filter-disclosure').isVisible()) await page.locator('#filter-disclosure').click();
+  await page.selectOption('#bucket', 'hour');
   await expect(page.locator('#comparison-local')).toHaveText('—');
   await expect(page.locator('#comparison-local-exact')).toHaveText('所选范围无已知量');
   await expect(page.locator('#comparison-recovery')).toContainText('部分重叠恢复区间（未计入）：500 bytes');
@@ -654,12 +731,15 @@ test('expired session clearly asks to reopen tray and disables writes', async ({
   await expect(page.locator('#session-alert')).toBeVisible(); await expect(page.locator('#export-button')).toBeDisabled();
   await page.click('.nav-item[data-view=settings]'); await expect(page.locator('#save-settings')).toBeDisabled();
 });
-test('settings save posts path and IANA timezone then queries that timezone', async ({ page }) => {
+test('settings save posts path and timezone, deferring history until statistics is visible', async ({ page }) => {
   const calls = await mock(page); await page.click('.nav-item[data-view=settings]');
+  const histories = calls.filter(c => c.path === '/api/history').length;
   await page.fill('#v2rayn-path', 'D:\\Proxy\\v2rayN'); await page.selectOption('#time-zone', 'Asia/Shanghai'); await page.click('#save-settings');
   await expect(page.locator('#settings-result')).toContainText('设置已保存');
   const post = calls.filter(c => c.path === '/api/settings' && c.body).at(-1);
   expect(post.body.v2rayNPath).toBe('D:\\Proxy\\v2rayN'); expect(post.body.timeZoneId).toBe('Asia/Shanghai');
+  expect(calls.filter(c => c.path === '/api/history')).toHaveLength(histories);
+  await page.click('.nav-item[data-view=overview]');
   await expect.poll(() => calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('timeZoneId')).toBe('Asia/Shanghai');
 });
 test('provider preview is separate, edits invalidate preview, and explicit confirmation commits once', async ({ page }) => {
@@ -792,3 +872,193 @@ test('local partial recovery is unknown and a known idle record remains zero', a
   await expect(page.locator('#total-exact')).toHaveText('0 bytes');
 });
 
+
+test('polished mobile disclosure and reduced motion remain accessible', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const longName = '很长的合成节点名称 '.repeat(8) + 'ContinuousSyntheticName'.repeat(8);
+  await mock(page, { '/api/nodes': route => route.fulfill(json([{ key: 'a', name: longName }, { key: 'b', name: 'Synthetic B' }])) });
+  const disclosure = page.locator('#filter-disclosure');
+  await expect(disclosure).toBeVisible();
+  await expect(page.locator('#node-filter')).toBeHidden();
+  await disclosure.focus(); await page.keyboard.press('Enter');
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+  await page.selectOption('#bucket', 'hour');
+  await expect(disclosure).toContainText('按小时');
+  await page.selectOption('#unit', 'GiB');
+  await expect(disclosure).toContainText('GiB');
+  await page.selectOption('#node-filter', 'a');
+  await expect(disclosure).toContainText('ContinuousSyntheticName');
+  await disclosure.click();
+  await expect(page.locator('#node-filter')).toBeHidden();
+  await expect(page.locator('#demo-notice')).toBeVisible();
+  await page.click('#ranking-share');
+  expect(await page.locator('#ranking').evaluate(n => getComputedStyle(n).animationName)).toBe('none');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await expect(page.locator('#node-filter')).toBeVisible();
+  await expect(disclosure).toBeHidden();
+});
+
+test('collector polling preserves filter focus and never replays user motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mock(page);
+  await page.click('#ranking-share');
+  await expect(page.locator('#ranking')).not.toHaveClass(/user-view-change/);
+  await page.click('#filter-disclosure');
+  await page.locator('#bucket').focus();
+  await expect.poll(() => page.evaluate(() => document.getAnimations().length)).toBe(0);
+  await page.evaluate(() => {
+    window.previewAnimationStarts = 0;
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (...args) { window.previewAnimationStarts++; return animate.apply(this, args); };
+  });
+  await page.waitForResponse(r => new URL(r.url()).pathname === '/api/history', { timeout: 8000 });
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('#bucket')).toBeFocused();
+  await expect(page.locator('#filter-disclosure')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#ranking')).not.toHaveClass(/user-view-change/);
+  expect(await page.evaluate(() => window.previewAnimationStarts)).toBe(0);
+});
+
+test('production theme paints html body and shell, including narrow screens', async ({ page }) => {
+  await mock(page);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const [theme, background, panel] of [
+      ['dark', 'rgb(23, 27, 27)', 'rgb(32, 37, 37)'],
+      ['light', 'rgb(245, 245, 242)', 'rgb(254, 254, 253)'],
+      ['dark', 'rgb(23, 27, 27)', 'rgb(32, 37, 37)']
+    ]) {
+      await page.selectOption('#theme', theme);
+      for (const selector of ['html', 'body', '.app-shell']) {
+        await expect(page.locator(selector)).toHaveCSS('background-color', background);
+      }
+      await expect(page.locator('.filter-panel')).toHaveCSS('background-color', panel);
+      await expect(page.locator('html')).toHaveCSS('color-scheme', theme);
+      await settledScreenshot(page, `test-results/polished-overview-${theme}-${width}.png`);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+  }
+});
+
+test('v2 motion keeps both surfaces then cancels immediately on navigation', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await mock(page);
+  const state = await page.evaluate(() => {
+    document.querySelector('#ranking').scrollTop=30;
+    document.querySelector('#ranking-share').click();
+    const old=document.querySelector('.motion-snapshot');
+    const result={old:!!old,inert:old?.inert,ids:old?.querySelectorAll('[id]').length,
+      oldBars:old?.querySelectorAll('.rank-track').length,ring:document.querySelectorAll('#ranking .share-chart').length,
+      animations:document.querySelector('#ranking').getAnimations().length};
+    document.querySelector('.nav-item[data-view=settings]').click();
+    return {...result,afterNavigate:document.querySelectorAll('.motion-snapshot').length};
+  });
+  expect(state).toMatchObject({old:true,inert:true,ids:0,ring:1,animations:1,afterNavigate:0});
+  expect(state.oldBars).toBeGreaterThan(0);
+  await page.click('.nav-item[data-view=overview]');
+  await page.evaluate(()=>{for(let i=0;i<6;i++)document.querySelector(`[data-ranking-mode="${i%2?'share':'ranking'}"]`).click();});
+  await expect(page.locator('.motion-snapshot')).toHaveCount(0);
+  await expect(page.locator('#ranking .share-chart')).toHaveCount(1);
+  await page.setViewportSize({width:390,height:844});
+  expect(await page.evaluate(()=>{document.querySelector('#filter-disclosure').click();return document.querySelector('#filter-extra').getAnimations().length;})).toBe(1);
+  await page.evaluate(()=>{document.querySelector('#filter-disclosure').click();document.querySelector('#filter-disclosure').click();});
+  await expect.poll(()=>page.locator('#filter-extra').evaluate(n=>n.getAnimations().length)).toBe(0);
+  await expect(page.locator('#filter-disclosure')).toHaveAttribute('aria-expanded','true');
+  await expect(page.locator('#bucket')).toBeVisible();
+});
+
+test('v2 paired sort moves source pairs together and preserves exact-name order', async ({ page }) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  const provider={source:'Synthetic motion',rawBytes:'6000',billedBytes:'6000.000123',recordCount:3,series:[],records:[],nodes:[
+    {name:'Synthetic · Singapore',rawBytes:'1000',billedBytes:'1000'},
+    {name:'Synthetic · Tokyo',rawBytes:'3000',billedBytes:'3000.000123'},
+    {name:'Synthetic · Frankfurt',rawBytes:'2000',billedBytes:'2000'}]};
+  await mock(page,{'/api/provider/sources':r=>r.fulfill(json([provider.source])),
+    '/api/provider/nodes':r=>r.fulfill(json(provider.nodes.map(n=>({key:n.name,name:n.name})))),
+    '/api/provider/history':r=>r.fulfill(json(provider))});
+  await page.selectOption('#statistics-source',provider.source);await page.check('#compare-toggle');
+  await expect(page.locator('#comparison-nodes tr')).toHaveCount(6);
+  // Unequal row counts must still place both pagination bars at the card bottom.
+  const nodeFooter = await page.locator('#comparison-nodes-list > .pagination').boundingBox();
+  const bucketFooter = await page.locator('#comparison-buckets-list > .pagination').boundingBox();
+  expect(Math.abs(nodeFooter.y + nodeFooter.height - bucketFooter.y - bucketFooter.height)).toBeLessThanOrEqual(1);
+  const sortBox = await page.locator('#comparison-node-sort').boundingBox();
+  const switchBox = await page.locator('[aria-label="同名节点对照显示方式"]').boundingBox();
+  expect(sortBox.x + sortBox.width).toBeLessThanOrEqual(switchBox.x);
+  expect(Math.abs(sortBox.y + sortBox.height / 2 - switchBox.y - switchBox.height / 2)).toBeLessThanOrEqual(2);
+  const moving=await page.evaluate(()=>{
+    const control=document.querySelector('#comparison-node-sort');control.value='provider';control.dispatchEvent(new Event('change'));
+    return [...document.querySelectorAll('#comparison-nodes tr')].map(r=>({key:JSON.parse(r.dataset.motionKey),frames:r.getAnimations()[0]?.effect.getKeyframes()}));
+  });
+  expect(moving.map(r=>r.key[0])).toEqual(['Synthetic · Tokyo','Synthetic · Tokyo','Synthetic · Frankfurt','Synthetic · Frankfurt','Synthetic · Singapore','Synthetic · Singapore']);
+  // Collapsed table borders can put the first source row on a half CSS pixel.
+  const offset = row => Number(row.frames[0].transform.match(/translateY\(([-.\d]+)px\)/)[1]);
+  for (let i = 0; i < moving.length; i += 2) expect(Math.abs(offset(moving[i]) - offset(moving[i + 1]))).toBeLessThanOrEqual(1);
+  await expect.poll(()=>page.locator('#comparison-nodes').evaluate(n=>n.getAnimations({subtree:true}).length)).toBe(0);
+});
+
+test('paired node page two survives status polling with global sorting and bar scales', async ({ page }) => {
+  const nodes = Array.from({ length: 52 }, (_, i) => ({ key: `n${i}`,
+    name: `Synthetic paged ${String(i + 1).padStart(2, '0')}`, upload: String((i + 1) * 100), download: '0' }));
+  const providerNodes = [...nodes.map((node, i) => ({ name: node.name, rawBytes: String(100 - i),
+    billedBytes: `${100 - i}.000123` })), { name: 'Synthetic provider only', rawBytes: '999', billedBytes: '999.000123' }];
+  const local = { ...history, upload: '137800', download: '0', nodes, series: [], records: [], recordCount: 52 };
+  const provider = { source: 'Synthetic pagination', rawBytes: '4873', billedBytes: '4873.006519',
+    recordCount: 53, nodes: providerNodes, series: [], records: [] };
+  let statusReads = 0;
+  const calls = await mock(page, {
+    '/api/nodes': route => route.fulfill(json(nodes.map(node => ({ key: node.key, name: node.name })))),
+    '/api/history': (route, request, url) => route.fulfill(json(url.searchParams.has('nonZeroRecords') ? history : local)),
+    '/api/provider/sources': route => route.fulfill(json([provider.source])),
+    '/api/provider/nodes': route => route.fulfill(json(providerNodes.map(node => ({ key: node.name, name: node.name })))),
+    '/api/provider/history': route => route.fulfill(json(provider)),
+    '/api/status': route => route.fulfill(json({ state: 'demo', message: `Synthetic pagination status ${++statusReads}`,
+      currentNode: nodes[0].name, lastSample: null, uploadPerSecond: '0', downloadPerSecond: '0', demo: true }))
+  });
+  await page.selectOption('#statistics-source', provider.source);
+  await expect(page.locator('#total-exact')).toHaveText('4,873 bytes');
+  await page.check('#compare-toggle');
+  const rows = page.locator('#comparison-nodes tr');
+  const pairKeys = () => rows.evaluateAll(items => items.map(row => JSON.parse(row.dataset.motionKey)));
+  const expectPairs = async names => {
+    await expect(rows).toHaveCount(names.length * 2);
+    expect(await pairKeys()).toEqual(names.flatMap(name => [[name, 0], [name, 1]]));
+    await expect(page.locator('#comparison-nodes .comparison-name')).toHaveText(names);
+    expect(await page.locator('#comparison-nodes .comparison-name').evaluateAll(items => items.every(cell => cell.rowSpan === 2))).toBe(true);
+  };
+  const localOrder = [...nodes].reverse().map(node => node.name).concat('Synthetic provider only');
+  await expectPairs(localOrder.slice(0, 50));
+  await expect(page.locator('#comparison-node-page')).toContainText('共 53 个节点 · 第 1 / 2 页');
+  await expect(page.locator('#comparison-node-previous')).toBeDisabled();
+  await page.click('#comparison-node-next');
+  await expectPairs(localOrder.slice(50));
+  await expect(page.locator('#comparison-node-page')).toContainText('第 2 / 2 页');
+  await expect(page.locator('#comparison-node-next')).toBeDisabled();
+  // Page two's largest value is 999; the full-query maximum of 5,200 is on page one.
+  expect(await rows.first().locator('.paired-bar').evaluate(bar => parseFloat(bar.style.width))).toBeCloseTo(3.84, 2);
+  await expect(rows.nth(4)).toHaveClass(/missing/);
+  await expect(rows.nth(4).locator('.paired-value')).toHaveAttribute('aria-label', /没有记录/);
+
+  const historyReads = calls.filter(call => ['/api/history', '/api/provider/history'].includes(call.path)).length;
+  const response = await page.waitForResponse(result => new URL(result.url()).pathname === '/api/status', { timeout: 8000 });
+  const polled = await response.json();
+  await expect(page.locator('#collector-message')).toHaveText(polled.message);
+  expect(calls.filter(call => ['/api/history', '/api/provider/history'].includes(call.path))).toHaveLength(historyReads);
+  await expect(page.locator('#comparison-node-page')).toContainText('第 2 / 2 页');
+  await expectPairs(localOrder.slice(50));
+  expect(await rows.first().locator('.paired-bar').evaluate(bar => parseFloat(bar.style.width))).toBeCloseTo(3.84, 2);
+
+  // Sorting starts from all 53 nodes, including the provider-only node on the previous page two.
+  await page.selectOption('#comparison-node-sort', 'provider');
+  const providerOrder = ['Synthetic provider only', ...nodes.map(node => node.name)];
+  await expect(page.locator('#comparison-node-page')).toContainText('第 1 / 2 页');
+  await expectPairs(providerOrder.slice(0, 50));
+  // The full-query maximum still belongs to local node 52, now outside this page.
+  expect(await rows.nth(1).locator('.paired-bar').evaluate(bar => parseFloat(bar.style.width))).toBeCloseTo(19.21, 2);
+  await page.click('#comparison-node-next');
+  await expectPairs(providerOrder.slice(50));
+  await expect(page.locator('#comparison-node-page')).toContainText('第 2 / 2 页');
+  await expect(page.locator('#comparison-node-next')).toBeDisabled();
+});
