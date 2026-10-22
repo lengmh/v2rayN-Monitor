@@ -40,26 +40,40 @@ internal static class CoreComponents
     // The descriptor comes from the fixed catalog, never from a browser or a downloaded manifest.
     // Kept separate so synthetic files can exercise the same reader without shipping core binaries.
     internal static CoreFileCheck VerifyFile(CoreComponent component, string filePath,
-        string clientVersion, string targetRuntime)
+        string clientVersion, string targetRuntime) =>
+        VerifyFileAsync(component, filePath, clientVersion, targetRuntime, CancellationToken.None).GetAwaiter().GetResult();
+
+    internal static async Task<CoreFileCheck> VerifyFileAsync(CoreComponent component, string filePath,
+        string clientVersion, string targetRuntime, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (ValidateTarget(component, clientVersion, targetRuntime) is { } invalid) return new(invalid);
         try
         {
-            using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var length = file.Length;
-            // Bound arbitrary local input; exact SHA256 still identifies the complete binary/version.
-            if (length is <= 0 or > 256L * 1024 * 1024 ||
-                (component.ExpectedBytes is { } expected && length != expected))
-                return new(CoreFileState.SizeMismatch, length);
-            var actual = Convert.ToHexString(SHA256.HashData(file));
-            if (file.Length != length) return new(CoreFileState.Unreadable);
-            return new(actual.Equals(component.Sha256, StringComparison.OrdinalIgnoreCase)
-                ? CoreFileState.IdentityMatched : CoreFileState.DigestMismatch, length);
+            using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                65536, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return await VerifyStreamAsync(component, file, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
         { return new(CoreFileState.Missing); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         { return new(CoreFileState.Unreadable); }
+    }
+
+    // Shared by the file reader and synthetic slow-stream cancellation checks. Does not own the stream.
+    internal static async Task<CoreFileCheck> VerifyStreamAsync(CoreComponent component, Stream file,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var length = file.Length;
+        if (length is <= 0 or > 256L * 1024 * 1024 ||
+            (component.ExpectedBytes is { } expected && length != expected))
+            return new(CoreFileState.SizeMismatch, length);
+        var actual = Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken).ConfigureAwait(false));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (file.Length != length) return new(CoreFileState.Unreadable);
+        return new(actual.Equals(component.Sha256, StringComparison.OrdinalIgnoreCase)
+            ? CoreFileState.IdentityMatched : CoreFileState.DigestMismatch, length);
     }
 
     internal static CoreFileState? ValidateTarget(CoreComponent component, string clientVersion, string targetRuntime)
