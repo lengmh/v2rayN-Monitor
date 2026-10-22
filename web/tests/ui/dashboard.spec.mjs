@@ -37,6 +37,87 @@ async function settledScreenshot(page, path) {
   await expect.poll(() => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').length)).toBe(0);
   await page.screenshot({ path, fullPage: true, animations: 'disabled' });
 }
+// Synthetic responses only: browser coverage never opens an installation or real ledger.
+const coreCapabilities = {
+  targetState: 'identified', ledgerVersion: 3, startupMode: '--probe-ledger',
+  collectorState: 'collecting', lastSample: '2026-10-09T11:01:00Z', collectionBasis: 'actual_member', probeState: 'unavailable',
+  components: [
+    { id: 'sing-box-statistics', name: 'Synthetic sing-box', version: 'test.5', fileState: 'identity_matched', downloadState: 'asset_unavailable', license: 'GPL-3.0' },
+    { id: 'xray-probes', name: 'Synthetic Xray', version: 'test.1', fileState: 'missing', downloadState: 'asset_unavailable', license: 'MPL-2.0' }
+  ]
+};
+test('core capabilities stay read-only and distinguish file identity from runtime and ledger state', async ({ page }) => {
+  let result = coreCapabilities;
+  const calls = await mock(page, { '/api/core-capabilities': route => route.fulfill(json(result)) });
+  await page.click('.nav-item[data-view=settings]');
+  expect(calls.filter(c => c.path === '/api/core-capabilities')).toHaveLength(0);
+  const panel = page.locator('#core-capabilities-panel'), check = page.getByRole('button', { name: '检查配套核心', exact: true });
+  await check.click();
+  await expect(panel.locator('#core-components')).toContainText('文件摘要一致');
+  await expect(panel.locator('#core-components')).toContainText('文件缺失');
+  await expect(panel.locator('#core-components')).toContainText('不影响原生 Xray 普通统计');
+  await expect(panel.locator('#core-components')).toContainText('独立组件尚未发布');
+  await expect(panel).not.toContainText(/已安装|已生效/);
+  await expect(panel).toContainText('独立核验尚未接入');
+  await expect(panel.locator('#core-ledger')).toContainText('v3 · 启动模式：--probe-ledger');
+  await expect(panel.locator('#core-collector')).toContainText('最近采样');
+  await expect(panel.locator('#core-probe')).toContainText('探测计数暂不可用');
+  await expect(panel.getByRole('button')).toHaveCount(1);
+  const call = calls.find(c => c.path === '/api/core-capabilities');
+  expect(call.headers['x-monitor-request']).toBe('1'); expect(call.url.search).toBe(''); expect(call.body).toBeNull();
+  for (const [width, height, theme] of [[1440, 1100, 'light'], [390, 844, 'dark']]) {
+    await page.setViewportSize({ width, height }); await page.selectOption('#theme', theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await expect(check).toBeEnabled();
+  }
+  for (const [targetState, text] of [['demo', '不检查本机核心文件'], ['unavailable', '暂时无法核实目标']]) {
+    result = { ...coreCapabilities, targetState, components: [] };
+    await check.click();
+    await expect(panel.locator('#core-target')).toContainText(text);
+    await expect(panel.locator('#core-components li')).toHaveCount(0);
+    await expect(panel.locator('#core-capabilities-result')).toContainText('未核实配套核心文件身份');
+  }
+});
+test('core check has retry and expired-session states without stale success', async ({ page }) => {
+  let attempt = 0;
+  await mock(page, { '/api/core-capabilities': route => {
+    attempt++;
+    return route.fulfill(attempt === 1 ? { status: 503, contentType: 'application/json', body: '{"error":"Synthetic unavailable"}' }
+      : attempt === 2 ? json(coreCapabilities) : { status: 401, body: '{}' });
+  } });
+  await page.click('.nav-item[data-view=settings]');
+  const check = page.locator('#check-core-capabilities');
+  await check.click();
+  await expect(page.locator('#core-capabilities-result')).toContainText('检查失败');
+  await expect(page.locator('#core-capabilities-result')).toContainText('重试');
+  await expect(check).toBeEnabled();
+  await check.click(); await expect(page.locator('#core-capabilities-details')).toBeVisible();
+  await check.click(); await expect(page.locator('#session-alert')).toBeVisible();
+  await expect(check).toBeDisabled();
+  await expect(page.locator('#core-capabilities-details')).toBeHidden();
+  await expect(page.locator('#core-components')).toHaveText('');
+  await expect(page.locator('#core-capabilities-result')).toContainText('托盘');
+});
+test('core results are invalidated by unsaved directory edits and settings saves', async ({ page }) => {
+  const calls = await mock(page, { '/api/core-capabilities': route => route.fulfill(json(coreCapabilities)) });
+  await page.click('.nav-item[data-view=settings]');
+  const check = page.locator('#check-core-capabilities'), details = page.locator('#core-capabilities-details');
+  await check.click(); await expect(details).toBeVisible();
+  await page.fill('#v2rayn-path', 'D:\\Synthetic changed');
+  await expect(details).toBeHidden(); await expect(check).toBeDisabled();
+  await expect(page.locator('#core-components')).toHaveText('');
+  await expect(page.locator('#core-capabilities-result')).toContainText('先保存');
+  expect(calls.filter(c => c.path === '/api/core-capabilities')).toHaveLength(1);
+  await page.click('#save-settings');
+  await expect(page.locator('#settings-result')).toContainText('设置已保存');
+  await expect(check).toBeEnabled(); await expect(details).toBeHidden();
+  await check.click(); await expect(details).toBeVisible();
+  await page.selectOption('#time-zone', 'Asia/Shanghai'); await page.click('#save-settings');
+  await expect(page.locator('#settings-result')).toContainText('设置已保存');
+  await expect(details).toBeHidden();
+  await expect(page.locator('#core-components')).toHaveText('');
+  expect(calls.filter(c => c.path === '/api/core-capabilities')).toHaveLength(2);
+});
 test('raw and billing comparisons switch both sources and disclose missing multiplier coverage', async ({ page }) => {
   let reads = 0;
   const display = { originalName: 'Synthetic known multiplier', groups: [], mergeKey: null, rate: null, rateStatus: 'partial',

@@ -2398,6 +2398,67 @@ public sealed class ActiveConfigurationTests : IDisposable
         AssertExistingComponentUnchanged(existing);
     }
 
+    [Theory]
+    [InlineData("matched", "identity_matched")]
+    [InlineData("missing", "missing")]
+    [InlineData("size", "size_mismatch")]
+    [InlineData("digest", "digest_mismatch")]
+    public async Task CapabilityInspectionReportsFileIdentityWithoutInstallingOrRequiringAStoppedCore(string scenario, string expected)
+    {
+        var f = Installation();
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "binConfigs"));
+        if (scenario == "matched") File.WriteAllBytes(f.Target, SyntheticCoreBytes);
+        if (scenario == "missing") File.Delete(f.Target);
+        if (scenario == "digest")
+        {
+            var changed = SyntheticCoreBytes.ToArray(); changed[0] ^= 1;
+            File.WriteAllBytes(f.Target, changed);
+        }
+        f.Running();
+        var before = Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).ToDictionary(x => x, File.ReadAllBytes);
+        var result = await CoreCapabilityInspector.InspectAsync(f.Observation, [f.Component], CancellationToken.None);
+        Assert.Equal("identified", result.TargetState);
+        var row = Assert.Single(result.Components);
+        Assert.Equal(expected, row.FileState);
+        Assert.Equal("asset_unavailable", row.DownloadState);
+        var json = JsonSerializer.Serialize(result);
+        Assert.DoesNotContain(f.DataRoot, json);
+        Assert.DoesNotContain("synthetic command line", json);
+        Assert.Equal(before.Keys.Order(), Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).Order());
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    [Theory]
+    [InlineData("empty", "not_selected")]
+    [InlineData("multiple", "unknown_target")]
+    [InlineData("incomplete", "unknown_target")]
+    [InlineData("version", "unsupported_target")]
+    public async Task CapabilityInspectionDoesNotGuessUnsupportedOrAmbiguousTargets(string scenario, string expected)
+    {
+        var f = Installation();
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "binConfigs"));
+        var observed = scenario switch
+        {
+            "empty" => f.Observation with { DataRoot = "" },
+            "multiple" => f.Observation with { Processes = [.. f.Observation.Processes, f.Observation.Processes[0] with { Pid = 999 }] },
+            "incomplete" => f.Observation with { Complete = false },
+            _ => f.Observation with { ClientVersion = "unverified" }
+        };
+        var result = await CoreCapabilityInspector.InspectAsync(observed, [f.Component], CancellationToken.None);
+        Assert.Equal(expected, result.TargetState);
+        Assert.Equal("not_checked", Assert.Single(result.Components).FileState);
+    }
+
+    [Fact]
+    public async Task CapabilityInspectionHonorsCancellationBeforeReading()
+    {
+        var f = Installation();
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            CoreCapabilityInspector.InspectAsync(f.Observation, [f.Component], new CancellationToken(true)));
+    }
+
     private sealed record SidecarFixture(InstallFixture Files, XraySnapshot Baseline, SidecarPlan Plan,
         string Target, string Candidate, byte[] Previous, IPEndPoint Endpoint)
     {

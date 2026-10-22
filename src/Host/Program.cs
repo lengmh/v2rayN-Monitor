@@ -110,7 +110,8 @@ internal sealed class TrayContext : ApplicationContext
         directory = dataDir;
         this.readiness = readiness;
         server = MonitorServer.StartAsync(dataDir, Path.Combine(AppContext.BaseDirectory, "wwwroot"), demo,
-            useScopeLedger: scopeMode, useProbeLedger: probeMode).GetAwaiter().GetResult();
+            useScopeLedger: scopeMode, useProbeLedger: probeMode,
+            inspectCoreCapabilities: demo ? null : CoreCapabilityInspector.InspectWindowsAsync).GetAwaiter().GetResult();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开统计页面", null, (_, _) => Open());
         menu.Items.Add("选择 v2rayN 数据目录…", null, (_, _) => ChooseDirectory());

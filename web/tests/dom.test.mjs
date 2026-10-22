@@ -745,6 +745,118 @@ test('settings save round-trips the data path and timezone', async t => {
   const saved = calls.filter(c => c.path === '/api/settings' && c.body).at(-1);
   assert.equal(saved.body.v2rayNPath, 'D:\\Synthetic'); assert.equal(saved.body.timeZoneId, 'Asia/Shanghai'); assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.get('timeZoneId'), 'Asia/Shanghai');
 });
+// Synthetic capability responses; no installed core, real directory or ledger is inspected.
+const coreCapabilities = {
+  targetState: 'identified', ledgerVersion: 3, startupMode: '--probe-ledger',
+  collectorState: 'collecting', lastSample: '2026-10-09T10:01:00Z', collectionBasis: 'actual_member', probeState: 'unavailable',
+  components: [
+    { id: 'sing-box-statistics', name: 'Synthetic sing-box', version: 'test.5', fileState: 'identity_matched', downloadState: 'asset_unavailable', license: 'GPL-3.0' },
+    { id: 'xray-probes', name: 'Synthetic Xray', version: 'test.1', fileState: 'digest_mismatch', downloadState: 'asset_unavailable', license: 'MPL-2.0' }
+  ]
+};
+test('core capabilities are explicit authenticated reads, not installation or runtime verification', async t => {
+  const { w, get, calls } = await fixture(t, {
+    '/api/core-capabilities': () => Response.json({ ...coreCapabilities,
+      components: [{ ...coreCapabilities.components[0], name: '<img src=x onerror=alert(1)>' }, coreCapabilities.components[1]] })
+  });
+  w.document.querySelector('.nav-item[data-view=settings]').click();
+  assert.equal(calls.filter(c => c.path === '/api/core-capabilities').length, 0);
+  get('check-core-capabilities').click();
+  await until(() => !get('core-capabilities-details').hidden);
+  const call = calls.find(c => c.path === '/api/core-capabilities');
+  assert.equal(call.headers['x-monitor-request'], '1');
+  assert.equal(call.body, undefined); assert.equal(call.query.size, 0);
+  assert.ok(get('core-components').textContent.includes('文件摘要一致'));
+  assert.ok(get('core-components').textContent.includes('文件摘要不符'));
+  assert.ok(get('core-components').textContent.includes('不影响原生 Xray 普通统计'));
+  assert.ok(get('core-components').textContent.includes('独立组件尚未发布'));
+  assert.ok(get('core-components').textContent.includes('GPL-3.0'));
+  assert.ok(get('core-components').textContent.includes('<img src=x onerror=alert(1)>'));
+  assert.equal(get('core-components').querySelector('img'), null);
+  assert.ok(!/已安装|已生效/.test(get('core-capabilities-panel').textContent));
+  assert.ok(get('core-capabilities-panel').textContent.includes('独立核验尚未接入'));
+  assert.ok(get('core-ledger').textContent.includes('v3 · 启动模式：--probe-ledger'));
+  assert.ok(get('core-collector').textContent.includes('最近采样：'));
+  assert.ok(get('core-collector').textContent.includes('10:01:00'));
+  assert.ok(get('core-probe').textContent.includes('探测计数暂不可用'));
+  assert.equal(get('core-capabilities-panel').querySelectorAll('button').length, 1);
+});
+test('core capability demo and unavailable targets do not imply checked files', async t => {
+  for (const [targetState, text, ledgerVersion, startupMode] of [
+    ['demo', '不检查本机核心文件', 1, ''], ['unavailable', '暂时无法核实目标', 2, '--scope-ledger'],
+    ['not_selected', '未选择数据根目录', 3, '--probe-ledger']
+  ]) await t.test(targetState, async t => {
+    const { get } = await fixture(t, { '/api/core-capabilities': () => Response.json({
+      ...coreCapabilities, targetState, components: [], ledgerVersion, startupMode, lastSample: null
+    }) });
+    get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+    assert.ok(get('core-target').textContent.includes(text));
+    assert.equal(get('core-components').children.length, 0);
+    assert.ok(get('core-capabilities-result').textContent.includes('未核实配套核心文件身份'));
+    assert.ok(get('core-ledger').textContent.includes(`v${ledgerVersion}`));
+    assert.ok(get('core-ledger').textContent.includes(startupMode || '默认入口'));
+    assert.ok(get('core-collector').textContent.includes('尚无有效采样'));
+  });
+});
+test('core check failures allow retry and session expiry clears results and disables checks', async t => {
+  let attempt = 0;
+  const { get } = await fixture(t, { '/api/core-capabilities': () => {
+    attempt++;
+    return attempt === 1 ? Response.json({ error: 'Synthetic unavailable' }, { status: 503 })
+      : attempt === 2 ? Response.json(coreCapabilities) : new Response('{}', { status: 403 });
+  } });
+  get('check-core-capabilities').click();
+  await until(() => get('core-capabilities-result').textContent.includes('检查失败'));
+  assert.ok(get('core-capabilities-result').textContent.includes('重试'));
+  assert.equal(get('check-core-capabilities').disabled, false);
+  get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+  get('check-core-capabilities').click(); await until(() => !get('session-alert').hidden);
+  assert.equal(get('check-core-capabilities').disabled, true);
+  assert.equal(get('core-capabilities-details').hidden, true);
+  assert.equal(get('core-components').textContent, '');
+  assert.ok(get('core-capabilities-result').textContent.includes('托盘'));
+});
+test('directory edits discard even late core checks and never send the unsaved path', async t => {
+  let resolve;
+  const { w, get, calls, submit } = await fixture(t, { '/api/core-capabilities': () => new Promise(r => { resolve = r; }) });
+  get('check-core-capabilities').click();
+  assert.equal(get('check-core-capabilities').disabled, true);
+  await until(() => resolve);
+  const oldCall = calls.find(c => c.path === '/api/core-capabilities');
+  get('v2rayn-path').value = 'D:\\Unsaved synthetic'; get('v2rayn-path').dispatchEvent(new w.Event('input'));
+  assert.equal(oldCall.signal.aborted, true);
+  assert.equal(get('check-core-capabilities').disabled, true);
+  assert.ok(get('core-capabilities-result').textContent.includes('先保存'));
+  resolve(Response.json(coreCapabilities)); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('core-capabilities-details').hidden, true);
+  assert.equal(get('core-components').textContent, '');
+  get('check-core-capabilities').click();
+  assert.equal(calls.filter(c => c.path === '/api/core-capabilities').length, 1);
+  submit('settings-form'); await until(() => get('settings-result').textContent.includes('设置已保存'));
+  assert.equal(get('check-core-capabilities').disabled, false);
+  assert.equal(get('core-capabilities-details').hidden, true);
+  assert.equal(oldCall.query.size, 0); assert.equal(oldCall.body, undefined);
+});
+test('settings saves invalidate completed and pending core checks, including failed saves', async t => {
+  let resolve, pending = false, failSave = false;
+  const { get, submit } = await fixture(t, {
+    '/api/core-capabilities': () => pending ? new Promise(r => { resolve = r; }) : Response.json(coreCapabilities),
+    '/api/settings': (_url, options) => options.body && failSave ? Response.json({ error: 'Synthetic save failed' }, { status: 409 })
+      : Response.json({ v2rayNPath: 'C:\\Synthetic', timeZoneId: 'UTC', demo: true })
+  });
+  get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+  failSave = true; submit('settings-form');
+  assert.equal(get('core-capabilities-details').hidden, true); assert.equal(get('core-components').textContent, '');
+  await until(() => get('settings-result').textContent.includes('Synthetic save failed'));
+  assert.equal(get('check-core-capabilities').disabled, false);
+  pending = true; failSave = false; get('check-core-capabilities').click(); await until(() => resolve);
+  submit('settings-form');
+  assert.equal(get('check-core-capabilities').disabled, true);
+  await until(() => get('settings-result').textContent.includes('设置已保存'));
+  resolve(Response.json(coreCapabilities)); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('core-capabilities-details').hidden, true); assert.equal(get('core-components').textContent, '');
+  assert.equal(get('check-core-capabilities').disabled, false);
+});
 test('provider preview is invalidated on edits and commit remains an explicit separate action', async t => {
   const { w, get, submit, calls } = await fixture(t);
   w.document.querySelector('.nav-item[data-view=provider]').click(); get('provider-source').value = 'Synthetic';
