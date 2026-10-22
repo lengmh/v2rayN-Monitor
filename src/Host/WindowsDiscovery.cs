@@ -603,7 +603,7 @@ public sealed class WindowsDiscovery : IDisposable
     }
 
     [SupportedOSPlatform("windows")]
-    private static List<ProcessInfo> ReadProcesses()
+    internal static List<ProcessInfo> ReadProcesses()
     {
         var result = new List<ProcessInfo>();
         using var query = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, CreationDate, ExecutablePath, CommandLine, Name FROM Win32_Process WHERE Name = 'v2rayN.exe' OR Name = 'xray.exe' OR Name = 'sing-box.exe' OR Name = 'sing-box-client.exe'");
