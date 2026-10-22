@@ -2013,16 +2013,22 @@ public sealed class ActiveConfigurationTests : IDisposable
     }
 
     [Fact]
-    public async Task ComponentDownloadProductionCatalogHasNoIndependentPublishedAsset()
+    public async Task ComponentDownloadProductionCatalogPinsIndependentPublishedAssets()
     {
         var existing = ExistingComponent();
         foreach (var component in CoreComponents.Catalog)
         {
-            Assert.Null(CoreComponentDownloads.PublishedAsset(component.Id));
-            using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
-            AssertComponentFailure(await PrepareComponent(CoreComponentDownloads.PublishedAsset(component.Id),
-                handler, existing, component: component), CorePreparationState.AssetUnavailable, existing);
-            Assert.Empty(handler.Requests);
+            var asset = Assert.IsType<CoreComponentAsset>(CoreComponentDownloads.PublishedAsset(component.Id));
+            Assert.StartsWith("https://github.com/lengmh/v2rayN-Monitor/releases/download/v0.2.0-preview.2-components.1/", asset.Url.AbsoluteUri);
+            Assert.Equal(component.Id == "sing-box-statistics" ? 13 : 10, asset.Files.Count);
+            Assert.Equal(component.Sha256, asset.Files.Single(x => x.Name == component.FileName).Sha256, ignoreCase: true);
+            Assert.Contains(asset.Files, x => x.Name == "LICENSE");
+            Assert.Contains(asset.Files, x => x.Name.EndsWith("-fixed-source.tar.gz", StringComparison.Ordinal));
+            if (component.Id == "sing-box-statistics") Assert.Contains(asset.Files, x => x.Name == "COPYING" && x.Bytes == 35149);
+            using var handler = new ComponentDownloadHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+            AssertComponentFailure(await PrepareComponent(asset, handler, existing, component: component),
+                CorePreparationState.DownloadFailed, existing);
+            Assert.Equal(asset.Url, Assert.Single(handler.Requests));
         }
         var unknown = await CoreComponentDownloads.PrepareAsync("unknown-synthetic-component", existing,
             SingboxParser.ClientVersion, "win-x64", CancellationToken.None);
@@ -2421,7 +2427,7 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal("identified", result.TargetState);
         var row = Assert.Single(result.Components);
         Assert.Equal(expected, row.FileState);
-        Assert.Equal("asset_unavailable", row.DownloadState);
+        Assert.Equal("available", row.DownloadState);
         var json = JsonSerializer.Serialize(result);
         Assert.DoesNotContain(f.DataRoot, json);
         Assert.DoesNotContain("synthetic command line", json);
