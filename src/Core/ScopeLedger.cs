@@ -332,14 +332,15 @@ public sealed class ScopeLedger : IDisposable
             ("$start", query.Start.UtcTicks), ("$end", query.End.UtcTicks)
         };
         var clock = Stopwatch.StartNew();
-        var wait = TimeSpan.Zero; var held = TimeSpan.Zero; var aggregation = TimeSpan.Zero;
+        TimeSpan? wait = null;
+        var held = TimeSpan.Zero; var aggregation = TimeSpan.Zero;
         long rowsRead = 0, metadataRowsRead = 0;
         var entered = false; var aggregationStarted = false;
         var phaseStart = TimeSpan.Zero;
         try
         {
             while (!(entered = Monitor.TryEnter(gate, 25))) cancellationToken.ThrowIfCancellationRequested();
-            wait = clock.Elapsed; phaseStart = wait;
+            wait = clock.Elapsed; phaseStart = wait.Value;
             var storedRows = new List<StoredTraffic>();
             var directory = new Dictionary<long, StoredScope>();
             var projections = new Dictionary<long, ScopeProjection>();
@@ -577,9 +578,8 @@ public sealed class ScopeLedger : IDisposable
         finally
         {
             if (entered) Monitor.Exit(gate);
-            if (wait == TimeSpan.Zero) wait = clock.Elapsed;
             if (aggregationStarted) aggregation = clock.Elapsed - phaseStart;
-            observer?.Invoke(new(wait, held, aggregation, clock.Elapsed, rowsRead, metadataRowsRead));
+            observer?.Invoke(new(wait ?? clock.Elapsed, held, aggregation, clock.Elapsed, rowsRead, metadataRowsRead));
         }
     }
 
