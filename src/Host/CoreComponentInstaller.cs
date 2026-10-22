@@ -431,7 +431,9 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         Rejected r => r.State,
         OperationCanceledException => CoreInstallState.Cancelled,
         UnauthorizedAccessException => CoreInstallState.PermissionDenied,
-        IOException io when (io.HResult & 0xffff) is 32 or 33 => CoreInstallState.FileBusy,
+        // Windows uses HRESULT sharing/lock violations; .NET Unix keeps the raw flock errno.
+        IOException io when (OperatingSystem.IsWindows() && (io.HResult & 0xffff) is 32 or 33) ||
+            (OperatingSystem.IsLinux() && io.HResult == 11) => CoreInstallState.FileBusy,
         _ => CoreInstallState.StorageFailed
     };
 }
