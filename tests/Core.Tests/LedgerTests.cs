@@ -2101,6 +2101,171 @@ public sealed class LedgerTests : IDisposable
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool CreateLedgerHardLink(string link, string existing, IntPtr security);
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void CapabilityLedgerHandoffRejectsUnsupportedRequestVersions(int version)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory, version, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope));
+        Assert.False(Directory.Exists(directory));
+    }
+
+    [Fact]
+    public void CapabilityLedgerHandoffRejectsRelativeDirectoryAndMismatchedSteps()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            new V2rayNMonitor.Host.OfflineLedgerHandoffRequest("synthetic-relative", 1, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope));
+        Assert.Throws<ArgumentException>(() =>
+            new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory, 1, V2rayNMonitor.Host.LedgerUpgradeStep.Probes));
+        Assert.Throws<ArgumentException>(() =>
+            new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory, 2, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope));
+        Assert.False(Directory.Exists(directory));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void CapabilityLedgerHandoffConfirmsFreshExactPlanAndRunsOneStepPreservingHistoryAndAdjacentData(int version)
+    {
+        CreateDisplayMigrationFixture(version);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var provider = Path.Combine(directory, "provider.db");
+        using (var imports = new ProviderImports(provider))
+            imports.Commit(new("Synthetic provider", "UTC",
+                "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\nSynthetic node,0.125,9007199254740993,1125899906842624.125,synthetic,2024-02-28 23:59:00\n"));
+        var settings = Path.Combine(directory, "settings.json");
+        File.WriteAllText(settings, "{\"synthetic\":true,\"theme\":\"dark\"}");
+        var providerBefore = File.ReadAllBytes(provider);
+        var settingsBefore = File.ReadAllBytes(settings);
+        var original = HistorySnapshot(path);
+        var display = DisplaySnapshot(path);
+        var step = version == 1 ? V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope : V2rayNMonitor.Host.LedgerUpgradeStep.Probes;
+        var request = new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory + Path.DirectorySeparatorChar, version, step);
+        var confirmations = 0;
+        var result = V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request, plan =>
+        {
+            confirmations++;
+            Assert.Equal(Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)), plan.Directory);
+            Assert.Equal(version, plan.Version);
+            Assert.Equal(step, plan.Step);
+            Assert.NotEmpty(plan.FileIdentity);
+            Assert.Equal(64, plan.HistoryHash.Length);
+            Assert.Equal(original, HistorySnapshot(path));
+            Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+            return true;
+        });
+        Assert.Equal(1, confirmations);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.Upgraded, result.State);
+        Assert.Equal(version + 1, result.ObservedVersion);
+        Assert.Equal(original, HistorySnapshot(result.BackupPath!));
+        Assert.Single(Directory.GetFiles(directory, "history-before-*.db"));
+        Assert.Equal(display, DisplaySnapshot(path, mapLegacyKeys: version == 1));
+        Assert.Equal(providerBefore, File.ReadAllBytes(provider));
+        Assert.Equal(settingsBefore, File.ReadAllBytes(settings));
+        using (var ledger = new ScopeLedger(path))
+        {
+            Assert.Equal(version == 2, ledger.SupportsProbes);
+            Assert.True(ledger.SupportsDisplayMetadata);
+            Assert.Equal("10", ledger.Query(ScopeAll(version == 1 ? "legacy_proxy" : "actual_member")).Upload);
+        }
+        // A successful handoff does not chain its next step, nor reuse consent on a later call.
+        var retry = V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request,
+            _ => throw new InvalidOperationException("An obsolete request must not ask for confirmation again."));
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.UnsupportedLedger, retry.State);
+        Assert.Single(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Fact]
+    public void CapabilityLedgerHandoffRejectsMonitorWriterUntilItsMutexHandleIsDisposed()
+    {
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var before = File.ReadAllBytes(path);
+        var request = new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory, 1, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope);
+        using (var monitor = new Mutex(true, V2rayNMonitor.Host.OfflineLedgerUpgrade.DirectoryMutexName(directory), out var created))
+        {
+            Assert.True(created);
+            try
+            {
+                Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.WriterActive,
+                    V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request, _ => throw new InvalidOperationException("Must not confirm while Monitor owns its mutex.")).State);
+            }
+            finally { monitor.ReleaseMutex(); }
+            Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.WriterActive,
+                V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request, _ => throw new InvalidOperationException("Release alone is insufficient.")).State);
+        }
+        var confirmed = false;
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.AuthorizationRequired,
+            V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request, _ => { confirmed = true; return false; }).State);
+        Assert.True(confirmed);
+        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CapabilityLedgerHandoffCancellationLeavesHistoryBytesAndNoBackup(bool throwCancellation)
+    {
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var before = File.ReadAllBytes(path);
+        var request = new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory, 1, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope);
+        var result = V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request, _ =>
+            throwCancellation ? throw new OperationCanceledException() : false);
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.AuthorizationRequired, result.State);
+        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Fact]
+    public void CapabilityLedgerHandoffRejectsVersionChangedBeforeRunWithoutConfirmingOrRestoring()
+    {
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var request = new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory, 1, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope);
+        ScopeLedgerMigration.Migrate(path, Path.Combine(directory, "synthetic-prior-upgrade.db"));
+        var before = HistorySnapshot(path);
+        var result = V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request,
+            _ => throw new InvalidOperationException("The request's expected version no longer matches."));
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.UnsupportedLedger, result.State);
+        Assert.Equal(before, HistorySnapshot(path));
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
+    [Fact]
+    public void CapabilityLedgerHandoffRejectsChangesDuringFinalConfirmationRatherThanUsingFreshImplicitConsent()
+    {
+        CreateDisplayMigrationFixture(1);
+        var path = Path.Combine(directory, "history.db");
+        File.Move(Database, path);
+        var request = new V2rayNMonitor.Host.OfflineLedgerHandoffRequest(directory, 1, V2rayNMonitor.Host.LedgerUpgradeStep.MultiScope);
+        var result = V2rayNMonitor.Host.OfflineLedgerHandoff.Run(request, _ =>
+        {
+            using var writer = new SqliteConnection($"Data Source={path};Pooling=False");
+            writer.Open();
+            using var command = writer.CreateCommand();
+            command.CommandText = "UPDATE nodes SET name='Synthetic changed during confirmation';";
+            command.ExecuteNonQuery();
+            return true;
+        });
+        Assert.Equal(V2rayNMonitor.Host.OfflineLedgerState.PlanChanged, result.State);
+        using var verify = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        verify.Open();
+        using var query = verify.CreateCommand();
+        query.CommandText = "SELECT name FROM nodes;";
+        Assert.Equal("Synthetic changed during confirmation", query.ExecuteScalar());
+        query.CommandText = "PRAGMA user_version;";
+        Assert.Equal(1L, query.ExecuteScalar());
+        Assert.Empty(Directory.GetFiles(directory, "history-before-*.db"));
+    }
+
     private void CreateDisplayMigrationFixture(int version)
     {
         if (version == 1)

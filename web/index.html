@@ -87,7 +87,23 @@
               <p id="core-collector" class="field-help"></p>
               <p id="core-probe" class="field-help"></p>
             </div>
-            <p class="field-help">文件摘要一致仅代表本次文件身份匹配；运行核心及统计接口的独立核验尚未接入。账本模式与采集状态分别展示，升级账本须停止采集后离线执行，并另行确认；此处不会迁移或切换启动模式。</p>
+            <p class="field-help">文件摘要一致仅代表本次文件身份匹配；运行核心及统计接口的独立核验尚未接入，sidecar 首次发现衔接仍待完成。</p>
+            <details id="core-actions" class="import-help">
+              <summary>安装与恢复配套核心</summary>
+              <p class="field-help">独立组件当前尚未发布。准备安装会先下载及预检，满足条件后打开 Host 原生确认窗口，显示确切目标、备份与连接风险；确认前不写入，不会自动停止核心。Xray 扩展仅供可选探测计量，普通统计无需替换核心。</p>
+              <div class="core-action-row">
+                <div class="core-action-field"><label for="core-action-component">配套组件</label><select id="core-action-component"><option value="sing-box-statistics">sing-box 统计支持</option><option value="xray-probes">Xray 可选探测扩展</option></select></div>
+                <button id="prepare-core-install" type="button" class="button secondary" disabled="">准备安装…</button>
+              </div>
+              <div class="core-action-row">
+                <div class="core-action-field"><label for="core-restore-operation">恢复操作 ID（GUID）</label><input id="core-restore-operation" type="text" maxlength="36" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" spellcheck="false"></div>
+                <button id="prepare-core-restore" type="button" class="button secondary" disabled="">准备恢复…</button>
+              </div>
+              <p class="field-help">操作 ID 支持 32 位十六进制或标准带连字符 GUID。恢复仅处理所选组件及该操作 ID 对应的核心文件，不改账本。仍需在 Host 原生窗口最终确认；完成后由你手动重载 v2rayN。</p>
+              <p id="core-action-result" class="form-result" role="status">尚未发起安装或恢复。</p>
+              <p id="core-action-record" class="field-help" hidden=""></p>
+            </details>
+            <p class="field-help core-ledger-help">账本升级请使用 Monitor 托盘菜单「离线升级账本…」：仅退出 Monitor、保持代理运行，再经第二次原生确认执行单步升级。此页不提供账本迁移接口；不会自动重启 Monitor 或修改启动项。</p>
           </section>
           <section id="demo-controls" class="panel settings-panel" hidden=""><h2>合成演示数据</h2><p class="field-help">仅演示模式可用，生成的数据不代表实际用量。</p><button id="seed-demo" class="button secondary">生成演示记录</button><p id="demo-result" role="status"></p></section>
         </section>

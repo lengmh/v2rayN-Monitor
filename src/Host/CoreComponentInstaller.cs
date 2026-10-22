@@ -20,12 +20,14 @@ internal enum CoreInstallState
 }
 internal sealed record CoreInstallPreparation(CoreInstallState State, CoreInstallPlan? Plan = null);
 internal sealed record CoreInstallResult(CoreInstallState State, Guid? OperationId = null);
+internal sealed record CoreRestorePreparation(CoreInstallState State, string? TargetPath = null,
+    CoreInstallJournal? Journal = null);
 internal sealed record CoreInstallJournal(Guid OperationId, string ComponentId, string Version,
     CoreFileIdentity Client, CoreFileIdentity Installed, CoreFileIdentity? Previous, string State,
     string? InstalledFileId = null);
 internal enum CoreInstallCheckpoint { BackupVerified, BeforeReplace, AfterReplace }
 
-// No UI/API caller yet. Paths and process observations are owned by the Host, never by a page.
+// Paths and process observations are owned by the Host, never by a page.
 // One fixed file per transaction. Sidecar uses the same transaction with additional offline guards.
 internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreInstallObservation> capture,
     Action<CoreInstallCheckpoint>? checkpoint = null)
@@ -191,23 +193,50 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
 
     // Reload from the bounded operation ID, not a caller-supplied backup or destination path.
     // A restarted Monitor may restore with fresh process evidence and the same client binary.
-    internal async Task<CoreInstallResult> RestoreAsync(Guid operationId, CancellationToken token)
+    internal async Task<CoreRestorePreparation> PrepareRestoreAsync(Guid operationId, CancellationToken token)
+    {
+        try
+        {
+            var target = await ReadTargetAsync(token);
+            var journal = await ReadJournalAsync(target, operationId, token);
+            var current = await IdentifyFileAsync(target.Path, token, allowMissing: true);
+            if (current == journal.Previous) return new(CoreInstallState.AlreadyRestored);
+            if (current != journal.Installed || (OperatingSystem.IsWindows() &&
+                (journal.InstalledFileId is null || journal.InstalledFileId != FileId(target.Path))))
+                return new(CoreInstallState.PlanChanged);
+            if (journal.Previous is not null &&
+                await IdentifyFileAsync(Path.Combine(BackupPath(target.Path, operationId), Payload("previous")), token) != journal.Previous)
+                return new(CoreInstallState.PlanChanged);
+            return new(CoreInstallState.Ready, target.Path, journal);
+        }
+        catch (Exception e) when (Expected(e)) { return new(Failure(e)); }
+    }
+
+    private async Task<CoreInstallJournal> ReadJournalAsync(Target target, Guid operationId, CancellationToken token)
+    {
+        var path = Path.Combine(BackupPath(target.Path, operationId), "install.json");
+        PlainPath(path, directory: false);
+        using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (input.Length is <= 0 or > 65536) throw new Rejected(CoreInstallState.UnsafePath);
+        var journal = await JsonSerializer.DeserializeAsync<CoreInstallJournal>(input, cancellationToken: token);
+        if (journal is null || journal.OperationId != operationId || journal.ComponentId != component.Id ||
+            journal.Version != component.Version || journal.Client != target.ClientFile ||
+            !MatchesComponent(journal.Installed) || !ValidIdentity(journal.Previous) ||
+            (journal.Previous is null && Path.Exists(Path.Combine(BackupPath(target.Path, operationId), Payload("previous")))))
+            throw new Rejected(CoreInstallState.PlanChanged);
+        return journal;
+    }
+
+    internal async Task<CoreInstallResult> RestoreAsync(Guid operationId, CancellationToken token,
+        CoreInstallJournal? confirmed = null)
     {
         try
         {
             var target = await ReadTargetAsync(token);
             using var transaction = LockTarget(target.Path);
-            var path = Path.Combine(BackupPath(target.Path, operationId), "install.json");
-            PlainPath(path, directory: false);
-            using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (input.Length is <= 0 or > 65536) throw new Rejected(CoreInstallState.UnsafePath);
-            var journal = await JsonSerializer.DeserializeAsync<CoreInstallJournal>(input, cancellationToken: token);
-            if (journal is null || journal.OperationId != operationId || journal.ComponentId != component.Id ||
-                journal.Version != component.Version || journal.Client != target.ClientFile ||
-                !MatchesComponent(journal.Installed) || !ValidIdentity(journal.Previous) ||
-                (journal.Previous is null && Path.Exists(Path.Combine(BackupPath(target.Path, operationId), Payload("previous")))))
+            var journal = await ReadJournalAsync(target, operationId, token);
+            if (confirmed is not null && confirmed != journal)
                 throw new Rejected(CoreInstallState.PlanChanged);
-            input.Dispose();
             return new(await RestoreLockedAsync(journal, token), operationId);
         }
         catch (Exception e) when (Expected(e)) { return new(Failure(e), operationId); }
