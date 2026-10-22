@@ -2647,6 +2647,133 @@ public sealed class ActiveConfigurationTests : IDisposable
         return Assert.IsType<CoreInstallPlan>(prepared.Plan);
     }
 
+    private Task<SidecarDiscovery> DiscoverSidecar(SidecarFixture fixture) => CoreSidecarDiscovery.CaptureAsync(
+        fixture.Files.Observation, fixture.Files.Component,
+        _ => [fixture.Files.Target, "run", "-c", "config.json", "--disable-color"], CancellationToken.None);
+
+    [Fact]
+    public async Task SidecarDiscoveryUsesBoundRunningCoreForFirstMissingSidecarWithoutInventingListenerEvidence()
+    {
+        var f = SidecarInstallation(existing: false);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var discovered = await DiscoverSidecar(f);
+        Assert.Equal(SidecarPreparationState.Prepared, discovered.Preparation.State);
+        Assert.Null(discovered.Preparation.Plan!.PreviousHash);
+        Assert.Equal(XrayParser.Hash(f.Files.DataRoot.ToUpperInvariant()), discovered.Baseline.InstanceId);
+        Assert.Equal(f.Files.Observation.Processes[1].StartedAt, discovered.Baseline.ProcessStartedAt);
+        Assert.Empty(discovered.Baseline.ListenerIdentity);
+        Assert.Equal("sing-box", discovered.Baseline.CoreName);
+        Assert.False(File.Exists(f.Target));
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Files.Target));
+    }
+
+    [Theory]
+    [InlineData("stopped")]
+    [InlineData("new-config")]
+    [InlineData("unapproved")]
+    [InlineData("unknown-field")]
+    public async Task SidecarDiscoveryRefusesUnverifiedOrChangedInputs(string scenario)
+    {
+        var f = SidecarInstallation();
+        if (scenario != "new-config")
+            File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        if (scenario != "stopped") f.Files.Running();
+        if (scenario == "unapproved") File.AppendAllText(f.Files.Target, "changed");
+        if (scenario == "unknown-field") File.WriteAllText(f.Target, """{"listen":"127.0.0.1:1234","unknown":true}""");
+        await Assert.ThrowsAsync<CoreComponentInstaller.Rejected>(() => DiscoverSidecar(f));
+    }
+
+    [Fact]
+    public async Task SidecarActionRetainsRunningPlanThenRequiresFreshConfirmationForWriteAndRestore()
+    {
+        var f = SidecarInstallation(existing: false);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var prompts = new List<CoreActionPrompt>();
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (prompt, _) => { prompts.Add(prompt); return Task.FromResult(true); },
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Sidecar must not download a core"),
+            (_, _, _) => DiscoverSidecar(f));
+        var prepared = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
+        Assert.Equal("SidecarPrepared", prepared.State);
+        Assert.Empty(prompts);
+        var running = await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None);
+        Assert.Equal("CoreRunning", running.State);
+        Assert.Equal(prepared.PlanId, running.PlanId);
+        Assert.False(File.Exists(f.Target));
+        f.Files.Stopped();
+        var installed = await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None);
+        Assert.Equal("SidecarInstalledPendingReload", installed.State);
+        Assert.Contains(installed.BackupDirectory!, Assert.Single(prompts).Message);
+        Assert.True(File.Exists(f.Target));
+        Assert.Equal("PlanChanged", (await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None)).State);
+        f.Files.Running();
+        var restorePlan = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
+        Assert.Equal("SidecarAlreadyMatched", restorePlan.State);
+        f.Files.Stopped();
+        var restored = await service.ExecuteAsync(f.Files.DataRoot,
+            new("restore-sidecar", "sing-box-statistics", installed.OperationId, restorePlan.PlanId), CancellationToken.None);
+        Assert.Equal("SidecarRestored", restored.State);
+        Assert.False(File.Exists(f.Target));
+        Assert.Equal(2, prompts.Count);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Files.Target));
+    }
+
+    [Fact]
+    public async Task SidecarActionSettingInvalidationDropsThePreparedBaseline()
+    {
+        var f = SidecarInstallation(existing: false);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (_, _) => throw new Xunit.Sdk.XunitException("Must not confirm"),
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Must not download"),
+            (_, _, _) => DiscoverSidecar(f));
+        var prepared = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
+        Assert.Equal("SidecarPrepared", prepared.State);
+        service.Invalidate();
+        f.Files.Stopped();
+        Assert.Equal("PlanChanged", (await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None)).State);
+        Assert.False(File.Exists(f.Target));
+    }
+
+    [Theory]
+    [InlineData("sing-box", "sing-box-statistics", true, "verified")]
+    [InlineData("sing-box", "xray-probes", true, "different_core")]
+    [InlineData("Xray", "xray-probes", false, "unverified_core")]
+    [InlineData("Xray", "xray-probes", true, "verified")]
+    public void RuntimeVerificationSeparatesOrdinaryInterfaceFromApprovedFileAndOptionalProbes(
+        string core, string requested, bool approved, string expected)
+    {
+        var snapshot = MemberSnapshot(AnyTlsConfiguration) with { CoreName = core, XrayProbeExtensionVerified = approved };
+        var member = new MeasurementScope("actual_member", "index_id", "synthetic", "Synthetic", "synthetic", "proxy");
+        var reading = new ScopeCollectorReading(new("synthetic", "session", "generation", Start,
+            [new(member, 1, 2)], []), "connected", "synthetic",
+            Probes: new(true, "unavailable", "synthetic probe counters missing"));
+        var result = WindowsDiscovery.RuntimeResult(requested, snapshot,
+            approved ? WindowsDiscovery.ApprovedProbeSingboxSha256 : "other", reading);
+        Assert.Equal(expected, result.State);
+        Assert.True(result.StatisticsAvailable);
+        Assert.Equal(expected == "verified", result.FileIdentityVerified);
+        Assert.Equal(1, result.MemberCount);
+        Assert.Equal("unavailable", result.ProbeState);
+    }
+
+    [Fact]
+    public void RuntimeVerificationNeverTurnsFailureOrMissingCountersIntoAvailable()
+    {
+        var result = WindowsDiscovery.RuntimeResult("sing-box-statistics", null, null,
+            new(null, "missing_counters", "synthetic"));
+        Assert.Equal("missing_counters", result.State);
+        Assert.False(result.StatisticsAvailable);
+        Assert.False(result.FileIdentityVerified);
+    }
+
     [Theory]
     [InlineData(true, false)]
     [InlineData(false, true)]

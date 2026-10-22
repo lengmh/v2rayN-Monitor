@@ -145,10 +145,11 @@ public sealed class ApiTests : IAsyncLifetime
 
     private async Task StartCoreActionServer(
         Func<string, V2rayNMonitor.Core.CoreActionRequest, CancellationToken, Task<V2rayNMonitor.Core.CoreActionResult>> action,
-        bool demo = false)
+        bool demo = false, Action? invalidate = null)
     {
         await server.DisposeAsync(); client.Dispose();
-        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), demo: demo, coreAction: action);
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), demo: demo, coreAction: action,
+            invalidateCoreActions: invalidate);
         server.UpdateSettings(server.Settings with { V2rayNPath = root });
         client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
     }
@@ -239,6 +240,41 @@ public sealed class ApiTests : IAsyncLifetime
         await Login();
         var response = await client.PostAsJsonAsync("/api/core-actions", new { action = "install", componentId = "xray-probes" });
         Assert.Equal("Unavailable", (await response.Content.ReadFromJsonAsync<V2rayNMonitor.Core.CoreActionResult>())!.State);
+    }
+
+    [Fact]
+    public async Task CoreActionSidecarAcceptsOnlyOpaquePlanIdsAndSettingsInvalidateHostPlans()
+    {
+        var invalidations = 0;
+        var requests = new List<V2rayNMonitor.Core.CoreActionRequest>();
+        await StartCoreActionServer((_, request, _) =>
+        {
+            requests.Add(request);
+            return Task.FromResult(new V2rayNMonitor.Core.CoreActionResult("synthetic"));
+        }, invalidate: () => invalidations++);
+        await Login();
+        var plan = Guid.NewGuid().ToString("N");
+        foreach (var action in new[] { "prepare-sidecar", "apply-sidecar", "verify-runtime" })
+        {
+            var request = new V2rayNMonitor.Core.CoreActionRequest(action, "sing-box-statistics",
+                PlanId: action == "apply-sidecar" ? plan : null);
+            Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/core-actions", request)).StatusCode);
+        }
+        Assert.Equal(3, requests.Count);
+        Assert.Equal(plan, requests[1].PlanId);
+        foreach (var request in new[]
+        {
+            new V2rayNMonitor.Core.CoreActionRequest("apply-sidecar", "xray-probes", PlanId: plan),
+            new V2rayNMonitor.Core.CoreActionRequest("apply-sidecar", "sing-box-statistics", PlanId: "C:/untrusted"),
+            new V2rayNMonitor.Core.CoreActionRequest("prepare-sidecar", "sing-box-statistics", PlanId: plan),
+            new V2rayNMonitor.Core.CoreActionRequest("verify-runtime", "xray-probes", OperationId: plan)
+        })
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/core-actions", request)).StatusCode);
+        var initial = invalidations;
+        var original = server.Settings;
+        server.UpdateSettings(original with { V2rayNPath = "" });
+        server.UpdateSettings(original);
+        Assert.Equal(initial + 2, invalidations);
     }
 
     [Fact]
