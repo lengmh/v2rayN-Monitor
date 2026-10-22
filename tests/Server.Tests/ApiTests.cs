@@ -143,6 +143,135 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Empty(result.Components);
     }
 
+    private async Task StartCoreActionServer(
+        Func<string, V2rayNMonitor.Core.CoreActionRequest, CancellationToken, Task<V2rayNMonitor.Core.CoreActionResult>> action,
+        bool demo = false)
+    {
+        await server.DisposeAsync(); client.Dispose();
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), demo: demo, coreAction: action);
+        server.UpdateSettings(server.Settings with { V2rayNPath = root });
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+    }
+
+    [Fact]
+    public async Task CoreActionRequiresAuthenticatedSameOriginFiniteInput()
+    {
+        var calls = 0;
+        await StartCoreActionServer((path, request, token) =>
+        {
+            calls++; Assert.Equal(root, path); Assert.Equal("sing-box-statistics", request.ComponentId);
+            Assert.True(token.CanBeCanceled);
+            return Task.FromResult(new V2rayNMonitor.Core.CoreActionResult("AssetUnavailable"));
+        });
+        var body = new { action = "install", componentId = "sing-box-statistics" };
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/core-actions", body)).StatusCode);
+        client.DefaultRequestHeaders.Add("X-Monitor-Request", "1");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/core-actions", body)).StatusCode);
+        client.DefaultRequestHeaders.Remove("X-Monitor-Request");
+        await Login();
+        using var foreign = new HttpRequestMessage(HttpMethod.Post, "/api/core-actions") { Content = JsonContent.Create(body) };
+        foreign.Headers.Add("Origin", "https://synthetic.invalid");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(foreign)).StatusCode);
+        using var wrongHost = new HttpRequestMessage(HttpMethod.Post, "/api/core-actions") { Content = JsonContent.Create(body) };
+        wrongHost.Headers.Host = "synthetic.invalid";
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(wrongHost)).StatusCode);
+        foreach (var invalid in new[]
+        {
+            """{"action":"install","componentId":"sing-box-statistics","path":"untrusted"}""",
+            """{"action":"install","componentId":"sing-box-statistics","action":"restore"}""",
+            """{"action":"install","componentId":"other"}""",
+            """{"action":"restore","componentId":"sing-box-statistics","operationId":"../backup"}""",
+            """{"action":"migrate","componentId":"sing-box-statistics"}""",
+            """{"action":"install","componentId":"sing-box-statistics","url":"https://untrusted.invalid"}"""
+        })
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/api/core-actions",
+                new StringContent(invalid, System.Text.Encoding.UTF8, "application/json"))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/core-actions?path=untrusted", body)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/core-actions",
+            new { action = "install", componentId = "sing-box-statistics", padding = new string('x', 2048) })).StatusCode);
+        Assert.Equal(0, calls);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/core-actions", body)).StatusCode);
+        Assert.Equal(1, calls);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, (await client.GetAsync("/api/core-actions")).StatusCode);
+    }
+
+    [Fact]
+    public async Task CoreActionSerializesWithChecksAndBlocksBothSettingsEntrypointsUntilFinished()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await StartCoreActionServer(async (_, _, token) =>
+        {
+            entered.TrySetResult(); await release.Task.WaitAsync(token);
+            return new("Cancelled");
+        });
+        await Login();
+        var body = new { action = "install", componentId = "sing-box-statistics" };
+        var pending = client.PostAsJsonAsync("/api/core-actions", body);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/core-actions", body)).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await client.GetAsync("/api/core-capabilities")).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/settings", server.Settings)).StatusCode);
+            Assert.Throws<MonitorServer.CoreActionBusyException>(() => server.UpdateSettings(server.Settings));
+        }
+        finally { release.TrySetResult(); }
+        Assert.Equal(HttpStatusCode.OK, (await pending).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/settings", server.Settings)).StatusCode);
+    }
+
+    [Fact]
+    public async Task CoreActionFailureReleasesSettingsAndDoesNotExposeExceptionDetails()
+    {
+        await StartCoreActionServer((_, _, _) => throw new IOException(root));
+        await Login();
+        var response = await client.PostAsJsonAsync("/api/core-actions", new { action = "install", componentId = "xray-probes" });
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.DoesNotContain(root, await response.Content.ReadAsStringAsync());
+        server.UpdateSettings(server.Settings);
+    }
+
+    [Fact]
+    public async Task CoreActionDemoNeverCallsHost()
+    {
+        await StartCoreActionServer((_, _, _) => throw new Xunit.Sdk.XunitException("No Host action"), demo: true);
+        await Login();
+        var response = await client.PostAsJsonAsync("/api/core-actions", new { action = "install", componentId = "xray-probes" });
+        Assert.Equal("Unavailable", (await response.Content.ReadFromJsonAsync<V2rayNMonitor.Core.CoreActionResult>())!.State);
+    }
+
+    [Fact]
+    public async Task CoreActionClientCancellationReleasesConfirmationAndSettings()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await StartCoreActionServer(async (_, _, token) =>
+        {
+            entered.TrySetResult();
+            try { await Task.Delay(Timeout.Infinite, token); }
+            catch (OperationCanceledException) { cancelled.TrySetResult(); }
+            return new("Cancelled");
+        });
+        await Login();
+        using var cancellation = new CancellationTokenSource();
+        var pending = client.PostAsJsonAsync("/api/core-actions",
+            new { action = "install", componentId = "sing-box-statistics" }, cancellation.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // The HTTP handler releases its gate after the Host returns; wait on a normal request, not a sleep.
+        HttpResponseMessage saved;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        do
+        {
+            saved = await client.PostAsJsonAsync("/api/settings", server.Settings, timeout.Token);
+            if (saved.StatusCode == HttpStatusCode.Conflict) { saved.Dispose(); await Task.Yield(); }
+        } while (saved.StatusCode == HttpStatusCode.Conflict);
+        using (saved) Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

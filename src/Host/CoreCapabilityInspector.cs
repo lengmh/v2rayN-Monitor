@@ -15,21 +15,26 @@ internal static class CoreCapabilityInspector
             try
             {
                 token.ThrowIfCancellationRequested();
-                var processes = WindowsDiscovery.ReadProcesses();
-                var clients = processes.Where(x => x.Name.Equals("v2rayN.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
-                if (clients.Length != 1 || clients[0].Failure is not null ||
-                    !Path.IsPathFullyQualified(clients[0].ExecutablePath))
-                    return Report("unknown_target", CoreComponents.Catalog);
-                var clientPath = clients[0].ExecutablePath;
-                CoreComponentInstaller.PlainPath(clientPath, directory: false);
-                return await InspectAsync(new(clientPath, directory,
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "v2rayN"),
-                    FileVersionInfo.GetVersionInfo(clientPath).ProductVersion ?? "",
-                    RuntimeInformation.ProcessArchitecture == Architecture.X64 ? "win-x64" : "unsupported",
-                    processes), CoreComponents.Catalog, token).ConfigureAwait(false);
+                return await InspectAsync(ObserveWindows(directory), CoreComponents.Catalog, token).ConfigureAwait(false);
             }
             catch (Exception error) when (Expected(error)) { return Report("unknown_target", CoreComponents.Catalog); }
         }, token);
+
+    [SupportedOSPlatform("windows")]
+    internal static CoreInstallObservation ObserveWindows(string directory)
+    {
+        var processes = WindowsDiscovery.ReadProcesses();
+        var clients = processes.Where(x => x.Name.Equals("v2rayN.exe", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (clients.Length != 1 || clients[0].Failure is not null ||
+            !Path.IsPathFullyQualified(clients[0].ExecutablePath))
+            throw new CoreComponentInstaller.Rejected(CoreInstallState.UnknownTarget);
+        var clientPath = clients[0].ExecutablePath;
+        CoreComponentInstaller.PlainPath(clientPath, directory: false);
+        return new(clientPath, directory,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "v2rayN"),
+            FileVersionInfo.GetVersionInfo(clientPath).ProductVersion ?? "",
+            RuntimeInformation.ProcessArchitecture == Architecture.X64 ? "win-x64" : "unsupported", processes);
+    }
 
     // Only Host-owned observations and the compiled catalog reach here. Never accepts page-supplied paths/descriptors.
     internal static async Task<CoreCapabilityInspection> InspectAsync(CoreInstallObservation observed,

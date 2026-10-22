@@ -4,6 +4,7 @@ export interface CoreCapabilities {
   collectorState: string; lastSample: string | null; collectionBasis: string; probeState: string;
   components: { id: string; name: string; version: string; fileState: string; downloadState: string; license: string }[];
 }
+export interface CoreActionResult { state: string; componentId?: string; operationId?: string; backupDirectory?: string }
 export interface ProxyCollectionScope { basis: 'routed_proxy' | 'xray_outbound_proxy' | 'xray_outbound_members'; isPartial: boolean; uncollectedOutbounds: number; uncollectedGroups: number; collectedOutbounds?: number; collectedGroups?: number; description: string }
 export interface CollectorStatus { state: string; message: string; currentNode: string | null; lastSample: string | null; uploadPerSecond: string | null; downloadPerSecond: string | null; demo: boolean; scope?: ProxyCollectionScope | null; collectionBasis?: string; historyBases?: string[]; probes?: { historyEnabled: boolean; state: string; message: string } | null }
 export interface NodeInfo { key: string; name: string }
