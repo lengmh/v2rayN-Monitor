@@ -211,6 +211,79 @@ public sealed class ApiTests : IAsyncLifetime
         }
     }
 
+    [Fact] public async Task OrdinaryHistorySelectorKeepsQueriesNodesAndExportsInOneBasis()
+    {
+        await server.DisposeAsync(); client.Dispose();
+        V2rayNMonitor.Core.ScopeLedgerMigration.Migrate(Path.Combine(root, "history.db"), Path.Combine(root, "synthetic-before-dimensions.db"));
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), useScopeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        await Login();
+        var scopes = new[]
+        {
+            new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "member", "Synthetic member", "member", "proxy"),
+            new V2rayNMonitor.Core.MeasurementScope("legacy_proxy", "legacy_node", "synthetic/legacy", "Synthetic legacy", "legacy"),
+            new V2rayNMonitor.Core.MeasurementScope("routed_outbound", "outbound",
+                JsonSerializer.Serialize(new[] { new string('A', 64), "route" }), "Synthetic route", OutboundTag: "route"),
+            new V2rayNMonitor.Core.MeasurementScope("business", "aggregate", "business", "business"),
+            new V2rayNMonitor.Core.MeasurementScope("excluded", "aggregate", "excluded", "excluded"),
+            new V2rayNMonitor.Core.MeasurementScope("unknown", "aggregate", "unknown", "unknown")
+        };
+        var amounts = new long[] { 11, 13, 17, 101, 0, 0 };
+        var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        foreach (var second in new[] { 0, 1 })
+            server.Scopes!.Accept(new("synthetic", "core", "config", at.AddSeconds(second),
+                scopes.Select((scope, i) => scope.Basis == "unknown"
+                    ? new V2rayNMonitor.Core.ScopeReading(scope, UnavailableReason: "missing_counter")
+                    : new(scope, second * amounts[i], 0)).ToArray(), []));
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        var bases = status.GetProperty("historyBases").EnumerateArray().Select(x => x.GetString()).ToArray();
+        Assert.Equal(new[] { "local_proxy", "legacy_proxy", "actual_member", "business", "excluded", "unknown", "routed_outbound" }, bases);
+        const string query = "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC";
+        var combined = await client.GetFromJsonAsync<JsonElement>("/api/history" + query);
+        Assert.Equal("24", combined.GetProperty("upload").GetString());
+        for (var i = 0; i < scopes.Length; i++)
+        {
+            var basis = scopes[i].Basis;
+            var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes?basis=" + basis);
+            Assert.Single(nodes.EnumerateArray());
+            Assert.False(nodes[0].TryGetProperty("identityValue", out _));
+            var key = nodes[0].GetProperty("key").GetString();
+            var result = await client.GetFromJsonAsync<JsonElement>("/api/history" + query + "&basis=" + basis + "&nodeKey=" + key);
+            Assert.Equal(basis, result.GetProperty("basis").GetString());
+            Assert.Equal(amounts[i].ToString(), result.GetProperty("upload").GetString());
+            var csv = await client.GetStringAsync("/api/export" + query + "&basis=" + basis + "&nodeKey=" + key);
+            if (basis == "unknown")
+            {
+                Assert.Empty(result.GetProperty("nodes").EnumerateArray());
+                Assert.Equal(0, result.GetProperty("recordCount").GetInt32());
+                Assert.True(result.GetProperty("gapCount").GetInt32() > 0);
+                Assert.DoesNotContain("\"unknown\"", csv);
+            }
+            else
+            {
+                Assert.Single(result.GetProperty("nodes").EnumerateArray());
+                Assert.Equal(1, result.GetProperty("recordCount").GetInt32());
+                Assert.Contains("\"" + basis + "\"", csv);
+                foreach (var other in scopes.Where(x => x.Basis != basis))
+                    Assert.DoesNotContain("\"" + other.Basis + "\"", csv);
+            }
+        }
+        foreach (var invalid in new[] { "all", "actual_member,business", "business&basis=excluded", "probe_urltest_member" })
+            foreach (var path in new[] { "/api/nodes", "/api/history", "/api/export" })
+                Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync(path + query + "&basis=" + invalid)).StatusCode);
+    }
+
+    [Fact] public async Task LegacyHistoryDoesNotAdvertiseOrAcceptUnrecordedScopeDimensions()
+    {
+        await Login();
+        var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
+        Assert.Equal(new[] { "local_proxy" }, status.GetProperty("historyBases").EnumerateArray().Select(x => x.GetString()));
+        foreach (var basis in new[] { "actual_member", "business", "excluded", "unknown", "legacy_proxy", "routed_outbound" })
+            foreach (var path in new[] { "/api/nodes", "/api/history", "/api/export" })
+                Assert.Equal(HttpStatusCode.BadRequest,
+                    (await client.GetAsync(path + "?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&basis=" + basis)).StatusCode);
+    }
+
     [Fact] public async Task ProbeHistoryUsesExplicitBasisWhileDefaultHistoryAndExportRemainBusinessOnly()
     {
         await server.DisposeAsync();
@@ -260,7 +333,7 @@ public sealed class ApiTests : IAsyncLifetime
         var nodes = await client.GetFromJsonAsync<JsonElement>("/api/nodes");
         Assert.Single(nodes.EnumerateArray());
         Assert.Equal("Synthetic business", nodes[0].GetProperty("name").GetString());
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&basis=business")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/history" + query + "&basis=business,probe_urltest_member")).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/nodes?basis=probe_urltest_member&basis=probe_urltest_business")).StatusCode);
         var status = await client.GetFromJsonAsync<JsonElement>("/api/status");
         Assert.True(status.GetProperty("probes").GetProperty("historyEnabled").GetBoolean());

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace V2rayNMonitor.Core;
@@ -109,14 +110,15 @@ public static class ScopeCollector
         var catalog = capture.XrayOutbounds ?? throw new ArgumentException("A verified Xray outbound catalog is required.");
         if (snapshot.CoreName != "Xray" || catalog.InstanceId != snapshot.InstanceId || catalog.Generation != snapshot.Generation ||
             catalog.ProcessIdentity != snapshot.ProcessIdentity || snapshot.Generation.Length < 65 || snapshot.Generation[64] != ':' ||
-            !catalog.Candidates.ContainsKey("proxy")) throw new ArgumentException("Outbound catalog and capture identities conflict.");
+            catalog.Candidates.Count == 0 || (!snapshot.SelectedPolicyGroup && !catalog.Candidates.ContainsKey("proxy")))
+            throw new ArgumentException("Outbound catalog and capture identities conflict.");
         var partial = XrayCoverage(catalog).IsPartial;
         var key = Uri.EscapeDataString(snapshot.InstanceId) + "/" + Uri.EscapeDataString(snapshot.NodeId);
         var readings = new List<ScopeReading>();
         foreach (var member in catalog.Candidates.Values.OrderBy(x => x.OutboundTag, StringComparer.Ordinal))
         {
             var tag = member.OutboundTag;
-            var scope = tag == "proxy"
+            var scope = tag == "proxy" && !snapshot.SelectedPolicyGroup
                 ? new MeasurementScope("legacy_proxy", "legacy_node", key, snapshot.NodeName, snapshot.NodeId)
                 : new MeasurementScope("actual_member", "outbound", JsonSerializer.Serialize(new[] { snapshot.Generation[..64], tag }),
                     member.CapturedName is { } name ? $"【{name.GroupLabel}】 {name.OriginalName}" : tag, OutboundTag: tag);
@@ -136,5 +138,35 @@ public static class ScopeCollector
             .SelectMany(ledger.GetScopes).Where(x => x.InstanceId == completeDirectory.InstanceId &&
                 !active.Contains((x.Scope.Basis, x.Scope.IdentityKind, x.Scope.IdentityValue))).Select(x => x.Id).Order().ToArray();
         return ledger.Accept(completeDirectory with { RetiredScopeIds = retired });
+    }
+
+    /// <summary>Display-only rate between two committed batches, never a source for accounting.</summary>
+    public static (string? Upload, string? Download) Rates(ScopeBatch? previous, ScopeBatch current)
+    {
+        if (previous is null || previous.InstanceId != current.InstanceId || previous.SessionId != current.SessionId ||
+            previous.Generation != current.Generation) return (null, null);
+        var ticks = (current.At - previous.At).Ticks;
+        if (ticks <= 0 || ticks > ScopeLedger.ShortInterval) return (null, null);
+        static bool Proxy(ScopeReading reading) => reading.Scope.Basis is "actual_member" or "legacy_proxy";
+        static (string, string, string) Identity(ScopeReading reading) =>
+            (reading.Scope.Basis, reading.Scope.IdentityKind, reading.Scope.IdentityValue);
+        var before = previous.Readings.Where(Proxy).ToDictionary(Identity);
+        var members = current.Readings.Where(Proxy).ToArray();
+        if (members.Length == 0 || members.Length != before.Count) return (null, null);
+        decimal up = 0, down = 0;
+        foreach (var reading in members)
+        {
+            if (!before.TryGetValue(Identity(reading), out var last) || reading.InvalidateContinuity ||
+                reading.PartialCoverage || last.PartialCoverage ||
+                reading.UnavailableReason is not null || last.UnavailableReason is not null ||
+                reading.Upload is not { } upload || reading.Download is not { } download ||
+                last.Upload is not { } lastUpload || last.Download is not { } lastDownload ||
+                upload < lastUpload || download < lastDownload) return (null, null);
+            up += upload - lastUpload;
+            down += download - lastDownload;
+        }
+        var seconds = (decimal)ticks / TimeSpan.TicksPerSecond;
+        return (decimal.Floor(up / seconds).ToString(CultureInfo.InvariantCulture),
+            decimal.Floor(down / seconds).ToString(CultureInfo.InvariantCulture));
     }
 }
