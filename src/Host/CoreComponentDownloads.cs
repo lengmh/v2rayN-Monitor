@@ -61,7 +61,7 @@ internal static class CoreComponentDownloads
                     CorePreparationState.UnsupportedTarget, FileState: invalid);
             if (existingFile is not null)
             {
-                var check = CoreComponents.VerifyFile(component, existingFile, clientVersion, targetRuntime);
+                var check = await CoreComponents.VerifyFileAsync(component, existingFile, clientVersion, targetRuntime, token);
                 token.ThrowIfCancellationRequested();
                 if (check.State == CoreFileState.IdentityMatched)
                     return new(CorePreparationState.ExistingFileMatched, existingFile, FileState: check.State);
