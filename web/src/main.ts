@@ -46,7 +46,7 @@ function discloseGroups(button: HTMLButtonElement, groups: string[], key: string
 class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
 let expired = false;
 let ready = false;
-const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo', 'check-core-capabilities', 'prepare-core-install', 'prepare-core-restore', 'prepare-core-sidecar', 'apply-core-sidecar', 'restore-core-sidecar', 'verify-core-runtime'];
+const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo', 'check-core-capabilities', 'prepare-core-install', 'prepare-core-restore', 'prepare-core-sidecar', 'apply-core-sidecar', 'restore-core-sidecar', 'verify-core-runtime', 'refresh-note'];
 for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 let refreshController: AbortController | null = null;
 let statusController: AbortController | null = null;
@@ -56,6 +56,8 @@ let nodesContext = '';
 let nodeCatalog: NodeInfo[] | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let statusTimer: ReturnType<typeof setTimeout> | null = null;
+let historyRetryCount = 0;
+let initialHistoryPending = true;
 let settings: Settings = { v2rayNPath: '', timeZoneId: 'UTC', demo: false };
 let savingSettings = false;
 let coreCapabilitiesRevision = 0;
@@ -1055,14 +1057,36 @@ function renderNodeCatalog(): void {
   } else renderNodes(nodeCatalog);
   updateFilterDisclosure();
 }
+function setHistoryBusy(busy: boolean): void {
+  const button = el<HTMLButtonElement>('refresh-note');
+  button.disabled = busy || expired || !ready;
+  button.setAttribute('aria-busy', String(busy));
+}
 function pauseRefresh(): void {
   refreshController?.abort(); refreshController = null;
+  setHistoryBusy(false);
   statusController?.abort(); statusController = null; statusRequest = null;
   nodesController?.abort(); nodesController = null;
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = null;
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = null;
+}
+function scheduleHistoryRefresh(delay = 30000): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+  if (!ready || expired || document.hidden) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    scheduleHistoryRefresh();
+    void refresh(false, true);
+  }, delay);
+}
+function scheduleHistoryRetry(): number | null {
+  if (statisticsSource || historyRetryCount >= 2) return null;
+  const delay = historyRetryCount++ === 0 ? 2000 : 5000;
+  scheduleHistoryRefresh(delay);
+  return delay;
 }
 function scheduleRefresh(): void {
   if (refreshTimer) clearTimeout(refreshTimer);
@@ -1075,13 +1099,8 @@ function scheduleRefresh(): void {
     statusTimer = setTimeout(statusTick, 2000);
     void refreshStatus();
   };
-  const historyTick = (): void => {
-    if (!ready || expired || document.hidden) return;
-    refreshTimer = setTimeout(historyTick, 30000);
-    void refresh(false, true);
-  };
   statusTimer = setTimeout(statusTick, 2000);
-  refreshTimer = setTimeout(historyTick, 30000);
+  scheduleHistoryRefresh();
 }
 function refreshStatus(): Promise<CollectorStatus | undefined> {
   if (statusRequest) return statusRequest;
@@ -1130,7 +1149,8 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
   if (refreshController && !force) return;
   refreshController?.abort();
   const controller = new AbortController(); refreshController = controller;
-  if (force) { detailPopover.close(); show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
+  setHistoryBusy(true);
+  if (force) { historyRetryCount = 0; detailPopover.close(); show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
   try {
     if (probeView()) {
       const probeStatus = await status;
@@ -1174,15 +1194,29 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
     }
     const history = await api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal });
     if (controller.signal.aborted || refreshController !== controller) return;
+    const local = history as HistoryResult;
+    const initialEmpty = !statisticsSource && initialHistoryPending && history.recordCount === 0 &&
+      !history.series.length && !history.nodes.length && local.upload === '0' && local.download === '0' &&
+      local.unallocatedUpload === '0' && local.unallocatedDownload === '0';
     trendDataContext = trendContext();
     if (statisticsSource) renderProviderHistory(history as ProviderHistory); else renderHistory(history as HistoryResult);
     show('global-error', false);
+    if (!statisticsSource && !initialEmpty) initialHistoryPending = false;
+    if (!initialEmpty) historyRetryCount = 0;
+    scheduleHistoryRefresh();
+    const retryDelay = initialEmpty ? scheduleHistoryRetry() : null;
     put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 30 秒'}`);
+    if (retryDelay !== null) put('refresh-note', `暂无本机记录 · ${retryDelay / 1000} 秒后重新检查`);
   } catch (error) {
-    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '更新失败 · 请重试'); }
+    if (!controller.signal.aborted && !expired) {
+      controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`);
+      scheduleHistoryRefresh();
+      const retryDelay = error instanceof ApiError && error.status < 500 ? null : scheduleHistoryRetry();
+      put('refresh-note', retryDelay === null ? '更新失败 · 请重试' : `更新失败 · ${retryDelay / 1000} 秒后重试`);
+    }
   } finally {
     updateFilterDisclosure();
-    if (refreshController === controller) { refreshController = null; el('summary').setAttribute('aria-busy', 'false'); }
+    if (refreshController === controller) { refreshController = null; setHistoryBusy(false); el('summary').setAttribute('aria-busy', 'false'); }
   }
 }
 function navigate(view: string): void {
@@ -1201,7 +1235,7 @@ function navigate(view: string): void {
     chooseSource(probeView() ? '' : statisticsSource);
     el<HTMLButtonElement>('export-button').disabled = expired || !ready;
   }
-  if (!statisticsVisible()) { refreshController?.abort(); refreshController = null; nodesController?.abort(); nodesController = null; }
+  if (!statisticsVisible()) { refreshController?.abort(); refreshController = null; setHistoryBusy(false); nodesController?.abort(); nodesController = null; }
   if (ready) void refresh(true, true);
   if (view === 'provider' && ready) void loadBatches();
 }
@@ -1358,6 +1392,7 @@ function formResult(id: string, value: string, isError = false): void { put(id, 
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) button.addEventListener('click', () => navigate(button.dataset.view!));
 document.querySelector('.brand')?.addEventListener('click', event => { event.preventDefault(); navigate('overview'); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-period]')) button.addEventListener('click', () => selectPeriod(button.dataset.period as Period));
+el('refresh-note').addEventListener('click', () => { if (!refreshController) void refresh(true, true); });
 el('custom-range').addEventListener('submit', event => { event.preventDefault(); selectRange(); });
 el('gap-details').addEventListener('toggle', renderGapDetails);
 el('previous-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, -1); selectRange(); } });
