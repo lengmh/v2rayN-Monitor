@@ -11,10 +11,10 @@
     "issue": 16,
     "status": "in_progress",
     "branch": "feat/issue16-batch-revoke-and-drilldown",
-    "scope": "PR38验收补充：S3.2首次历史短补查与原更新时间的主动刷新按钮；既有1/2/3、#16/S6.4及S3.3源码验收保留",
+    "scope": "精确0650ac6已接回原probe-ledger/v3目录并通过技术核对；S3.2刷新、S3.3下钻和#16独立CSV原生交互待用户确认",
     "implementation_status": "verified",
-    "remaining": "刷新修复提交精确CI及提醒后的新包接入/页面确认；#15/#18真实受控窗口待确认；安装器第4/5项留下一轮",
-    "resume_requirement": "核对最新HEAD与精确CI；原生最终确认绑定目标，退出Monitor并完整销毁目录mutex后再预检和二次确认单步迁移。新包未启用，真实安装/账本/配置/启动项未动。PR35保持Draft、PR33不合并"
+    "remaining": "本次状态提交精确CI；正式页刷新/下钻使用确认及隔离副本原生确认、合成批次导入撤销、另存选择器；#15/#18真实受控窗口与安装器4/5待续",
+    "resume_requirement": "复核当前运行身份并复用已通过的接入/采集证据，不重复退出部署。正式0650ac6与独立CSV验收实例按数据目录区分；后者未配置真实客户端，真实provider未升级。核心/配置/登录项未动，原快捷方式仅更新包目标/工作目录/图标。PR35/38保持Draft、PR33不合并"
   },
   "capability_levels": [
     {
