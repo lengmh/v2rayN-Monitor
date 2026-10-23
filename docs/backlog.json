@@ -13,7 +13,7 @@
     "branch": "feat/issue16-batch-revoke-and-drilldown",
     "scope": "全20项历史待验去重、S5.9长路径身份修复及PR35最小候选整合准备",
     "implementation_status": "verified",
-    "remaining": "本批精确CI与差异复核；G5父PR修复整合待授权动作；G1真实联合边界、G2睡眠/启动项、G3当前关闭页面资源、G4确有目标时的真实安装链分别保留，不重开已验项目",
+    "remaining": "1bde124精确Push39991759149/PR39991767711双平台成功；G5父PR修复整合待授权动作；G1真实联合边界、G2睡眠/启动项、G3当前关闭页面资源、G4确有目标时的真实安装链分别保留，不重开已验项目",
     "resume_requirement": "先读docs/acceptance-reconciliation.md；普通统计/策略组UI/恢复/CSV/S3.3/E1已验收，历史待验描述不重排。RoutingService不是G1必要条件，#19冻结。正式0650ac6及真实核心/账本保持；不为验收替换已匹配sing-box，不强制可选Xray探测。PR35候选仅3文件，PR38保留CSV/前端，PR33不合并；合并/部署/发布按具体授权"
   },
   "capability_levels": [
