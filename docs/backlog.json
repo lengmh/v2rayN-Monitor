@@ -8,13 +8,13 @@
   },
   "plan_date": "2026-10-09",
   "active_checkpoint": {
-    "issue": 34,
+    "issue": 18,
     "status": "in_progress",
     "branch": "feat/issue16-batch-revoke-and-drilldown",
-    "scope": "S5.9-E1隐藏启动下原生最终确认不可见的最小修复与全合成复验准备；#16隔离验收保留",
+    "scope": "S5.9-E1原生v1→v2与正确模式重开验收收口；#18固定客户端标准控制入口核验",
     "implementation_status": "verified",
-    "remaining": "本次修复精确CI与隔离包接入；E1第二次可见确认/实际单步升级/不自动重启待用户复验；核心安装恢复与sidecar真实写入另窗，#15/#18受控矩阵及合并待续",
-    "resume_requirement": "正式0650ac6保持运行，真实v3/provider不迁移。旧cab1110隐藏的最终确认已取消并正常退出；合成账本仍v1、1200行/provider5条/设置保留。以本次可见性修复精确CI包接回synthetic-offline-ledger复验，不复制真实数据或配置客户端。E1成功不等于核心安装或完整矩阵通过；现有sing-box复用，Xray实验替换另需具体窗口。PR35/38仍Draft且父子依赖，PR33不合并"
+    "remaining": "本次文档精确CI；#18同代次旧TCP轮换受标准控制入口缺失及#19冻结范围阻塞；普通受控流量/跨核心生命周期、核心安装恢复/sidecar写入需具体实机窗口；合并待续",
+    "resume_requirement": "E1用户双确认、v1→v2、scope-ledger重开与页面通过；合成v2/1200行/provider5条/设置及新v1备份保留，临时实例已退出，不重复验收。正式0650ac6/v3/provider与代理保持。固定客户端原始DTO不保留api，整份模板入口属#19，不临时改生成配置或客户端绕过；#19仍planned。普通节点/跨核心测试另安排中断窗口。PR35/38仍Draft且父子依赖，原生显示修复在PR38，PR33不合并"
   },
   "capability_levels": [
     {
@@ -564,7 +564,7 @@
         "S5.5"
       ],
       "status": "in_progress",
-      "work": "#18 的独立 PR 扩展核心连接路径归属与累计、独立身份和批量原子采样。多出站按可靠的 instance + IndexId 或独立 outbound 分账；组、实际成员和业务总量不相加，旧长连接跨切换仍保留旧成员，组选 direct 排除。",
+      "work": "#18 的独立 PR 扩展核心连接路径归属与累计、独立身份和批量原子采样。多出站按可靠的 instance + IndexId 或独立 outbound 分账；组、实际成员和业务总量不相加，旧长连接跨切换仍保留旧成员，组选 direct 排除。2026-10-23固定客户端源码和原始DTO合成往返确认标准模型不保留api，实际核心无RoutingService；已找到的整份模板入口属于冻结#19，同代次旧TCP轮换停在此范围边界。普通受控流量/跨核心生命周期另需实机窗口。",
       "outputs": [
         "核心成员归属与累计扩展",
         "批量原子采样及独立历史身份",
@@ -625,7 +625,7 @@
         "S5.6"
       ],
       "status": "in_progress",
-      "work": "A1至D3及E隔离集成完成；1425c74精确主CI39847678237/扩展CI39847678301及独立审查通过。独立组件已发布，公开ZIP及生产C#真实HTTPS两项DownloadVerified通过。2026-10-23现场sing-box test.5匹配、Xray普通范围正常但非实验探测核心；E1合成v1账本1200分钟/provider5条预演通过，但cab1110原生最终确认隐藏；旧实例已取消退出、数据保留。显式显示修复后原生8项、离线交接11项及Host Release通过，精确CI和修复包实际升级待复验，真实核心安装/sidecar写入与合并分别待续。",
+      "work": "A1至D3及E隔离集成完成；1425c74精确主CI39847678237/扩展CI39847678301及独立审查通过。独立组件已发布，公开ZIP及生产C#真实HTTPS两项DownloadVerified通过。原生显示修复9ed0501精确Push39949224706/PR39949228630双平台与435文件包核验通过，8项原生可见性/11项交接及Host Release通过。E1用户双确认、v1→v2、scope-ledger重开及页面通过；1200行历史/provider5条/设置与新v1备份保留，临时实例已退出。正式0650ac6和代理保持，未继续v2→v3；真实核心安装/sidecar写入与合并分别待续。",
       "outputs": [
         "固定兼容记录、独立组件资产与下载校验",
         "目标预检、备份安装与恢复",
