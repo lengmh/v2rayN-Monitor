@@ -11,10 +11,10 @@
     "issue": 16,
     "status": "in_progress",
     "branch": "feat/issue16-batch-revoke-and-drilldown",
-    "scope": "精确0650ac6已接回原probe-ledger/v3目录并通过技术核对；S3.2刷新、S3.3下钻和#16独立CSV原生交互待用户确认",
+    "scope": "#16隔离页时区初始化与双实例会话修复，准备仅更新隔离实例；正式0650ac6已通过技术接入并继续采集",
     "implementation_status": "verified",
-    "remaining": "本次状态提交精确CI；正式页刷新/下钻使用确认及隔离副本原生确认、合成批次导入撤销、另存选择器；#15/#18真实受控窗口与安装器4/5待续",
-    "resume_requirement": "复核当前运行身份并复用已通过的接入/采集证据，不重复退出部署。正式0650ac6与独立CSV验收实例按数据目录区分；后者未配置真实客户端，真实provider未升级。核心/配置/登录项未动，原快捷方式仅更新包目标/工作目录/图标。PR35/38保持Draft、PR33不合并"
+    "remaining": "隔离修复精确CI及仅隔离实例接入；副本原生确认、合成批次导入撤销、另存选择器；#15/#18真实受控窗口与安装器4/5待续",
+    "resume_requirement": "正式0650ac6保持运行，不重复部署；修复后在隔离环境验收，不升级真实provider。隔离原目录/文件先备份核验，新cookie按端口隔离，规范时区不回写原设置；仅在隔离实例退出后接回修复包，原生交互仍待用户。PR35/38保持Draft、PR33不合并"
   },
   "capability_levels": [
     {

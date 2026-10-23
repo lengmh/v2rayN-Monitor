@@ -739,6 +739,55 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Contains("httponly", cookie.ToLowerInvariant()); Assert.Contains("samesite=strict", cookie.ToLowerInvariant());
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/session", new { token })).StatusCode);
     }
+    [Fact] public async Task TwoInstancesKeepSessionsWithOneBrowserCookieJar()
+    {
+        var otherRoot = Path.Combine(root, "other-instance");
+        await using var other = await MonitorServer.StartAsync(otherRoot, Path.Combine(root, "web"));
+        var jar = new CookieContainer();
+        jar.Add(new Cookie("monitor_session", "synthetic-legacy", "/", "127.0.0.1"));
+        using var browser = new HttpClient(new HttpClientHandler { CookieContainer = jar, UseProxy = false });
+        browser.DefaultRequestHeaders.Add("X-Monitor-Request", "1");
+        foreach (var instance in new[] { server, other, server })
+        {
+            var token = new Uri(instance.IssueLaunchUrl()).Fragment[1..];
+            using var response = await browser.PostAsJsonAsync(instance.Address + "/api/session", new { token });
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync(server.Address + "/api/settings")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync(other.Address + "/api/settings")).StatusCode);
+        var mainName = $"monitor_session_{new Uri(server.Address).Port}";
+        var otherName = $"monitor_session_{new Uri(other.Address).Port}";
+        var mainCookie = jar.GetCookies(new Uri(server.Address))[mainName];
+        var otherCookie = jar.GetCookies(new Uri(other.Address))[otherName];
+        Assert.NotNull(mainCookie); Assert.NotNull(otherCookie);
+        Assert.Equal("synthetic-legacy", jar.GetCookies(new Uri(server.Address))["monitor_session"]!.Value);
+        using var foreign = new HttpRequestMessage(HttpMethod.Get, other.Address + "/api/settings");
+        foreign.Headers.Add("Cookie", $"{otherName}={mainCookie.Value}");
+        using var noCookies = new HttpClient(new HttpClientHandler { UseCookies = false, UseProxy = false });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await noCookies.SendAsync(foreign)).StatusCode);
+    }
+    [Theory]
+    [InlineData("China Standard Time", "Asia/Shanghai")]
+    [InlineData("Asia/Shanghai", "Asia/Shanghai")]
+    public async Task SavedAndUpdatedTimeZonesUseBrowserIdentifiers(string savedZone, string browserZone)
+    {
+        await server.DisposeAsync(); client.Dispose();
+        var settingsPath = Path.Combine(root, "settings.json");
+        var original = JsonSerializer.Serialize(new { v2rayNPath = "", timeZoneId = savedZone, demo = false });
+        File.WriteAllText(settingsPath, original);
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        await Login();
+        var settings = await client.GetFromJsonAsync<JsonElement>("/api/settings");
+        Assert.Equal(browserZone, settings.GetProperty("timeZoneId").GetString());
+        Assert.Equal(original, File.ReadAllText(settingsPath));
+        using var updated = await client.PostAsJsonAsync("/api/settings", server.Settings with { TimeZoneId = savedZone });
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        var result = await updated.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(browserZone, result.GetProperty("timeZoneId").GetString());
+        using var persisted = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        Assert.Equal(browserZone, persisted.RootElement.GetProperty("timeZoneId").GetString());
+    }
     [Fact] public async Task HostAndOriginAreValidatedEvenWithSession()
     {
         await Login(); client.DefaultRequestHeaders.Add("Origin", "https://evil.example");

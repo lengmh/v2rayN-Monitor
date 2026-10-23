@@ -44,6 +44,7 @@ public sealed class MonitorServer : IAsyncDisposable
     public Ledger Ledger => legacyLedger ?? throw new InvalidOperationException("This opt-in instance uses a v2 scope ledger.");
     public ScopeLedger? Scopes { get; }
     public string Address { get; private set; } = "";
+    private string SessionCookieName => $"monitor_session_{new Uri(Address).Port}";
     public CancellationToken Stopping => app.Lifetime.ApplicationStopping;
     public AppSettings Settings { get { lock (settingsGate) return settings; } }
     public void SetStatus(CollectorStatus value) => Volatile.Write(ref status, value with { Probes = value.Probes ?? DefaultProbeStatus });
@@ -68,6 +69,8 @@ public sealed class MonitorServer : IAsyncDisposable
         var path = Path.Combine(dataDir, "settings.json");
         if (File.Exists(path)) settings = (JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Json) ?? settings) with { Demo = demo };
         _ = TimeZoneInfo.FindSystemTimeZoneById(settings.TimeZoneId);
+        if (TimeZoneInfo.TryConvertWindowsIdToIanaId(settings.TimeZoneId, out var savedIana))
+            settings = settings with { TimeZoneId = savedIana };
         useScopeLedger |= useProbeLedger;
         if (demoMode && useScopeLedger) throw new ArgumentException("Scope mode cannot use the v1 demo initializer.");
         var historyPath = Path.Combine(directory, "history.db");
@@ -116,6 +119,8 @@ public sealed class MonitorServer : IAsyncDisposable
     public void UpdateSettings(AppSettings value)
     {
         _ = TimeZoneInfo.FindSystemTimeZoneById(value.TimeZoneId);
+        if (TimeZoneInfo.TryConvertWindowsIdToIanaId(value.TimeZoneId, out var iana))
+            value = value with { TimeZoneId = iana };
         if (value.V2rayNPath.Length > 1024) throw new ArgumentException("目录路径过长。");
         if (!string.IsNullOrWhiteSpace(value.V2rayNPath) && !Directory.Exists(value.V2rayNPath)) throw new ArgumentException("找不到该目录。请选择包含 guiConfigs 和 binConfigs 的 v2rayN 数据根目录。");
         lock (settingsGate)
@@ -152,7 +157,7 @@ public sealed class MonitorServer : IAsyncDisposable
             if (request.Path.StartsWithSegments("/api"))
             {
                 if (request.Method != "GET" && request.Headers["X-Monitor-Request"] != "1") { response.StatusCode = 403; return; }
-                if (request.Path != "/api/session" && (!request.Cookies.TryGetValue("monitor_session", out var session) || !sessions.TryGetValue(session, out var until) || until <= DateTimeOffset.UtcNow))
+                if (request.Path != "/api/session" && (!request.Cookies.TryGetValue(SessionCookieName, out var session) || !sessions.TryGetValue(session, out var until) || until <= DateTimeOffset.UtcNow))
                 { response.StatusCode = 401; await response.WriteAsJsonAsync(new { error = "会话已过期，请从托盘重新打开页面。" }); return; }
             }
             try { await next(context); }
@@ -181,7 +186,7 @@ public sealed class MonitorServer : IAsyncDisposable
             var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
             sessions[token] = DateTimeOffset.UtcNow.AddHours(12);
             foreach (var old in sessions.Where(p => p.Value < DateTimeOffset.UtcNow)) sessions.TryRemove(old.Key, out _);
-            context.Response.Cookies.Append("monitor_session", token, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict, IsEssential = true, Path = "/", MaxAge = TimeSpan.FromHours(12) });
+            context.Response.Cookies.Append(SessionCookieName, token, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict, IsEssential = true, Path = "/", MaxAge = TimeSpan.FromHours(12) });
             return Results.Ok(new { ok = true });
         });
         app.MapGet("/api/status", () => Volatile.Read(ref status) with
