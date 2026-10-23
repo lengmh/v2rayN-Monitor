@@ -93,7 +93,11 @@ git diff --check
 
 结果为 **80/80 通过、Host 零警告零错误、计划／链接／公开文件清单和 diff 检查通过**。另逐项比较确认 38 项原 acceptance／stop_rule／depends_on／outputs 未改、正文状态与 backlog 一致、20 个原待办全部入表、原 18 个 done 保留。日志在审计目录 `current-installer-tests.log`／`current-host-build.log`。
 
-`pr35-minimal-fixes.patch` 与 `pr-integration-readiness.json` 保存父候选三个文件的摘要及反向补丁预检；候选与当前三个源文件逐字节一致。2026-10-24 01:00 远端只读快照仍为 5 个开放 Issue／3 个 Draft PR，PR35→PR38 父子关系未变，PR33仅审查用途。未修改父分支或远端状态；当前分支的新提交精确 CI 另记。
+`pr35-minimal-fixes.patch` 与 `pr-integration-readiness.json` 保存父候选三个文件的摘要及反向补丁预检；候选与当前三个源文件逐字节一致。2026-10-24 01:00 远端只读快照仍为 5 个开放 Issue／3 个 Draft PR，PR35→PR38 父子关系未变，PR33仅审查用途。没有修改父分支、合并或关闭事项。
+
+修复／去重提交 `1bde12419f717a61bacbe5f4160cd728d700dac9` 已推送当前 PR38；精确 Push `39991759149`／PR `39991767711` 的 Windows／Ubuntu 全部成功，最终结果已保存。后续记录提交不充当另一轮产品修改或实机验收。
+
+最终只读现场检查确认正式 Monitor／2840 保持、临时测试进程退出。Xray PID 与旧前置笔记不同，不能主张整轮同代次；当前文件 SHA256 仍匹配 E01。未对进程变化归因，也未执行真实停止／重载。G1 的现场进程／配置条件须在真正执行时重核，不使用历史 PID。
 
 ## 后续如何避免重新排已验项目
 
