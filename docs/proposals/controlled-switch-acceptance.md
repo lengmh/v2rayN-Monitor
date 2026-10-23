@@ -2,7 +2,16 @@
 
 ## 当前结论
 
-2026-10-22 完成只读准备，真实组内轮换和旧 TCP 长连接测试仍为 `NOT_RUN`。本次不修改配置、路由或真实账本，不调用控制 RPC，不切组或重启核心。普通采集、速率、文案和固定 `0993a4b` 的历史维度入口验收继续有效。
+2026-10-23 继续完成标准控制入口核验，真实组内轮换和旧 TCP 长连接测试仍为 `NOT_RUN`，当前受控制入口与冻结范围阻塞。本次不修改配置、路由或真实账本，不调用控制 RPC，不切组或重启核心。普通采集、速率、文案及历史维度入口既有验收继续有效；正式 Monitor 当前为 `0650ac6`。
+
+### 2026-10-23 固定客户端源码与最短模型验证
+
+- 当前客户端版本标记仍是 `7.25.1+95f68d9955c2324518c5e1dc9485d73412102a95`。只读检查实际核心配置无 `api`／`RoutingService`、有 metrics、固定 proxy 和两个附加组，没有主 `proxy-balancer`；核对期间核心与配置未变。
+- 新核对六份公开源码：`CoreConfigV2rayService`、`V2rayConfigTemplateService`、`CoreConfigContextBuilder`、`CoreConfigContext`、`CoreConfigHandler`、`V2rayConfig`。全部文件的 Git blob 与 SHA256 已核验，并从固定提交的实际根树再次逐文件确认。
+- `CoreConfigV2rayService.cs:33-76` 先反序列化到 `V2rayConfig`，再生成路由、统计并应用最终修饰。`V2rayConfig.cs:3-17` 没有 `api` 或保存未知字段的成员。直接编译这份原始 DTO，输入全合成 `api.services=["RoutingService"]` 后做 JSON 往返，输出不再含 `api`，metrics／stats／统计策略仍保留。此为模型级验证，未执行完整客户端生成器或真实核心。
+- `V2rayConfigTemplateService.cs:86-222` 的 `ApplyFullConfigTemplate` 可以保留任意顶层内容，但它返回整份模板并合入出站、组和探测配置，不是单独启用控制服务的标准开关。该路径属于用户冻结的 #19 整份配置来源适配范围，尚未验证 Monitor 在该模式下的来源与身份边界。
+
+因此不直接修改客户端生成文件、不启用整份模板、不修改客户端源码来补本矩阵。当前范围内尚无已验证的无重启强制轮换入口；如保持 #19 冻结，先保留本用例，普通 proxy/direct、节点及跨核心生命周期可在各自授权窗口继续，不把它们当作本用例的替代证据。
 
 ## 后续窗口清单
 
@@ -58,9 +67,11 @@
 
 ## 下一节点与证据
 
-当前没有已验证的无重启强制轮换入口，不为补矩阵临时启用控制服务。建议先准备当前已验收分支与 PR #30 的整合清单、差异和精确 CI；远端分支更新及合并按具体授权执行。真实轮换与核心生命周期另留窗口，S5.6 保持 `in_progress`。PR #35 最后处理，PR #33 不合并；本轮不扩大到 #19 或可选 S5.8。
+当前没有已验证的无重启强制轮换入口，不为补矩阵临时启用控制服务或展开 #19。此前 PR #30 整合已经完成；当前 PR #35／#38 为父子草稿分支，后续合并按具体授权执行。下一可执行实机窗口是独立的普通 proxy/direct 或节点／跨核心生命周期，执行前确定具体目标、受控流量和恢复步骤；S5.6 保持 `in_progress`。PR #33 不合并，可选 S5.8 不夹带进入普通统计验收。
 
 本机证据位于 `<evidence-root>/v2rayn-monitor-controlled-switch-readiness-20261022`：`readiness-safe.json`、规范化后的 `native-confirmation-safe.json`、CLI 帮助、固定公开源码及摘要清单。第一份汇总中的空 API 集合曾序列化为 `[null]`，以后续原生确认的「无 api / services=[]」为准。私有进程身份及文件摘要仅留本机，不提交节点、配置、计数明细或数据库。历史接入与本次只读发现分开，详见 [STATUS](../STATUS.md)。
+
+2026-10-23 新证据位于 `<evidence-root>/v2rayn-monitor-e1-closeout-20261023`：`controlled-readiness-current.json`、`routing-dto-probe.json`、六份公开源码及其摘要清单、固定提交与实际根树。合成验证程序只编译 DTO，不启动核心、调用控制 RPC 或读取真实节点资料。
 
 来源：
 
@@ -69,3 +80,5 @@
 - [固定客户端节点选择源码](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs)
 - [固定客户端重载入口源码](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/ViewModels/MainWindowViewModel.cs)
 - [固定客户端核心生命周期源码](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/Manager/CoreManager.cs)
+- [固定客户端 Xray 配置模型](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/Models/CoreConfigs/V2rayConfig.cs)
+- [固定客户端整份模板处理](https://github.com/fqfqgo/v2rayN/blob/95f68d9955c2324518c5e1dc9485d73412102a95/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayConfigTemplateService.cs)
