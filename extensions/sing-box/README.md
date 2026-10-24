@@ -98,7 +98,7 @@ test.4 后叠加 [probe-stats.patch](probe-stats.patch)，候选为 `1.14.1-moni
 复用同一 [构建脚本](build-ci.ps1) 的本地命令如下；需已有固定 Go 环境，输出目录必须尚不存在。可通过 `-SourceArchive` 指定本地已下载归档，仍执行同一摘要校验。
 
 ```powershell
-./extensions/sing-box/build-ci.ps1 -OutputRoot 'F:\AI playground\TempFiles\本轮独立构建目录'
+./extensions/sing-box/build-ci.ps1 -OutputRoot (Join-Path $env:TEMP 'monitor-singbox-build')
 ```
 
 工作流只在扩展目录或工作流自身改动时触发 push / PR 检查。候选 artifact 包含 EXE、原始源码归档、四层补丁、GPLv3 LICENSE、说明及构建脚本；`build-provenance.json` 记录实际 checkout、CI 提交/运行 ID、源码/补丁/二进制摘要、Go 版本、标签和构建参数。PR checkout 可能是合并测试提交，不是 PR HEAD。artifact 不是正式 Release，不自动部署或更新白名单。远端结果以 [STATUS](../../docs/STATUS.md) 和具体运行记录为准，核心回归/构建不替代实机验收。

@@ -1,4 +1,13 @@
 export interface Settings { v2rayNPath: string; timeZoneId: string; demo: boolean }
+export interface CoreCapabilities {
+  targetState: string; ledgerVersion: number; startupMode: string;
+  collectorState: string; lastSample: string | null; collectionBasis: string; probeState: string;
+  components: { id: string; name: string; version: string; fileState: string; downloadState: string; license: string }[];
+}
+export interface CoreActionResult {
+  state: string; componentId?: string; operationId?: string; backupDirectory?: string; planId?: string; details?: string;
+  runtime?: { state: string; coreName: string | null; fileIdentityVerified: boolean; statisticsAvailable: boolean; memberCount: number; probeState: string; checkedAt: string };
+}
 export interface ProxyCollectionScope { basis: 'routed_proxy' | 'xray_outbound_proxy' | 'xray_outbound_members'; isPartial: boolean; uncollectedOutbounds: number; uncollectedGroups: number; collectedOutbounds?: number; collectedGroups?: number; description: string }
 export interface CollectorStatus { state: string; message: string; currentNode: string | null; lastSample: string | null; uploadPerSecond: string | null; downloadPerSecond: string | null; demo: boolean; scope?: ProxyCollectionScope | null; collectionBasis?: string; historyBases?: string[]; probes?: { historyEnabled: boolean; state: string; message: string } | null }
 export interface NodeInfo { key: string; name: string }
