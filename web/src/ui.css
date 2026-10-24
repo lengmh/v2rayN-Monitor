@@ -55,7 +55,8 @@ main { min-width: 0; flex: 1; }
 .unit-control { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); margin-left: auto; }
 .unit-control select { font-size: 11px; }
 #timezone-note, #refresh-note { font-size: 10px; color: var(--muted); }
-#refresh-note { margin-left: auto; }
+#refresh-note { margin-left: auto; min-height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--teal); white-space: normal; }
+#refresh-note:hover:not(:disabled) { background: var(--hover); }
 .custom-dates { display: flex; align-items: end; gap: 10px; border-top: 1px solid var(--line); padding: 12px 13px; font-size: 11px; color: var(--muted); }
 .custom-dates label { display: grid; gap: 5px; }
 .custom-dates > span { padding-bottom: 8px; }
@@ -88,6 +89,9 @@ main { min-width: 0; flex: 1; }
 .chart { min-height: 222px; margin: 0 17px; display: flex; gap: 4px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); background: repeating-linear-gradient(to top, transparent 0, transparent 46px, var(--grid) 47px, transparent 48px); }
 .chart.empty { display: grid; place-items: center; background: none; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.8; white-space: pre-line; }
 .chart-column { display: flex; flex: 1 0 8px; min-width: 8px; max-width: 100px; flex-direction: column; justify-content: end; align-items: stretch; position: relative; height: 222px; padding-bottom: 26px; }
+.chart-drilldown { border: 0; background: transparent; color: inherit; font: inherit; border-radius: 2px; padding-inline: 0; padding-top: 0; }
+.chart-drilldown:hover { background: var(--hover); }
+.chart-drilldown:focus-visible { outline-offset: -2px; }
 .chart-stack { width: min(80%,24px); margin: 0 auto; display: flex; flex-direction: column-reverse; height: 100%; justify-content: flex-start; }
 .bar-part { width: 100%; flex: none; }
 .bar-part:last-child { border-radius: 2px 2px 0 0; }
@@ -198,6 +202,12 @@ tbody tr:hover { background: var(--hover); }
 .settings-panel input:not([type="file"]), .settings-panel select { width: 100%; min-height: 36px; font-size: 12px; }
 .settings-panel input[type="file"] { width: 100%; min-width: 0; font-size: 11px; padding: 8px; }
 .settings-panel .field-help { margin-bottom: 8px; }
+.settings-panel .archive-choice { display: flex; align-items: center; gap: 8px; }
+.settings-panel .archive-choice input { width: auto; min-height: auto; }
+.batch-file-meta, #revoke-details { white-space: pre-line; overflow-wrap: anywhere; }
+.batch-file-meta { min-width: 220px; }
+#revoke-preview { margin-top: 14px; }
+#revoke-preview h3 { font-size: 13px; margin-bottom: 8px; }
 .core-components { list-style: none; padding: 0; margin: 8px 0 16px; font-size: 12px; overflow-wrap: anywhere; }
 .core-components li { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .core-components p { margin-top: 4px; }
@@ -299,7 +309,6 @@ tbody tr:hover { background: var(--hover); }
   .unit-control { margin-left: 0; }
   .unit-control label { display: none; }
   #timezone-note { flex-basis: 100%; }
-  #refresh-note { display: none; }
   .custom-dates { flex-wrap: wrap; }
   .custom-dates input { max-width: 138px; font-size: 11px; }
   .summary-grid { padding: 0; }

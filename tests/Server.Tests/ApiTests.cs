@@ -746,6 +746,55 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Contains("httponly", cookie.ToLowerInvariant()); Assert.Contains("samesite=strict", cookie.ToLowerInvariant());
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/session", new { token })).StatusCode);
     }
+    [Fact] public async Task TwoInstancesKeepSessionsWithOneBrowserCookieJar()
+    {
+        var otherRoot = Path.Combine(root, "other-instance");
+        await using var other = await MonitorServer.StartAsync(otherRoot, Path.Combine(root, "web"));
+        var jar = new CookieContainer();
+        jar.Add(new Cookie("monitor_session", "synthetic-legacy", "/", "127.0.0.1"));
+        using var browser = new HttpClient(new HttpClientHandler { CookieContainer = jar, UseProxy = false });
+        browser.DefaultRequestHeaders.Add("X-Monitor-Request", "1");
+        foreach (var instance in new[] { server, other, server })
+        {
+            var token = new Uri(instance.IssueLaunchUrl()).Fragment[1..];
+            using var response = await browser.PostAsJsonAsync(instance.Address + "/api/session", new { token });
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync(server.Address + "/api/settings")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync(other.Address + "/api/settings")).StatusCode);
+        var mainName = $"monitor_session_{new Uri(server.Address).Port}";
+        var otherName = $"monitor_session_{new Uri(other.Address).Port}";
+        var mainCookie = jar.GetCookies(new Uri(server.Address))[mainName];
+        var otherCookie = jar.GetCookies(new Uri(other.Address))[otherName];
+        Assert.NotNull(mainCookie); Assert.NotNull(otherCookie);
+        Assert.Equal("synthetic-legacy", jar.GetCookies(new Uri(server.Address))["monitor_session"]!.Value);
+        using var foreign = new HttpRequestMessage(HttpMethod.Get, other.Address + "/api/settings");
+        foreign.Headers.Add("Cookie", $"{otherName}={mainCookie.Value}");
+        using var noCookies = new HttpClient(new HttpClientHandler { UseCookies = false, UseProxy = false });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await noCookies.SendAsync(foreign)).StatusCode);
+    }
+    [Theory]
+    [InlineData("China Standard Time", "Asia/Shanghai")]
+    [InlineData("Asia/Shanghai", "Asia/Shanghai")]
+    public async Task SavedAndUpdatedTimeZonesUseBrowserIdentifiers(string savedZone, string browserZone)
+    {
+        await server.DisposeAsync(); client.Dispose();
+        var settingsPath = Path.Combine(root, "settings.json");
+        var original = JsonSerializer.Serialize(new { v2rayNPath = "", timeZoneId = savedZone, demo = false });
+        File.WriteAllText(settingsPath, original);
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        await Login();
+        var settings = await client.GetFromJsonAsync<JsonElement>("/api/settings");
+        Assert.Equal(browserZone, settings.GetProperty("timeZoneId").GetString());
+        Assert.Equal(original, File.ReadAllText(settingsPath));
+        using var updated = await client.PostAsJsonAsync("/api/settings", server.Settings with { TimeZoneId = savedZone });
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        var result = await updated.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(browserZone, result.GetProperty("timeZoneId").GetString());
+        using var persisted = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        Assert.Equal(browserZone, persisted.RootElement.GetProperty("timeZoneId").GetString());
+    }
     [Fact] public async Task HostAndOriginAreValidatedEvenWithSession()
     {
         await Login(); client.DefaultRequestHeaders.Add("Origin", "https://evil.example");
@@ -1014,5 +1063,316 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Equal(0, (await client.GetFromJsonAsync<JsonElement>("/api/imports")).GetArrayLength());
         Assert.Empty(server.Ledger.GetNodes());
     }
+    private const string ProviderCsvHeader = "node_name,rate,origin_traffic,origin_x_rate,traffic,log_time\n";
+    private async Task StartProviderServer(Func<ProviderTrackingPrompt, CancellationToken, Task<bool>>? confirm,
+        bool legacy = true, bool demo = false)
+    {
+        await server.DisposeAsync(); client.Dispose();
+        if (legacy)
+        {
+            using (var seed = new V2rayNMonitor.Core.ProviderImports(Path.Combine(root, "provider.db")))
+                seed.Commit(new("synthetic-legacy", "UTC", ProviderCsvHeader + "Synthetic-legacy,0.8,10,8,display,2026-01-01 00:00:00"));
+            // Synthetic old-format fixture: retain both original tables and omit unavailable references.
+            using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(root, "provider.db")};Pooling=False");
+            db.Open();
+            using var command = db.CreateCommand();
+            command.CommandText = "DROP TABLE provider_batch_rows; DROP TABLE provider_batch_tracking;";
+            command.ExecuteNonQuery();
+        }
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"), demo: demo, confirmProviderTracking: confirm);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+    }
+    private byte[] ReadSyntheticDatabase(string name)
+    {
+        using var file = new FileStream(Path.Combine(root, name), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var copy = new MemoryStream(); file.CopyTo(copy); return copy.ToArray();
+    }
+    private static StringContent ProviderBody(string text) => new(text, System.Text.Encoding.UTF8, "application/json");
+
+    [Fact]
+    public async Task ProviderBatchEndpointsRequireSessionSameOriginAndStrictFiniteBodies()
+    {
+        var confirmations = 0;
+        await StartProviderServer((_, _) => { confirmations++; return Task.FromResult(false); });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/imports/features")).StatusCode);
+        var hash = new string('a', 64);
+        foreach (var route in new[] { "enable-tracking", "revoke-preview", "revoke" })
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsync("/api/imports/" + route, ProviderBody("{}"))).StatusCode);
+            client.DefaultRequestHeaders.Add("X-Monitor-Request", "1");
+            Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/imports/" + route, ProviderBody("{}"))).StatusCode);
+            client.DefaultRequestHeaders.Remove("X-Monitor-Request");
+        }
+        await Login();
+        foreach (var route in new[] { "enable-tracking", "revoke-preview", "revoke" })
+        {
+            using var foreign = new HttpRequestMessage(HttpMethod.Post, "/api/imports/" + route) { Content = ProviderBody("{}") };
+            foreign.Headers.Add("Origin", "https://synthetic.invalid");
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(foreign)).StatusCode);
+            using var host = new HttpRequestMessage(HttpMethod.Post, "/api/imports/" + route) { Content = ProviderBody("{}") };
+            host.Headers.Host = "synthetic.invalid";
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(host)).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest,
+                (await client.PostAsync("/api/imports/" + route + "?path=untrusted", ProviderBody("{}"))).StatusCode);
+        }
+        foreach (var body in new[] { "[]", """{"authorized":true}""", """{"backupPath":"untrusted"}""",
+            """{"unknown":1,"unknown":2}""", "{\"padding\":\"" + new string('x', 1100) + "\"}" })
+            Assert.Equal(HttpStatusCode.BadRequest,
+                (await client.PostAsync("/api/imports/enable-tracking", ProviderBody(body))).StatusCode);
+        foreach (var body in new[]
+        {
+            "{}", JsonSerializer.Serialize(new { source = new string('s', 101), hash }),
+            JsonSerializer.Serialize(new { source = "synthetic", hash, token = hash }),
+            "{\"source\":\"synthetic\",\"source\":\"other\",\"hash\":\"" + hash + "\"}",
+            JsonSerializer.Serialize(new { source = 1, hash })
+        })
+            Assert.Equal(HttpStatusCode.BadRequest,
+                (await client.PostAsync("/api/imports/revoke-preview", ProviderBody(body))).StatusCode);
+        foreach (var body in new[]
+        {
+            JsonSerializer.Serialize(new { source = "synthetic", hash }),
+            JsonSerializer.Serialize(new { source = "synthetic", hash, token = "short" }),
+            JsonSerializer.Serialize(new { source = "synthetic", hash, token = hash, authorized = true }),
+            "{\"source\":\"synthetic\",\"hash\":\"" + hash + "\",\"token\":\"" + hash + "\",\"token\":\"" + hash + "\"}"
+        })
+            Assert.Equal(HttpStatusCode.BadRequest,
+                (await client.PostAsync("/api/imports/revoke", ProviderBody(body))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/imports/features?path=untrusted")).StatusCode);
+        Assert.Equal(0, confirmations);
+    }
+
+    [Fact]
+    public async Task ProviderTrackingCancellationDoesNotWriteSchemaBackupOrLocalHistory()
+    {
+        await StartProviderServer((_, _) => Task.FromResult(false));
+        await Login();
+        var features = await client.GetFromJsonAsync<JsonElement>("/api/imports/features");
+        Assert.False(features.GetProperty("trackingAvailable").GetBoolean());
+        Assert.True(features.GetProperty("upgradeAvailable").GetBoolean());
+        var history = ReadSyntheticDatabase("history.db");
+        var provider = ReadSyntheticDatabase("provider.db");
+        var response = await client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}"));
+        Assert.Equal("Cancelled", (await response.Content.ReadFromJsonAsync<ProviderTrackingResult>())!.State);
+        Assert.Equal(provider, ReadSyntheticDatabase("provider.db"));
+        Assert.Equal(history, ReadSyntheticDatabase("history.db"));
+        Assert.Empty(Directory.GetFiles(root, "provider-before-batch-tracking-*.db"));
+        features = await client.GetFromJsonAsync<JsonElement>("/api/imports/features");
+        Assert.False(features.GetProperty("trackingAvailable").GetBoolean());
+    }
+
+    [Fact]
+    public async Task ProviderTrackingNativeConsentBindsFreshBackupAndPreservesOldBatchesWithoutGuessingReferences()
+    {
+        ProviderTrackingPrompt? shown = null;
+        var calls = 0;
+        await StartProviderServer((prompt, _) =>
+        {
+            calls++; shown = prompt;
+            Assert.Equal(Path.Combine(root, "provider.db"), prompt.DatabasePath);
+            Assert.Equal(root, Path.GetDirectoryName(prompt.BackupPath));
+            Assert.StartsWith("provider-before-batch-tracking-", Path.GetFileName(prompt.BackupPath));
+            Assert.False(File.Exists(prompt.BackupPath));
+            return Task.FromResult(true);
+        });
+        await Login();
+        var history = ReadSyntheticDatabase("history.db");
+        var old = (await client.GetFromJsonAsync<V2rayNMonitor.Core.ImportBatch[]>("/api/imports"))!.Single();
+        var response = await client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}"));
+        var result = (await response.Content.ReadFromJsonAsync<ProviderTrackingResult>())!;
+        Assert.Equal("Enabled", result.State);
+        Assert.Equal(shown!.BackupPath, result.BackupPath);
+        Assert.Equal(1, result.PreservedBatches);
+        Assert.Equal(1, result.PreservedRecords);
+        using (var saved = new V2rayNMonitor.Core.ProviderImports(result.BackupPath!))
+        {
+            Assert.False(saved.TrackingAvailable);
+            Assert.Equal(old, Assert.Single(saved.List()));
+        }
+        var preview = await client.PostAsJsonAsync("/api/imports/revoke-preview", new { old.Source, old.Hash });
+        var protectedBatch = (await preview.Content.ReadFromJsonAsync<V2rayNMonitor.Core.ProviderRevokePreview>())!;
+        Assert.False(protectedBatch.CanRevoke);
+        Assert.Null(protectedBatch.DeletedRowCount);
+        Assert.Null(protectedBatch.RetainedRawBytes);
+        Assert.Contains("旧批次", protectedBatch.Reason);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/imports/revoke",
+            new { source = old.Source, hash = old.Hash, token = protectedBatch.Token })).StatusCode);
+        Assert.Equal("AlreadyEnabled", (await (await client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}")))
+            .Content.ReadFromJsonAsync<ProviderTrackingResult>())!.State);
+        var features = await client.GetFromJsonAsync<JsonElement>("/api/imports/features");
+        Assert.True(features.GetProperty("trackingAvailable").GetBoolean());
+        Assert.False(features.GetProperty("upgradeAvailable").GetBoolean());
+        Assert.Equal(1, calls);
+        Assert.Equal(history, ReadSyntheticDatabase("history.db"));
+        Assert.Single(Directory.GetFiles(root, "provider-before-batch-tracking-*.db"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProviderTrackingUpgradeWithoutHostOrInDemoIsUnavailable(bool demo)
+    {
+        await StartProviderServer(demo ? (_, _) => throw new InvalidOperationException("Host must not run in demo.") : null, demo: demo);
+        await Login();
+        var features = await client.GetFromJsonAsync<JsonElement>("/api/imports/features");
+        Assert.False(features.GetProperty("trackingAvailable").GetBoolean());
+        Assert.False(features.GetProperty("upgradeAvailable").GetBoolean());
+        var response = await client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}"));
+        Assert.Equal("Unavailable", (await response.Content.ReadFromJsonAsync<ProviderTrackingResult>())!.State);
+        Assert.Empty(Directory.GetFiles(root, "provider-before-batch-tracking-*.db"));
+    }
+
+    [Fact]
+    public async Task ProviderTrackingFailureDoesNotExposeHostExceptionOrClaimBackupSaved()
+    {
+        await StartProviderServer((_, _) => throw new IOException(root + " Synthetic secret"));
+        await Login();
+        var response = await client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}"));
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(root, text);
+        Assert.DoesNotContain("Synthetic secret", text);
+        var result = JsonSerializer.Deserialize<ProviderTrackingResult>(text, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal("Failed", result.State);
+        Assert.Null(result.BackupPath);
+        Assert.Empty(Directory.GetFiles(root, "provider-before-batch-tracking-*.db"));
+    }
+
+    [Fact]
+    public async Task ProviderTrackingConfirmationSerializesProviderWritesButNotLocalCollection()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await StartProviderServer(async (_, token) => { entered.TrySetResult(); await release.Task.WaitAsync(token); return false; });
+        await Login();
+        var pending = client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}"));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            var busy = await client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}"));
+            Assert.Equal("Busy", (await busy.Content.ReadFromJsonAsync<ProviderTrackingResult>())!.State);
+            var request = new { source = "synthetic", timeZoneId = "UTC", csv = ProviderCsvHeader + "Synthetic,1,1,1,display,2026-01-01 00:00:00" };
+            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/imports/commit", request)).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/imports/revoke-preview",
+                new { source = "synthetic", hash = new string('a', 64) })).StatusCode);
+            var at = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            await Task.Run(() =>
+            {
+                server.Ledger.Accept(new("synthetic-provider-upgrade", "node", "Synthetic", "core", "config", at, 0, 0));
+                server.Ledger.Accept(new("synthetic-provider-upgrade", "node", "Synthetic", "core", "config", at.AddSeconds(1), 7, 0));
+            }).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/status")).StatusCode);
+        }
+        finally { release.TrySetResult(); }
+        Assert.Equal("Cancelled", (await (await pending).Content.ReadFromJsonAsync<ProviderTrackingResult>())!.State);
+    }
+
+    [Fact]
+    public async Task ProviderTrackingClientCancellationDiscardsLateConsentAndReleasesProviderGate()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var consent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await StartProviderServer((_, _) => { entered.TrySetResult(); return consent.Task; });
+        await Login();
+        var before = ReadSyntheticDatabase("provider.db");
+        using var cancellation = new CancellationTokenSource();
+        var pending = client.PostAsync("/api/imports/enable-tracking", ProviderBody("{}"), cancellation.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        var gate = (SemaphoreSlim)typeof(MonitorServer).GetField("providerGate",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(server)!;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await gate.WaitAsync(deadline.Token);
+        gate.Release();
+        consent.TrySetResult(true);
+        var features = await client.GetFromJsonAsync<JsonElement>("/api/imports/features");
+        Assert.False(features.GetProperty("trackingAvailable").GetBoolean());
+        Assert.Equal(before, ReadSyntheticDatabase("provider.db"));
+        Assert.Empty(Directory.GetFiles(root, "provider-before-batch-tracking-*.db"));
+    }
+
+    [Fact]
+    public async Task ProviderBatchRevokePreservesSharedRowsAndRejectsStaleOrWrongBatchTokens()
+    {
+        await Login();
+        var history = ReadSyntheticDatabase("history.db");
+        const string source = "synthetic-revoke";
+        const string shared = "Synthetic-shared,1,20,0.2,display,2026-01-01 00:00:00\n";
+        var a = await (await client.PostAsJsonAsync("/api/imports/commit", new { source, timeZoneId = "UTC",
+            csv = ProviderCsvHeader + "Synthetic-A,1,10,0.1,display,2026-01-01 00:00:00\n" + shared }))
+            .Content.ReadFromJsonAsync<V2rayNMonitor.Core.ImportPreview>();
+        var b = await (await client.PostAsJsonAsync("/api/imports/commit", new { source, timeZoneId = "UTC",
+            csv = ProviderCsvHeader + shared + "Synthetic-B,1,30,0.3,display,2026-01-01 00:00:00" }))
+            .Content.ReadFromJsonAsync<V2rayNMonitor.Core.ImportPreview>();
+        async Task<V2rayNMonitor.Core.ProviderRevokePreview> Preview() =>
+            (await (await client.PostAsJsonAsync("/api/imports/revoke-preview", new { source, hash = a!.Hash }))
+                .Content.ReadFromJsonAsync<V2rayNMonitor.Core.ProviderRevokePreview>())!;
+        var preview = await Preview();
+        Assert.Equal(1, preview.DeletedRowCount);
+        Assert.Equal(1, preview.RetainedRowCount);
+        Assert.Equal("10", preview.DeletedRawBytes);
+        Assert.Equal("0.1", preview.DeletedBilledBytes);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/imports/revoke",
+            new { source, hash = b!.Hash, token = preview.Token })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/imports/revoke",
+            new { source = "synthetic-other", hash = a!.Hash, token = preview.Token })).StatusCode);
+        await client.PostAsJsonAsync("/api/imports/commit", new { source, timeZoneId = "UTC",
+            csv = ProviderCsvHeader + "Synthetic-C,1,40,0.4,display,2026-01-01 00:00:00" });
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/imports/revoke",
+            new { source, hash = a!.Hash, token = preview.Token })).StatusCode);
+        preview = await Preview();
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/imports/revoke",
+            new { source, hash = a!.Hash, token = preview.Token })).StatusCode);
+        var remaining = await client.GetFromJsonAsync<JsonElement>("/api/provider/history?source=" + source +
+            "&start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&timeZoneId=UTC");
+        Assert.Equal(3, remaining.GetProperty("recordCount").GetInt32());
+        Assert.Equal("90", remaining.GetProperty("rawBytes").GetString());
+        Assert.Equal("0.9", remaining.GetProperty("billedBytes").GetString());
+        Assert.Equal(history, ReadSyntheticDatabase("history.db"));
+    }
+
+    [Fact]
+    public async Task ProviderShutdownWaitsForAcceptedRevokeTransactionBeforeDisposingItsConnection()
+    {
+        await Login();
+        var imported = (await (await client.PostAsJsonAsync("/api/imports/commit", new { source = "synthetic-stop",
+            timeZoneId = "UTC", csv = ProviderCsvHeader + "Synthetic,1,1,0.1,display,2026-01-01 00:00:00" }))
+            .Content.ReadFromJsonAsync<V2rayNMonitor.Core.ImportPreview>())!;
+        var preview = (await (await client.PostAsJsonAsync("/api/imports/revoke-preview",
+            new { source = "synthetic-stop", hash = imported.Hash }))
+            .Content.ReadFromJsonAsync<V2rayNMonitor.Core.ProviderRevokePreview>())!;
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var provider = (V2rayNMonitor.Core.ProviderImports)typeof(MonitorServer).GetField("imports", flags)!.GetValue(server)!;
+        var db = (Microsoft.Data.Sqlite.SqliteConnection)typeof(V2rayNMonitor.Core.ProviderImports).GetField("db", flags)!.GetValue(provider)!;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        db.CreateFunction("synthetic_pause_revoke", () => { entered.TrySetResult(); release.Wait(); return 1; });
+        using (var command = db.CreateCommand())
+        {
+            command.CommandText = "CREATE TRIGGER synthetic_pause BEFORE DELETE ON import_batches BEGIN SELECT synthetic_pause_revoke(); END;";
+            command.ExecuteNonQuery();
+        }
+        var pending = client.PostAsJsonAsync("/api/imports/revoke",
+            new { source = "synthetic-stop", hash = imported.Hash, token = preview.Token });
+        Task? shutdown = null;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var stopping = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = server.Stopping.Register(() => stopping.TrySetResult());
+            shutdown = server.DisposeAsync().AsTask();
+            await stopping.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(shutdown.IsCompleted);
+        }
+        finally { release.Set(); }
+        Assert.Equal(HttpStatusCode.OK, (await pending).StatusCode);
+        await shutdown!.WaitAsync(TimeSpan.FromSeconds(10));
+        using (var saved = new V2rayNMonitor.Core.ProviderImports(Path.Combine(root, "provider.db")))
+            Assert.Empty(saved.List());
+        // Restore the fixture lifecycle so its standard cleanup owns one live server.
+        client.Dispose();
+        server = await MonitorServer.StartAsync(root, Path.Combine(root, "web"));
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+    }
+
     public async Task DisposeAsync() { client.Dispose(); await server.DisposeAsync(); Directory.Delete(root, true); }
 }
