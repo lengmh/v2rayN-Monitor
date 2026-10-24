@@ -879,12 +879,14 @@ test('core installation is an explicit authenticated action and remains pending 
   assert.ok(get('core-action-result').textContent.includes('原生确认窗口'));
   assert.ok(!get('core-action-result').textContent.includes('已替换'));
   submit('settings-form'); assert.equal(calls.filter(c => c.path === '/api/settings' && c.body).length, 0);
-  resolve(Response.json({ state: 'InstalledPendingReload', operationId: '11111111-2222-3333-4444-555555555555', backupDirectory: 'Synthetic <img src=x>' }));
+  resolve(Response.json({ state: 'InstalledPendingReload', operationId: '11111111-2222-3333-4444-555555555555',
+    backupDirectory: 'Synthetic <img src=x>', details: '临时文件未完全清理：Synthetic <img src=x>' }));
   await until(() => get('core-action-result').textContent.includes('核心文件已替换'));
   assert.ok(get('core-action-result').textContent.includes('手动重载'));
   assert.ok(!get('core-action-result').textContent.includes('已生效'));
   assert.equal(get('v2rayn-path').disabled, false); assert.equal(get('save-settings').disabled, false);
   assert.ok(get('core-action-record').textContent.includes('Synthetic <img src=x>'));
+  assert.ok(get('core-action-record').textContent.includes('临时文件未完全清理'));
   assert.equal(get('core-action-record').querySelector('img'), null);
   const outcome = get('core-action-result').textContent, record = get('core-action-record').textContent;
   const reads = calls.filter(c => c.path === '/api/status').length;
@@ -1000,12 +1002,14 @@ test('sidecar uses only fixed payloads and retains a Host plan only for explicit
     assert.equal(get('apply-core-sidecar').disabled, label === '统计配置已写入');
   }
   assert.equal(get('apply-core-sidecar').disabled, true);
-  get('prepare-core-sidecar').click(); await until(() => !get('restore-core-sidecar').disabled);
+  assert.equal(get('restore-core-sidecar').disabled, false);
+  const preparations = calls.filter(c => c.path === '/api/core-actions' && c.body.action === 'prepare-sidecar').length;
   get('core-restore-operation').value = '11111111-2222-3333-4444-555555555555';
   get('restore-core-sidecar').click(); await until(() => get('core-sidecar-result').textContent.includes('统计配置已恢复'));
   assert.deepEqual(calls.filter(c => c.path === '/api/core-actions').at(-1).body,
-    { action: 'restore-sidecar', componentId: 'sing-box-statistics', planId: sidecarPlan, operationId: sidecarPlan });
-  assert.equal(get('restore-core-sidecar').disabled, true);
+    { action: 'restore-sidecar', componentId: 'sing-box-statistics', operationId: sidecarPlan });
+  assert.equal(calls.filter(c => c.path === '/api/core-actions' && c.body.action === 'prepare-sidecar').length, preparations);
+  assert.equal(get('restore-core-sidecar').disabled, false);
   assert.equal(get('core-action-record').textContent, recovery);
   assert.ok(get('core-action-result').textContent.includes('需要恢复处理'));
 });

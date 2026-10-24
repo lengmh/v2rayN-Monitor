@@ -2465,6 +2465,52 @@ public sealed class ActiveConfigurationTests : IDisposable
             CoreCapabilityInspector.InspectAsync(f.Observation, [f.Component], new CancellationToken(true)));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ComponentActionReleasesItsVerifiedDownloadAfterCancelOrInstall(bool approve, bool extraFile)
+    {
+        var f = Installation();
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "binConfigs"));
+        var archive = ComponentZip((f.Component.FileName, SyntheticCoreBytes, 0),
+            ("LICENSE.txt", SyntheticLicenseBytes, 0));
+        var asset = new CoreComponentAsset(ComponentRelease, archive.Length, ComponentDigest(archive),
+            [new(f.Component.FileName, SyntheticCoreBytes.Length, ComponentDigest(SyntheticCoreBytes)),
+             new("LICENSE.txt", SyntheticLicenseBytes.Length, ComponentDigest(SyntheticLicenseBytes))]);
+        string? stage = null;
+        var service = new CoreComponentActions([f.Component], _ => f.Observation,
+            (_, _) =>
+            {
+                if (extraFile) File.WriteAllText(Path.Combine(stage!, "unrelated.txt"), "Synthetic unowned sentinel");
+                return Task.FromResult(approve);
+            }, async (_, path, _, token) =>
+            {
+                var prepared = await PrepareComponent(asset, new(_ => ComponentResponse(archive)), path,
+                    token, component: f.Component);
+                Assert.Equal(CorePreparationState.DownloadVerified, prepared.State);
+                stage = prepared.StagingDirectory;
+                return prepared;
+            });
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), CancellationToken.None);
+        Assert.Equal(approve ? "InstalledPendingReload" : "Cancelled", result.State);
+        Assert.NotNull(stage);
+        Assert.Equal(extraFile, Directory.Exists(stage));
+        if (extraFile)
+        {
+            Assert.Equal("Synthetic unowned sentinel", File.ReadAllText(Path.Combine(stage!, "unrelated.txt")));
+            Assert.Equal(new[] { Path.Combine(stage!, "unrelated.txt") }, Directory.GetFiles(stage!));
+            Assert.Contains(stage!, result.Details);
+        }
+        else Assert.Null(result.Details);
+        Assert.Equal(approve ? SyntheticCoreBytes : ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        if (approve)
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(
+                f.Backup(Guid.ParseExact(result.OperationId!, "N")), "previous.exe")));
+        f.Preserved();
+    }
+
     private static CoreComponentActions ComponentActions(InstallFixture fixture,
         Func<CoreActionPrompt, CancellationToken, Task<bool>> confirmation,
         CorePreparationState preparation = CorePreparationState.DownloadVerified)
@@ -2723,7 +2769,7 @@ public sealed class ActiveConfigurationTests : IDisposable
     }
 
     [Fact]
-    public async Task SidecarActionRetainsRunningPlanThenRequiresFreshConfirmationForWriteAndRestore()
+    public async Task SidecarActionRetainsRunningWritePlanAndRestoresByOperationWithFreshConfirmation()
     {
         var f = SidecarInstallation(existing: false);
         File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
@@ -2749,16 +2795,106 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.True(File.Exists(f.Target));
         Assert.Equal("PlanChanged", (await service.ExecuteAsync(f.Files.DataRoot,
             new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None)).State);
-        f.Files.Running();
-        var restorePlan = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
-        Assert.Equal("SidecarAlreadyMatched", restorePlan.State);
-        f.Files.Stopped();
         var restored = await service.ExecuteAsync(f.Files.DataRoot,
-            new("restore-sidecar", "sing-box-statistics", installed.OperationId, restorePlan.PlanId), CancellationToken.None);
+            new("restore-sidecar", "sing-box-statistics", installed.OperationId), CancellationToken.None);
         Assert.Equal("SidecarRestored", restored.State);
         Assert.False(File.Exists(f.Target));
         Assert.Equal(2, prompts.Count);
         Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Files.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SidecarActionRestoresAfterFailedReloadInANewHostWithoutARunningPlan(bool existing)
+    {
+        var f = SidecarInstallation(existing);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (_, _) => Task.FromResult(true),
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Sidecar must not download"),
+            (_, _, _) => DiscoverSidecar(f));
+        var prepared = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
+        f.Files.Stopped();
+        var installed = await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None);
+        Assert.Equal("SidecarInstalledPendingReload", installed.State);
+        CoreActionPrompt? prompt = null;
+        var restarted = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (shown, _) => { prompt = shown; return Task.FromResult(true); },
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Restore must not download"),
+            (_, _, _) => throw new Xunit.Sdk.XunitException("Restore must not need a running core"));
+        var restored = await restarted.ExecuteAsync(f.Files.DataRoot,
+            new("restore-sidecar", "sing-box-statistics", installed.OperationId), CancellationToken.None);
+        Assert.Equal("SidecarRestored", restored.State);
+        Assert.Contains(installed.OperationId!, prompt!.Message);
+        Assert.Contains(installed.BackupDirectory!, prompt.Message);
+        if (existing) Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+        else Assert.False(File.Exists(f.Target));
+        Assert.True(Directory.Exists(installed.BackupDirectory));
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Files.Target));
+    }
+
+    [Theory]
+    [InlineData("running", "CoreRunning")]
+    [InlineData("core-changed", "InvalidCandidate")]
+    [InlineData("target-changed", "PlanChanged")]
+    [InlineData("same-bytes-replaced", "PlanChanged")]
+    [InlineData("backup-changed", "PlanChanged")]
+    [InlineData("journal-after-consent", "PlanChanged")]
+    [InlineData("cancel", "Cancelled")]
+    public async Task SidecarOperationRestoreKeepsIdentityBackupAndConsentGuards(string change, string expected)
+    {
+        if (change == "same-bytes-replaced" && !OperatingSystem.IsWindows()) return;
+        var f = SidecarInstallation();
+        var installer = f.Installer();
+        var installed = await installer.InstallAsync(await SidecarReady(f, installer), CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var operation = installed.OperationId!.Value;
+        var backup = Path.Combine(f.Files.Backup(operation), "previous.json");
+        if (change == "running") f.Files.Running();
+        if (change == "core-changed") File.AppendAllText(f.Files.Target, "changed");
+        if (change == "target-changed") File.AppendAllText(f.Target, " ");
+        if (change == "same-bytes-replaced")
+        {
+            var bytes = File.ReadAllBytes(f.Target);
+            File.Move(f.Target, f.Target + ".previous-entry");
+            File.WriteAllBytes(f.Target, bytes);
+        }
+        if (change == "backup-changed") File.AppendAllText(backup, "changed");
+        var originalTarget = File.ReadAllBytes(f.Target);
+        var originalBackup = File.ReadAllBytes(backup);
+        var untouched = new[]
+        {
+            f.Files.ClientPath, f.Files.Target, f.Files.Candidate,
+            Path.Combine(f.Files.Root, "monitor", "history.db"),
+            Path.Combine(f.Files.Root, "monitor", "provider.db"),
+            Path.Combine(f.Files.Root, "monitor", "settings.json"),
+            Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"),
+            Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNConfig.json"),
+            Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNDB.db")
+        }.ToDictionary(path => path, File.ReadAllBytes);
+        var confirmations = 0;
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation, (_, _) =>
+        {
+            confirmations++;
+            if (change == "journal-after-consent")
+            {
+                var path = Path.Combine(f.Files.Backup(operation), "install.json");
+                var journal = JsonSerializer.Deserialize<CoreInstallJournal>(File.ReadAllText(path))!;
+                File.WriteAllText(path, JsonSerializer.Serialize(journal with { State = "ChangedAfterConsent" }));
+            }
+            return Task.FromResult(change != "cancel");
+        }, (_, _, _, _) => throw new Xunit.Sdk.XunitException("Restore must not download"),
+            (_, _, _) => throw new Xunit.Sdk.XunitException("Restore must not invent a running baseline"));
+        var result = await service.ExecuteAsync(f.Files.DataRoot,
+            new("restore-sidecar", "sing-box-statistics", operation.ToString("N")), CancellationToken.None);
+        Assert.Equal(expected, result.State);
+        Assert.Equal(change is "cancel" or "journal-after-consent" ? 1 : 0, confirmations);
+        Assert.Equal(originalTarget, File.ReadAllBytes(f.Target));
+        Assert.Equal(originalBackup, File.ReadAllBytes(backup));
+        foreach (var (path, bytes) in untouched) Assert.Equal(bytes, File.ReadAllBytes(path));
     }
 
     [Fact]
