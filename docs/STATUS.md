@@ -2,6 +2,18 @@
 
 本文证据路径使用通用占位符：`<evidence-root>` 为本机证据根目录，`<monitor-data>` 为正式 Monitor 数据目录。此处仅对历史路径脱敏，保留原测试结论与提交身份，不表示在这些占位路径重新执行过验证。
 
+## 2026-10-24：G5 父 PR 修复纳入与子分支同步
+
+从子分支 `3c77110` 推进G5。先刷新远端：main 仍为 `cf2226e`，PR35 为 `1425c74`，PR38 为 `3c77110`，均保留原父子关系及 Draft 状态；PR33 只读核对，不修改。
+
+- PR35 新提交 **`74903ab36db2e6f85a7b145ed8113e1f96073028`** 仅含 `NativeCoreConfirmation.cs`、`CoreComponentInstaller.cs`、`ActiveConfigurationTests.cs`：49 行新增、2 行删除。三个文件 SHA256 与上一轮已验证候选逐一匹配，未带入 CSV、前端或子分支计划文档。
+- 基于父分支重新制作专用隔离副本，复用已有离线 SDK／NuGet 缓存。安装器／恢复／actions／sidecar 定向 **80/80 通过**，Host Release **零警告零错误**，计划／链接／公开清单检查通过。原生 12 窗口与 E1 用户证据因相应源码一致继续复用，没有再启动实机验收实例或要求用户重做。
+- 子分支用保留历史的 merge **`5663778`** 纳入父提交。merge 前后整个 Git tree 完全相同，父提交已是子分支祖先；同步不是第二次修改产品，也不是合并 PR 到 main。三个安装器文件已从 PR38 相对父分支的差异中消失。
+- PR38 余下产品差异仍是 CSV 批次／撤销与原生确认接入、S3.3 下钻／刷新，以及此前隔离验收修复的时区与分端口会话；连同相关测试和计划记录保留，不反向带入父 PR。
+- 本轮不改 CI 配置、不新增依赖、不重新发布固定组件资产、不部署 Monitor、不操作真实核心／配置／账本或启动项。原 38 项任务状态不变，已验收功能不重开。G5 的父子分支内容整合已落地；main 合并、正式发布和具体实机窗口仍按授权分开。
+
+证据位于 `<evidence-root>/v2rayn-monitor-g5-integration-20261024`：`before.json`、`parent-update.json`、`child-synchronization.json`、`parent-installer-tests.log`、`parent-host-build.log`；精确 CI／最终远端回读归档到同目录。没有沿用上一轮 HEAD 的 CI 充当本轮结果。
+
 ## 2026-10-24：验收逐项去重、安装器长路径修复与父 PR 准备
 
 从 `99343b9` 按用户要求复核全部 20 个未完成条目，并回读原始结果及限定的用户回执。当前排期统一见 [验收去重清单](acceptance-reconciliation.md)；下方历史“待验”不再直接复制为新窗口。
