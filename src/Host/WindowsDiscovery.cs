@@ -40,10 +40,32 @@ public sealed class WindowsDiscovery : IDisposable
     private string? verifiedExtension;
     private string? verifiedXrayExtension;
     private bool verifiedXrayProbes;
+    private string? verifiedSingboxHash;
+    private XraySnapshot? runtimeSnapshot;
 
     // The single collection loop calls this only after Ledger.Accept/RecordGap commits.
     public void AcknowledgePersistence() => guard.AcknowledgePersistence();
     public bool RequiresBaseline => guard.RequiresBaseline;
+
+    internal async Task<CoreRuntimeVerification> VerifyRuntimeAsync(string dataRoot, string componentId, CancellationToken token)
+    {
+        runtimeSnapshot = null;
+        var reading = await ReadScopesAsync(dataRoot, token, includeProbes: true).ConfigureAwait(false);
+        return RuntimeResult(componentId, runtimeSnapshot, verifiedSingboxHash, reading);
+    }
+
+    internal static CoreRuntimeVerification RuntimeResult(string componentId, XraySnapshot? snapshot,
+        string? singboxHash, ScopeCollectorReading reading)
+    {
+        var available = reading.Batch is not null && snapshot is not null;
+        var expected = componentId == "sing-box-statistics" ? "sing-box" : "Xray";
+        var identity = available && snapshot!.CoreName == expected &&
+            (expected == "sing-box" ? singboxHash == ApprovedProbeSingboxSha256 : snapshot.XrayProbeExtensionVerified);
+        return new(!available ? reading.State : snapshot!.CoreName != expected ? "different_core" :
+            !identity ? "unverified_core" : "verified", snapshot?.CoreName, identity, available,
+            reading.Batch?.Readings.Count(x => x.Scope.Basis is "actual_member" or "legacy_proxy") ?? 0,
+            reading.Probes?.State ?? "unavailable", DateTimeOffset.UtcNow);
+    }
 
     public async Task<CollectorReading> ReadAsync(string dataRoot, CancellationToken cancellationToken)
     {
@@ -236,6 +258,7 @@ public sealed class WindowsDiscovery : IDisposable
             if (includeProbes) probeStatus = new(true, "unsupported", "当前 Xray 路径未接入内部探测计量；业务采集继续。");
         }
         else return new(null, "missing_counters", "proxy 计数不可用。", after.Snapshot.NodeName, guard.RequiresBaseline);
+        runtimeSnapshot = after.Snapshot;
         return new(batch, state, after.Snapshot.CoreName == "sing-box"
             ? "按独立代理成员记账；业务汇总、直连和未知归属分别保存，不相加。"
             : after.Snapshot.SelectedPolicyGroup || after.XrayOutbounds is not null
@@ -367,6 +390,7 @@ public sealed class WindowsDiscovery : IDisposable
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
         if (!IsApprovedExtension(hash, memberMode) || Stamp(core.ExecutablePath) != stamp)
             throw Fail("unsupported_core", "sing-box 扩展与此预览已核实的构建不一致；当前流量保持未知。");
+        verifiedSingboxHash = hash;
         verifiedExtension = identity;
     }
 
@@ -603,7 +627,7 @@ public sealed class WindowsDiscovery : IDisposable
     }
 
     [SupportedOSPlatform("windows")]
-    private static List<ProcessInfo> ReadProcesses()
+    internal static List<ProcessInfo> ReadProcesses()
     {
         var result = new List<ProcessInfo>();
         using var query = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, CreationDate, ExecutablePath, CommandLine, Name FROM Win32_Process WHERE Name = 'v2rayN.exe' OR Name = 'xray.exe' OR Name = 'sing-box.exe' OR Name = 'sing-box-client.exe'");
@@ -626,7 +650,7 @@ public sealed class WindowsDiscovery : IDisposable
         return result;
     }
 
-    private static string[]? ReadArguments(string commandLine)
+    internal static string[]? ReadArguments(string commandLine)
     {
         if (string.IsNullOrWhiteSpace(commandLine) || commandLine.Contains('\0')) return null;
         var argv = CommandLineToArgvW(commandLine, out var count);

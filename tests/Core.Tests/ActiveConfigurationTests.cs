@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.IO.Compression;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,6 +17,7 @@ namespace Core.Tests;
 public sealed class ActiveConfigurationTests : IDisposable
 {
     private readonly string directory = Path.Combine(Path.GetTempPath(), "active-config-synthetic-" + Guid.NewGuid().ToString("N"));
+    private readonly List<string> componentStages = [];
     private static readonly DateTimeOffset Start = new(2026, 10, 10, 12, 0, 0, TimeSpan.Zero);
     private string Profiles => Path.Combine(directory, "profiles.db");
     private string History => Path.Combine(directory, "history.db");
@@ -809,6 +812,105 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.Equal("missing_counter", result.Members.UnavailableMembers["missing"]);
     }
 
+    private static string PreparationConfiguration => MemberConfiguration.Replace("\"password\":", "\"server_port\":443,\"password\":", StringComparison.Ordinal);
+
+    [Fact]
+    public void CapabilityPreparationUsesOnlyIndependentMembersAndDoesNotExposeCredentials()
+    {
+        var config = PreparationConfiguration;
+        var result = CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(config), Bytes(config), null, "127.0.0.1:10814");
+        Assert.Equal(SidecarPreparationState.Prepared, result.State);
+        Assert.True(SingboxParser.TryReadMemberStatisticsSettings(Bytes(result.Plan!.Json), out _, out var members));
+        Assert.Equal(new[] { "other", "proxy" }, members);
+        Assert.DoesNotContain("Synthetic-Credential", JsonSerializer.Serialize(result));
+        Assert.DoesNotContain("node.synthetic.invalid", JsonSerializer.Serialize(result));
+        Assert.True(CoreCapabilityPreparation.IsCurrent(result.Plan, MemberSnapshot(config), Bytes(config), null));
+    }
+
+    [Theory]
+    [InlineData("0.0.0.0:10814")]
+    [InlineData("localhost:10814")]
+    [InlineData("127.0.0.1:0")]
+    [InlineData("127.0.0.1:10814/path")]
+    public void CapabilityPreparationRejectsNonNumericOrNonLoopbackEndpoint(string listen)
+    {
+        var config = PreparationConfiguration;
+        var result = CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(config), Bytes(config), null, listen);
+        Assert.Equal(SidecarPreparationState.InvalidEndpoint, result.State);
+        Assert.Null(result.Plan);
+    }
+
+    [Theory]
+    [InlineData("{\"listen\":\"127.0.0.1:10814\",\"future\":{\"keep\":true}}")]
+    [InlineData("{\"listen\":\"127.0.0.1:10814\",\"listen\":\"127.0.0.1:10815\"}")]
+    [InlineData("")]
+    [InlineData("[]")]
+    public void CapabilityPreparationPreservesUnsupportedExistingBytes(string text)
+    {
+        var previous = Bytes(text);
+        var config = PreparationConfiguration;
+        var result = CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(config), Bytes(config), previous, "127.0.0.1:10814");
+        Assert.Equal(SidecarPreparationState.UnsupportedExistingSidecar, result.State);
+        Assert.Null(result.Plan);
+        Assert.Equal(Bytes(text), previous);
+    }
+
+    [Fact]
+    public void CapabilityPreparationDistinguishesConfirmationFromSemanticNoOp()
+    {
+        var config = PreparationConfiguration;
+        var snapshot = MemberSnapshot(config);
+        var old = Bytes("{\"listen\":\"127.0.0.1:10814\"}");
+        var change = CoreCapabilityPreparation.PrepareSidecar(snapshot, Bytes(config), old, "127.0.0.1:10814");
+        Assert.Equal(SidecarPreparationState.ConfirmationRequired, change.State);
+        var same = Bytes("{\"monitor_members\":[\"proxy\",\"other\"], \"listen\":\"127.0.0.1:10814\"}");
+        Assert.Equal(SidecarPreparationState.AlreadyMatched,
+            CoreCapabilityPreparation.PrepareSidecar(snapshot, Bytes(config), same, "127.0.0.1:10814").State);
+        Assert.Equal(SidecarPreparationState.ConfirmationRequired,
+            CoreCapabilityPreparation.PrepareSidecar(snapshot, Bytes(config), same, "[::1]:10814").State);
+        Assert.True(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config), old));
+        Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config), null));
+        Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config), same));
+        Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, snapshot, Bytes(config + " "), old));
+        foreach (var altered in new[] { snapshot with { InstanceId = "other" }, snapshot with { NodeId = "B" },
+            snapshot with { ProcessIdentity = "restarted" }, snapshot with { Generation = "changed" }, snapshot with { CoreName = "Xray" } })
+            Assert.False(CoreCapabilityPreparation.IsCurrent(change.Plan!, altered, Bytes(config), old));
+    }
+
+    [Fact]
+    public void CapabilityPreparationRequiresVerifiedAnyTlsAnchorAndMatchingGeneration()
+    {
+        var config = PreparationConfiguration;
+        var snapshot = MemberSnapshot(config);
+        foreach (var altered in new[] { snapshot with { NodeId = "" }, snapshot with { ProcessIdentity = "" },
+            snapshot with { Generation = "changed" }, snapshot with { CoreName = "Xray" } })
+            Assert.Equal(SidecarPreparationState.InvalidConfiguration,
+                CoreCapabilityPreparation.PrepareSidecar(altered, Bytes(config), null, "127.0.0.1:10814").State);
+        Assert.Equal(SidecarPreparationState.InvalidConfiguration,
+            CoreCapabilityPreparation.PrepareSidecar(MemberSnapshot(), Bytes(MemberConfiguration), null, "127.0.0.1:10814").State);
+    }
+
+    [Theory]
+    [InlineData(1, false, "--scope-ledger", 1)]
+    [InlineData(1, true, "--probe-ledger", 2)]
+    [InlineData(2, false, "--scope-ledger", 0)]
+    [InlineData(2, true, "--probe-ledger", 1)]
+    [InlineData(3, false, "--probe-ledger", 0)]
+    [InlineData(3, true, "--probe-ledger", 0)]
+    public void CapabilityPreparationKeepsV3AndOrdersExplicitUpgradeSteps(int version, bool probes, string flag, int count)
+    {
+        var result = CoreCapabilityPreparation.PrepareLedger(version, probes);
+        Assert.Equal(flag, result.StartupFlag);
+        Assert.Equal(count, result.Steps.Count);
+        if (version == 1) Assert.Equal(LedgerUpgradeStep.MultiScope, result.Steps[0]);
+        if (probes && version < 3) Assert.Equal(LedgerUpgradeStep.Probes, result.Steps[^1]);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(4)]
+    public void CapabilityPreparationRejectsUnknownLedgerVersions(int version)
+        => Assert.Throws<ArgumentOutOfRangeException>(() => CoreCapabilityPreparation.PrepareLedger(version, true));
     private const string MemberConfiguration = """
         {"inbounds":[{"type":"mixed","tag":"in"}],"outbounds":[
         {"tag":"proxy","type":"anytls","server":"node.synthetic.invalid","password":"Synthetic-Credential"},
@@ -1689,5 +1791,1643 @@ public sealed class ActiveConfigurationTests : IDisposable
         Assert.NotEqual(command, probes);
     }
 
-    public void Dispose() { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+    private static CoreComponent SyntheticComponent(byte[] bytes) => new("synthetic", "synthetic-1", "synthetic.exe",
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)), SingboxParser.ClientVersion,
+        "win-x64", "synthetic-source", "synthetic-only", bytes.Length);
+
+    [Fact]
+    public void ComponentCatalogReusesApprovedIdentitiesWithoutClaimingDeployment()
+    {
+        Assert.Equal(2, CoreComponents.Catalog.Count);
+        var singbox = Assert.Single(CoreComponents.Catalog, x => x.Id == "sing-box-statistics");
+        Assert.True(WindowsDiscovery.IsApprovedExtension(singbox.Sha256, true));
+        Assert.False(WindowsDiscovery.IsApprovedExtension(singbox.Sha256, false));
+        Assert.Equal(WindowsDiscovery.ApprovedProbeXraySha256,
+            Assert.Single(CoreComponents.Catalog, x => x.Id == "xray-probes").Sha256);
+        Assert.All(CoreComponents.Catalog, x =>
+        {
+            Assert.Equal(SingboxParser.ClientVersion, x.ClientVersion);
+            Assert.Equal("win-x64", x.Runtime);
+            Assert.Null(x.ExpectedBytes); // Release ZIP sizes must not become EXE sizes.
+            Assert.False(string.IsNullOrWhiteSpace(x.Version));
+            Assert.False(string.IsNullOrWhiteSpace(x.License));
+        });
+        Assert.Equal(CoreFileState.UnknownComponent,
+            CoreComponents.Verify("untrusted", directory, SingboxParser.ClientVersion, "win-x64").State);
+    }
+
+    [Fact]
+    public void ComponentFileIdentityMatchIsReadOnlyAndDoesNotRunTheFile()
+    {
+        Directory.CreateDirectory(directory);
+        var content = Bytes("synthetic non-executable core contents");
+        var path = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(path, content);
+        var written = File.GetLastWriteTimeUtc(path);
+        var result = CoreComponents.VerifyFile(SyntheticComponent(content), path, SingboxParser.ClientVersion, "win-x64");
+        Assert.Equal(CoreFileState.IdentityMatched, result.State);
+        Assert.Equal(content.Length, result.ActualBytes);
+        foreach (var component in CoreComponents.Catalog)
+            Assert.Equal(CoreFileState.DigestMismatch,
+                CoreComponents.Verify(component.Id, path, SingboxParser.ClientVersion, "win-x64").State);
+        Assert.Equal(content, File.ReadAllBytes(path));
+        Assert.Equal(written, File.GetLastWriteTimeUtc(path));
+        Assert.Single(Directory.GetFiles(directory));
+    }
+
+    [Theory]
+    [InlineData("truncated", nameof(CoreFileState.SizeMismatch))]
+    [InlineData("extended", nameof(CoreFileState.SizeMismatch))]
+    [InlineData("different-version", nameof(CoreFileState.DigestMismatch))]
+    public void ComponentFileMismatchNeverRepairsOrOverwrites(string mutation, string expected)
+    {
+        Directory.CreateDirectory(directory);
+        var original = Bytes("synthetic-version-1");
+        var changed = mutation switch
+        {
+            "truncated" => original[..^1],
+            "extended" => [.. original, (byte)'!'],
+            _ => Bytes("synthetic-version-2")
+        };
+        var path = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(path, changed);
+        Assert.Equal(expected,
+            CoreComponents.VerifyFile(SyntheticComponent(original), path, SingboxParser.ClientVersion, "win-x64").State.ToString());
+        Assert.Equal(changed, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void ComponentFileWithNoPublishedExeSizeStillRequiresTheExactDigest()
+    {
+        Directory.CreateDirectory(directory);
+        var bytes = Bytes("synthetic");
+        var path = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(path, bytes);
+        var component = SyntheticComponent(bytes) with { ExpectedBytes = null };
+        Assert.Equal(CoreFileState.IdentityMatched,
+            CoreComponents.VerifyFile(component, path, SingboxParser.ClientVersion, "win-x64").State);
+        File.AppendAllText(path, "different-version");
+        Assert.Equal(CoreFileState.DigestMismatch,
+            CoreComponents.VerifyFile(component, path, SingboxParser.ClientVersion, "win-x64").State);
+    }
+
+    [Theory]
+    [InlineData("missing", nameof(CoreFileState.Missing))]
+    [InlineData("client", nameof(CoreFileState.UnsupportedClient))]
+    [InlineData("runtime", nameof(CoreFileState.UnsupportedRuntime))]
+    [InlineData("digest", nameof(CoreFileState.InvalidDescriptor))]
+    [InlineData("size", nameof(CoreFileState.InvalidDescriptor))]
+    public void ComponentUnavailableInputsRemainUnavailableWithoutCreatingFiles(string kind, string expected)
+    {
+        var component = SyntheticComponent(Bytes("synthetic"));
+        if (kind == "digest") component = component with { Sha256 = "not-a-digest" };
+        if (kind == "size") component = component with { ExpectedBytes = 0 };
+        var result = CoreComponents.VerifyFile(component, Path.Combine(directory, "missing.exe"),
+            kind == "client" ? "unknown-client" : SingboxParser.ClientVersion, kind == "runtime" ? "linux-x64" : "win-x64");
+        Assert.Equal(expected, result.State.ToString());
+        Assert.False(Directory.Exists(directory));
+    }
+
+    [Fact]
+    public void ComponentUnreadablePathDoesNotEscapeAsAnUncaughtIoError()
+    {
+        Directory.CreateDirectory(directory);
+        Assert.Equal(CoreFileState.Unreadable,
+            CoreComponents.VerifyFile(SyntheticComponent(Bytes("synthetic")), directory, SingboxParser.ClientVersion, "win-x64").State);
+        Assert.Empty(Directory.GetFiles(directory));
+    }
+
+    private static readonly Uri ComponentRelease = new(
+        "https://github.com/lengmh/v2rayN-Monitor/releases/download/v0.0.0-synthetic/synthetic-win-x64.zip");
+    private static readonly byte[] SyntheticCoreBytes = Bytes("synthetic core version 1; not an executable");
+    private static readonly byte[] SyntheticLicenseBytes = Bytes("Synthetic fixture license only");
+    private static readonly byte[] ExistingCoreBytes = Bytes("previous installed synthetic core");
+    private static readonly DateTime ExistingCoreWritten = new(2020, 1, 2, 3, 4, 6, DateTimeKind.Utc);
+
+    private static string ComponentDigest(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+
+    private static byte[] ComponentZip(params (string Name, byte[] Content, int Attributes)[] files)
+    {
+        using var output = new MemoryStream();
+        using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+            foreach (var file in files)
+            {
+                var entry = archive.CreateEntry(file.Name, CompressionLevel.NoCompression);
+                entry.ExternalAttributes = file.Attributes;
+                using var content = entry.Open();
+                content.Write(file.Content);
+            }
+        return output.ToArray();
+    }
+
+    private static byte[] ValidComponentZip() => ComponentZip(
+        ("synthetic.exe", SyntheticCoreBytes, 0), ("LICENSE.txt", SyntheticLicenseBytes, 0));
+
+    private static CoreComponentAsset ComponentAsset(byte[] archive) => new(ComponentRelease,
+        archive.Length, ComponentDigest(archive),
+        [
+            new("synthetic.exe", SyntheticCoreBytes.Length, ComponentDigest(SyntheticCoreBytes)),
+            new("LICENSE.txt", SyntheticLicenseBytes.Length, ComponentDigest(SyntheticLicenseBytes))
+        ]);
+
+    private string ExistingComponent()
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "installed-synthetic.exe");
+        File.WriteAllBytes(path, ExistingCoreBytes);
+        File.SetLastWriteTimeUtc(path, ExistingCoreWritten);
+        return path;
+    }
+
+    private void AssertExistingComponentUnchanged(string path)
+    {
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(path));
+        Assert.Equal(ExistingCoreWritten, File.GetLastWriteTimeUtc(path));
+        Assert.Equal(new[] { path }, Directory.GetFiles(directory));
+        Assert.Empty(Directory.GetDirectories(directory));
+    }
+
+    private async Task<CorePreparation> PrepareComponent(CoreComponentAsset? asset,
+        ComponentDownloadHandler handler, string? existingFile = null, CancellationToken token = default,
+        TimeSpan? timeout = null, CoreComponent? component = null)
+    {
+        var result = await CoreComponentDownloads.PrepareAsync(component ?? SyntheticComponent(SyntheticCoreBytes),
+            asset, existingFile, SingboxParser.ClientVersion, "win-x64", handler, token, timeout);
+        if (result.StagingDirectory is { } stage) componentStages.Add(stage);
+        return result;
+    }
+
+    private void AssertComponentFailure(CorePreparation result, CorePreparationState state, string existingFile)
+    {
+        Assert.Equal(state, result.State);
+        Assert.Null(result.FilePath);
+        Assert.Null(result.StagingDirectory);
+        AssertExistingComponentUnchanged(existingFile);
+    }
+
+    private static HttpResponseMessage ComponentResponse(byte[] bytes) => new(HttpStatusCode.OK)
+    {
+        Content = new ByteArrayContent(bytes)
+    };
+
+    private sealed class ComponentDownloadHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
+    {
+        internal List<Uri> Requests { get; } = [];
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.Null(request.Headers.Authorization);
+            Assert.Null(request.Headers.Referrer);
+            Assert.False(request.Headers.Contains("Cookie"));
+            Assert.False(request.Headers.Contains("Proxy-Authorization"));
+            Assert.Null(request.Content);
+            Requests.Add(request.RequestUri!);
+            return Task.FromResult(send(request));
+        }
+    }
+
+    // Non-seekable bodies avoid StreamContent synthesizing a Content-Length header.
+    private sealed class ComponentBodyStream(byte[] bytes, int chunkSize = 65536, bool knownLength = false) : Stream
+    {
+        internal int BytesRead { get; private set; }
+        internal Func<CancellationToken, Task>? BeforeRead { get; init; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => knownLength ? bytes.Length : throw new NotSupportedException();
+        public override long Position { get => BytesRead; set => throw new NotSupportedException(); }
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (BeforeRead is not null) await BeforeRead(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var count = Math.Min(Math.Min(buffer.Length, chunkSize), bytes.Length - BytesRead);
+            bytes.AsMemory(BytesRead, count).CopyTo(buffer);
+            BytesRead += count;
+            return count;
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task ComponentDownloadProductionCatalogPinsIndependentPublishedAssets()
+    {
+        var existing = ExistingComponent();
+        foreach (var component in CoreComponents.Catalog)
+        {
+            var asset = Assert.IsType<CoreComponentAsset>(CoreComponentDownloads.PublishedAsset(component.Id));
+            Assert.StartsWith("https://github.com/lengmh/v2rayN-Monitor/releases/download/v0.2.0-preview.2-components.1/", asset.Url.AbsoluteUri);
+            Assert.Equal(component.Id == "sing-box-statistics" ? 13 : 10, asset.Files.Count);
+            Assert.Equal(component.Sha256, asset.Files.Single(x => x.Name == component.FileName).Sha256, ignoreCase: true);
+            Assert.Contains(asset.Files, x => x.Name == "LICENSE");
+            Assert.Contains(asset.Files, x => x.Name.EndsWith("-fixed-source.tar.gz", StringComparison.Ordinal));
+            if (component.Id == "sing-box-statistics") Assert.Contains(asset.Files, x => x.Name == "COPYING" && x.Bytes == 35149);
+            using var handler = new ComponentDownloadHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+            AssertComponentFailure(await PrepareComponent(asset, handler, existing, component: component),
+                CorePreparationState.DownloadFailed, existing);
+            Assert.Equal(asset.Url, Assert.Single(handler.Requests));
+        }
+        var unknown = await CoreComponentDownloads.PrepareAsync("unknown-synthetic-component", existing,
+            SingboxParser.ClientVersion, "win-x64", CancellationToken.None);
+        Assert.Equal(CorePreparationState.UnknownComponent, unknown.State);
+        Assert.Null(unknown.FilePath);
+        AssertExistingComponentUnchanged(existing);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadReusesExactExistingFileWithoutNetworkOrWrites(bool assetAvailable)
+    {
+        Directory.CreateDirectory(directory);
+        var existing = Path.Combine(directory, "synthetic.exe");
+        File.WriteAllBytes(existing, SyntheticCoreBytes);
+        File.SetLastWriteTimeUtc(existing, ExistingCoreWritten);
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        var result = await PrepareComponent(assetAvailable ? ComponentAsset(ValidComponentZip()) : null, handler, existing);
+        Assert.Equal(CorePreparationState.ExistingFileMatched, result.State);
+        Assert.Equal(CoreFileState.IdentityMatched, result.FileState);
+        Assert.Equal(existing, result.FilePath);
+        Assert.Null(result.StagingDirectory);
+        Assert.Empty(handler.Requests);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(existing));
+        Assert.Equal(ExistingCoreWritten, File.GetLastWriteTimeUtc(existing));
+        Assert.Equal(new[] { existing }, Directory.GetFiles(directory));
+    }
+
+    [Theory]
+    [InlineData("client", nameof(CoreFileState.UnsupportedClient))]
+    [InlineData("runtime", nameof(CoreFileState.UnsupportedRuntime))]
+    [InlineData("version", nameof(CoreFileState.InvalidDescriptor))]
+    [InlineData("digest", nameof(CoreFileState.InvalidDescriptor))]
+    public async Task ComponentDownloadRejectsUnsupportedTargetsBeforeNetwork(string kind, string fileState)
+    {
+        var existing = ExistingComponent();
+        var component = SyntheticComponent(SyntheticCoreBytes);
+        if (kind == "version") component = component with { Version = "" };
+        if (kind == "digest") component = component with { Sha256 = "untrusted" };
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        var result = await CoreComponentDownloads.PrepareAsync(component, ComponentAsset(ValidComponentZip()),
+            existing, kind == "client" ? "unknown-client" : SingboxParser.ClientVersion,
+            kind == "runtime" ? "linux-x64" : "win-x64", handler, CancellationToken.None);
+        AssertComponentFailure(result, kind is "client" or "runtime"
+            ? CorePreparationState.UnsupportedTarget : CorePreparationState.InvalidDescriptor, existing);
+        Assert.Equal(fileState, result.FileState.ToString());
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadVerifiesFlatAllowlistAndUsesFreshUnauthenticatedRedirectRequests(bool redirect)
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        var cdn = new Uri("https://release-assets.githubusercontent.com/synthetic/asset?signature=synthetic-only");
+        using var handler = new ComponentDownloadHandler(request =>
+        {
+            if (redirect && request.RequestUri == ComponentRelease)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.Found);
+                response.Headers.Location = cdn;
+                response.Headers.TryAddWithoutValidation("Set-Cookie", "synthetic=must-not-be-forwarded; Secure");
+                return response;
+            }
+            return ComponentResponse(archive);
+        });
+        var result = await PrepareComponent(ComponentAsset(archive), handler, existing);
+        Assert.Equal(CorePreparationState.DownloadVerified, result.State);
+        Assert.NotNull(result.StagingDirectory);
+        Assert.Equal(Path.Combine(result.StagingDirectory!, "synthetic.exe"), result.FilePath);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(result.FilePath!));
+        Assert.Equal(SyntheticLicenseBytes, File.ReadAllBytes(Path.Combine(result.StagingDirectory!, "LICENSE.txt")));
+        Assert.Equal(new[] { "LICENSE.txt", "synthetic.exe" },
+            Directory.GetFiles(result.StagingDirectory!).Select(Path.GetFileName).OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Empty(Directory.GetDirectories(result.StagingDirectory!));
+        Assert.Equal(redirect ? new[] { ComponentRelease, cdn } : [ComponentRelease], handler.Requests);
+        AssertExistingComponentUnchanged(existing);
+    }
+
+    [Theory]
+    [InlineData("http://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com/other/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/latest/download/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/latest/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/nested/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.exe")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip?token=synthetic")]
+    [InlineData("https://synthetic:secret@github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com:444/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip#fragment")]
+    [InlineData("https://github.com.synthetic.invalid/lengmh/v2rayN-Monitor/releases/download/v1/asset.zip")]
+    public async Task ComponentDownloadRejectsNonFixedReleaseSourcesBeforeNetwork(string url)
+    {
+        var existing = ExistingComponent();
+        var asset = ComponentAsset(ValidComponentZip()) with { Url = new Uri(url) };
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        AssertComponentFailure(await PrepareComponent(asset, handler, existing),
+            CorePreparationState.InvalidDescriptor, existing);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("outer-digest")]
+    [InlineData("outer-size")]
+    [InlineData("outer-cap")]
+    [InlineData("no-files")]
+    [InlineData("duplicate-name")]
+    [InlineData("reserved-partial")]
+    [InlineData("nested-allowlist")]
+    [InlineData("file-digest")]
+    [InlineData("file-size")]
+    [InlineData("component-digest")]
+    [InlineData("component-size")]
+    public async Task ComponentDownloadRejectsInvalidAssetIdentitiesBeforeNetwork(string kind)
+    {
+        var existing = ExistingComponent();
+        var asset = ComponentAsset(ValidComponentZip());
+        var files = asset.Files.ToArray();
+        asset = kind switch
+        {
+            "outer-digest" => asset with { Sha256 = "not-a-digest" },
+            "outer-size" => asset with { Bytes = 0 },
+            "outer-cap" => asset with { Bytes = 256L * 1024 * 1024 + 1 },
+            "no-files" => asset with { Files = [] },
+            "duplicate-name" => asset with { Files = [.. files, files[1] with { Name = "license.TXT" }] },
+            "reserved-partial" => asset with { Files = [.. files, files[1] with { Name = "download.partial" }] },
+            "nested-allowlist" => asset with { Files = [files[0], files[1] with { Name = "nested/LICENSE.txt" }] },
+            "file-digest" => asset with { Files = [files[0], files[1] with { Sha256 = "invalid" }] },
+            "file-size" => asset with { Files = [files[0], files[1] with { Bytes = 0 }] },
+            "component-digest" => asset with { Files = [files[0] with { Sha256 = ComponentDigest(Bytes("wrong version")) }, files[1]] },
+            _ => asset with { Files = [files[0] with { Bytes = files[0].Bytes + 1 }, files[1]] }
+        };
+        using var handler = new ComponentDownloadHandler(_ => throw new Xunit.Sdk.XunitException("Network is forbidden."));
+        AssertComponentFailure(await PrepareComponent(asset, handler, existing),
+            CorePreparationState.InvalidDescriptor, existing);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("http://release-assets.githubusercontent.com/synthetic.zip")]
+    [InlineData("https://github.com/lengmh/v2rayN-Monitor/releases/download/v1/other.zip")]
+    [InlineData("https://objects.githubusercontent.com/synthetic.zip")]
+    [InlineData("https://release-assets.githubusercontent.com.synthetic.invalid/synthetic.zip")]
+    [InlineData("https://synthetic:secret@release-assets.githubusercontent.com/synthetic.zip")]
+    [InlineData("https://release-assets.githubusercontent.com:444/synthetic.zip")]
+    [InlineData("https://release-assets.githubusercontent.com/synthetic.zip#fragment")]
+    [InlineData("/relative-asset.zip")]
+    [InlineData("missing")]
+    [InlineData("loop")]
+    public async Task ComponentDownloadRejectsUntrustedOrUnboundedRedirects(string target)
+    {
+        var existing = ExistingComponent();
+        using var handler = new ComponentDownloadHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Found);
+            if (target != "missing") response.Headers.Location = new Uri(target == "loop"
+                ? "https://release-assets.githubusercontent.com/synthetic.zip" : target, UriKind.RelativeOrAbsolute);
+            return response;
+        });
+        AssertComponentFailure(await PrepareComponent(ComponentAsset(ValidComponentZip()), handler, existing),
+            CorePreparationState.DownloadFailed, existing);
+        Assert.Equal(target == "loop" ? 4 : 1, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("404", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("500", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("partial-response", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("request-error", nameof(CorePreparationState.DownloadFailed))]
+    [InlineData("content-encoding", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("content-length", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("truncated", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("outer-digest", nameof(CorePreparationState.InvalidArchive))]
+    [InlineData("not-a-zip", nameof(CorePreparationState.InvalidArchive))]
+    public async Task ComponentDownloadRejectsHttpAndArchiveCorruptionWithoutTouchingInstallation(string kind, string state)
+    {
+        var existing = ExistingComponent();
+        var archive = kind == "not-a-zip" ? Bytes("synthetic invalid ZIP") : ValidComponentZip();
+        var asset = ComponentAsset(archive);
+        using var handler = new ComponentDownloadHandler(_ =>
+        {
+            if (kind == "request-error") throw new HttpRequestException("Synthetic HTTP failure");
+            var body = kind == "truncated" ? archive[..^1] : archive.ToArray();
+            if (kind == "outer-digest") body[0] ^= 1;
+            var response = ComponentResponse(body);
+            if (kind is "404" or "500") response.StatusCode = (HttpStatusCode)int.Parse(kind, CultureInfo.InvariantCulture);
+            if (kind == "partial-response") response.StatusCode = HttpStatusCode.PartialContent;
+            if (kind == "content-encoding") response.Content.Headers.ContentEncoding.Add("gzip");
+            if (kind == "content-length") response.Content.Headers.ContentLength = archive.Length + 1;
+            if (kind == "truncated") response.Content.Headers.ContentLength = archive.Length;
+            return response;
+        });
+        var result = await PrepareComponent(asset, handler, existing);
+        AssertComponentFailure(result, Enum.Parse<CorePreparationState>(state), existing);
+        Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("extra")]
+    [InlineData("missing")]
+    [InlineData("duplicate")]
+    [InlineData("case-alias")]
+    [InlineData("traversal")]
+    [InlineData("absolute")]
+    [InlineData("installed-absolute")]
+    [InlineData("backslash")]
+    [InlineData("nested")]
+    [InlineData("alternate-stream")]
+    [InlineData("symlink")]
+    [InlineData("reparse-point")]
+    [InlineData("directory")]
+    [InlineData("wrong-version")]
+    [InlineData("short-file")]
+    [InlineData("long-file")]
+    [InlineData("sidecar-digest")]
+    public async Task ComponentDownloadRejectsUnlistedPathsLinksAndWrongFilesEvenWithValidOuterDigest(string kind)
+    {
+        var existing = ExistingComponent();
+        var core = SyntheticCoreBytes.ToArray();
+        if (kind == "wrong-version") core[23] ^= 1; // Same size, different file identity.
+        if (kind == "short-file") core = core[..^1];
+        if (kind == "long-file") core = [.. core, (byte)'!'];
+        var name = kind switch
+        {
+            "traversal" => "../synthetic.exe",
+            "absolute" => "/synthetic.exe",
+            "installed-absolute" => existing,
+            "backslash" => @"..\synthetic.exe",
+            "nested" => "nested/synthetic.exe",
+            "alternate-stream" => "synthetic.exe:stream",
+            _ => "synthetic.exe"
+        };
+        var attributes = kind switch
+        {
+            "symlink" => unchecked((int)0xA1FF0000),
+            "reparse-point" => (int)FileAttributes.ReparsePoint,
+            "directory" => (int)FileAttributes.Directory,
+            _ => 0
+        };
+        var license = SyntheticLicenseBytes.ToArray();
+        if (kind == "sidecar-digest") license[0] ^= 1;
+        var files = new List<(string Name, byte[] Content, int Attributes)> { (name, core, attributes) };
+        if (kind != "missing") files.Add(("LICENSE.txt", license, 0));
+        if (kind == "extra") files.Add(("unlisted.exe", Bytes("synthetic unlisted file"), 0));
+        if (kind == "duplicate") files[1] = files[0];
+        if (kind == "case-alias") files[1] = ("SYNTHETIC.EXE", core, 0);
+        var archive = ComponentZip(files.ToArray());
+        using var handler = new ComponentDownloadHandler(_ => ComponentResponse(archive));
+        AssertComponentFailure(await PrepareComponent(ComponentAsset(archive), handler, existing),
+            CorePreparationState.InvalidArchive, existing);
+        Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadBoundsStreamingBodyWithAbsentOrMisleadingContentLength(bool advertisedLength)
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        var oversized = new byte[archive.Length + 2 * 1024 * 1024];
+        archive.CopyTo(oversized, 0);
+        using var body = new ComponentBodyStream(oversized);
+        using var handler = new ComponentDownloadHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(body) };
+            if (advertisedLength) response.Content.Headers.ContentLength = archive.Length;
+            else Assert.Null(response.Content.Headers.ContentLength);
+            return response;
+        });
+        AssertComponentFailure(await PrepareComponent(ComponentAsset(archive), handler, existing),
+            CorePreparationState.InvalidArchive, existing);
+        Assert.InRange(body.BytesRead, archive.Length + 1, archive.Length + 65536);
+        Assert.True(body.BytesRead < oversized.Length);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentDownloadCancellationAndDeadlineInterruptAnAlreadyStartedBody(bool timeout)
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        using var cancellation = new CancellationTokenSource();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var interrupted = false;
+        ComponentBodyStream? body = null;
+        body = new ComponentBodyStream(archive, chunkSize: 8)
+        {
+            BeforeRead = async token =>
+            {
+                if (body!.BytesRead == 0) return;
+                blocked.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException) { interrupted = true; throw; }
+            }
+        };
+        using var stream = body;
+        using var handler = new ComponentDownloadHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream)
+        });
+        var preparation = PrepareComponent(ComponentAsset(archive), handler, existing, cancellation.Token,
+            timeout ? TimeSpan.FromMilliseconds(500) : TimeSpan.FromSeconds(10));
+        await blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (!timeout) cancellation.Cancel();
+        var result = await preparation.WaitAsync(TimeSpan.FromSeconds(5));
+        AssertComponentFailure(result, timeout ? CorePreparationState.TimedOut : CorePreparationState.Cancelled, existing);
+        Assert.Equal(timeout, !cancellation.IsCancellationRequested);
+        Assert.True(interrupted);
+        Assert.InRange(stream.BytesRead, 1, archive.Length - 1);
+        Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentFileHashCancellationInterruptsAnAlreadyStartedRead(bool timeout)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ComponentBodyStream? stream = null;
+        stream = new ComponentBodyStream(SyntheticCoreBytes, chunkSize: 8, knownLength: true)
+        {
+            BeforeRead = async token =>
+            {
+                if (stream!.BytesRead == 0) return;
+                blocked.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+        };
+        using var input = stream;
+        if (timeout) cancellation.CancelAfter(TimeSpan.FromMilliseconds(500));
+        var verification = CoreComponents.VerifyStreamAsync(SyntheticComponent(SyntheticCoreBytes), input, cancellation.Token);
+        await blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (!timeout) cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => verification.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.InRange(input.BytesRead, 1, SyntheticCoreBytes.Length - 1);
+    }
+
+    [Fact]
+    public async Task ComponentFileAsyncVerificationHonorsCancellationBeforeOpeningTheFile()
+    {
+        var existing = ExistingComponent();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CoreComponents.VerifyFileAsync(
+            SyntheticComponent(SyntheticCoreBytes), existing, SingboxParser.ClientVersion, "win-x64", cancellation.Token));
+        AssertExistingComponentUnchanged(existing);
+    }
+
+    [Fact]
+    public async Task ComponentDownloadRetriesUseIndependentStagingAndDoNotDamageOtherPreparations()
+    {
+        var existing = ExistingComponent();
+        var archive = ValidComponentZip();
+        using (var failedHandler = new ComponentDownloadHandler(_ => ComponentResponse(Bytes("synthetic corrupt download"))))
+            AssertComponentFailure(await PrepareComponent(ComponentAsset(archive), failedHandler, existing),
+                CorePreparationState.InvalidArchive, existing);
+        using var firstHandler = new ComponentDownloadHandler(_ => ComponentResponse(archive));
+        var first = await PrepareComponent(ComponentAsset(archive), firstHandler, existing);
+        Assert.Equal(CorePreparationState.DownloadVerified, first.State);
+        using var retryHandler = new ComponentDownloadHandler(_ => ComponentResponse(archive));
+        var retry = await PrepareComponent(ComponentAsset(archive), retryHandler, existing);
+        Assert.Equal(CorePreparationState.DownloadVerified, retry.State);
+        Assert.NotEqual(first.StagingDirectory, retry.StagingDirectory);
+        Assert.NotEqual(first.FilePath, retry.FilePath);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(first.FilePath!));
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(retry.FilePath!));
+        AssertExistingComponentUnchanged(existing);
+    }
+
+    [Theory]
+    [InlineData("matched", "identity_matched")]
+    [InlineData("missing", "missing")]
+    [InlineData("size", "size_mismatch")]
+    [InlineData("digest", "digest_mismatch")]
+    public async Task CapabilityInspectionReportsFileIdentityWithoutInstallingOrRequiringAStoppedCore(string scenario, string expected)
+    {
+        var f = Installation();
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "binConfigs"));
+        if (scenario == "matched") File.WriteAllBytes(f.Target, SyntheticCoreBytes);
+        if (scenario == "missing") File.Delete(f.Target);
+        if (scenario == "digest")
+        {
+            var changed = SyntheticCoreBytes.ToArray(); changed[0] ^= 1;
+            File.WriteAllBytes(f.Target, changed);
+        }
+        f.Running();
+        var before = Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).ToDictionary(x => x, File.ReadAllBytes);
+        var result = await CoreCapabilityInspector.InspectAsync(f.Observation, [f.Component], CancellationToken.None);
+        Assert.Equal("identified", result.TargetState);
+        var row = Assert.Single(result.Components);
+        Assert.Equal(expected, row.FileState);
+        Assert.Equal("available", row.DownloadState);
+        var json = JsonSerializer.Serialize(result);
+        Assert.DoesNotContain(f.DataRoot, json);
+        Assert.DoesNotContain("synthetic command line", json);
+        Assert.Equal(before.Keys.Order(), Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).Order());
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    [Theory]
+    [InlineData("empty", "not_selected")]
+    [InlineData("multiple", "unknown_target")]
+    [InlineData("incomplete", "unknown_target")]
+    [InlineData("version", "unsupported_target")]
+    public async Task CapabilityInspectionDoesNotGuessUnsupportedOrAmbiguousTargets(string scenario, string expected)
+    {
+        var f = Installation();
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "binConfigs"));
+        var observed = scenario switch
+        {
+            "empty" => f.Observation with { DataRoot = "" },
+            "multiple" => f.Observation with { Processes = [.. f.Observation.Processes, f.Observation.Processes[0] with { Pid = 999 }] },
+            "incomplete" => f.Observation with { Complete = false },
+            _ => f.Observation with { ClientVersion = "unverified" }
+        };
+        var result = await CoreCapabilityInspector.InspectAsync(observed, [f.Component], CancellationToken.None);
+        Assert.Equal(expected, result.TargetState);
+        Assert.Equal("not_checked", Assert.Single(result.Components).FileState);
+    }
+
+    [Fact]
+    public async Task CapabilityInspectionHonorsCancellationBeforeReading()
+    {
+        var f = Installation();
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            CoreCapabilityInspector.InspectAsync(f.Observation, [f.Component], new CancellationToken(true)));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ComponentActionReleasesItsVerifiedDownloadAfterCancelOrInstall(bool approve, bool extraFile)
+    {
+        var f = Installation();
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(f.DataRoot, "binConfigs"));
+        var archive = ComponentZip((f.Component.FileName, SyntheticCoreBytes, 0),
+            ("LICENSE.txt", SyntheticLicenseBytes, 0));
+        var asset = new CoreComponentAsset(ComponentRelease, archive.Length, ComponentDigest(archive),
+            [new(f.Component.FileName, SyntheticCoreBytes.Length, ComponentDigest(SyntheticCoreBytes)),
+             new("LICENSE.txt", SyntheticLicenseBytes.Length, ComponentDigest(SyntheticLicenseBytes))]);
+        string? stage = null;
+        var service = new CoreComponentActions([f.Component], _ => f.Observation,
+            (_, _) =>
+            {
+                if (extraFile) File.WriteAllText(Path.Combine(stage!, "unrelated.txt"), "Synthetic unowned sentinel");
+                return Task.FromResult(approve);
+            }, async (_, path, _, token) =>
+            {
+                var prepared = await PrepareComponent(asset, new(_ => ComponentResponse(archive)), path,
+                    token, component: f.Component);
+                Assert.Equal(CorePreparationState.DownloadVerified, prepared.State);
+                stage = prepared.StagingDirectory;
+                return prepared;
+            });
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), CancellationToken.None);
+        Assert.Equal(approve ? "InstalledPendingReload" : "Cancelled", result.State);
+        Assert.NotNull(stage);
+        Assert.Equal(extraFile, Directory.Exists(stage));
+        if (extraFile)
+        {
+            Assert.Equal("Synthetic unowned sentinel", File.ReadAllText(Path.Combine(stage!, "unrelated.txt")));
+            Assert.Equal(new[] { Path.Combine(stage!, "unrelated.txt") }, Directory.GetFiles(stage!));
+            Assert.Contains(stage!, result.Details);
+        }
+        else Assert.Null(result.Details);
+        Assert.Equal(approve ? SyntheticCoreBytes : ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        if (approve)
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(
+                f.Backup(Guid.ParseExact(result.OperationId!, "N")), "previous.exe")));
+        f.Preserved();
+    }
+
+    private static CoreComponentActions ComponentActions(InstallFixture fixture,
+        Func<CoreActionPrompt, CancellationToken, Task<bool>> confirmation,
+        CorePreparationState preparation = CorePreparationState.DownloadVerified)
+    {
+        Directory.CreateDirectory(Path.Combine(fixture.DataRoot, "guiConfigs"));
+        Directory.CreateDirectory(Path.Combine(fixture.DataRoot, "binConfigs"));
+        return new([fixture.Component], _ => fixture.Observation, confirmation,
+            (_, path, _, _) =>
+            {
+                Assert.Equal(fixture.Target, path);
+                return Task.FromResult(new CorePreparation(preparation, fixture.Candidate));
+            });
+    }
+
+    [Theory]
+    [InlineData("sing-box-statistics")]
+    [InlineData("xray-probes")]
+    public async Task ComponentActionRequiresNativeConfirmationThenInstallsAndRestoresOnlyItsFile(string component)
+    {
+        var f = Installation(component);
+        var prompts = new List<CoreActionPrompt>();
+        var service = ComponentActions(f, (prompt, _) => { prompts.Add(prompt); return Task.FromResult(true); });
+        var installed = await service.ExecuteAsync(f.DataRoot, new("install", component), CancellationToken.None);
+        Assert.Equal("InstalledPendingReload", installed.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Contains(f.Target, Assert.Single(prompts).Message);
+        Assert.Contains(f.Component.Sha256, prompts[0].Message);
+        var operation = Guid.ParseExact(installed.OperationId!, "N");
+        Assert.Equal(f.Backup(operation), installed.BackupDirectory);
+        Assert.Contains(installed.BackupDirectory!, prompts[0].Message);
+        var restored = await service.ExecuteAsync(f.DataRoot, new("restore", component, installed.OperationId), CancellationToken.None);
+        Assert.Equal("Restored", restored.State);
+        Assert.Equal(2, prompts.Count);
+        Assert.Contains(installed.OperationId!, prompts[1].Message);
+        Assert.Contains(ComponentDigest(SyntheticCoreBytes), prompts[1].Message);
+        Assert.Contains(ComponentDigest(ExistingCoreBytes), prompts[1].Message);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("sing-box-statistics", false)]
+    [InlineData("xray-probes", false)]
+    [InlineData("sing-box-statistics", true)]
+    [InlineData("xray-probes", true)]
+    public async Task ComponentInstallAndRestoreKeepIdentityChecksWhenBackupPathExceedsWin32Limit(string component, bool longTarget)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var descriptor = CoreComponents.Catalog.Single(x => x.Id == component);
+        var suffix = Path.Combine("portable", "bin",
+            component == "sing-box-statistics" ? "sing_box" : "xray", descriptor.FileName);
+        var padding = (longTarget ? 280 : 235) - directory.Length - suffix.Length - 2;
+        Assert.InRange(padding, 1, 200);
+        var f = new InstallFixture(Path.Combine(directory, new string('l', padding)), component);
+        Assert.Equal(longTarget, f.Target.Length >= 260);
+        var installer = f.Installer();
+        var plan = await Ready(installer, f);
+        Assert.True(Path.Combine(f.Backup(plan.OperationId), "candidate.exe").Length >= 260);
+
+        var installed = await installer.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(plan.OperationId), "previous.exe")));
+        var restore = await installer.PrepareRestoreAsync(plan.OperationId, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Ready, restore.State);
+        Assert.Equal(CoreInstallState.Restored,
+            (await installer.RestoreAsync(plan.OperationId, CancellationToken.None, restore.Journal)).State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.True(Directory.Exists(f.Backup(plan.OperationId)));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("cancel", "Cancelled")]
+    [InlineData("running", "CoreRunning")]
+    [InlineData("changed", "PlanChanged")]
+    [InlineData("cancel-token", "Cancelled")]
+    public async Task ComponentActionDoesNotWriteWithoutFreshConsentAndStoppedUnchangedTarget(string scenario, string expected)
+    {
+        var f = Installation();
+        using var cancellation = new CancellationTokenSource();
+        if (scenario == "running") f.Running();
+        var prompts = 0;
+        var service = ComponentActions(f, (_, _) =>
+        {
+            prompts++;
+            if (scenario == "changed") File.WriteAllText(f.Target, "changed during confirmation");
+            if (scenario == "cancel-token") cancellation.Cancel();
+            return Task.FromResult(scenario != "cancel");
+        });
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), cancellation.Token);
+        Assert.Equal(expected, result.State);
+        Assert.Equal(scenario == "running" ? 0 : 1, prompts);
+        Assert.Equal(scenario == "changed" ? Bytes("changed during confirmation") : ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-core-backups")));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData(nameof(CorePreparationState.AssetUnavailable))]
+    [InlineData(nameof(CorePreparationState.ExistingFileMatched))]
+    public async Task ComponentActionUnavailableOrMatchedNeedsNoConfirmationOrFileWrites(string state)
+    {
+        var preparation = Enum.Parse<CorePreparationState>(state);
+        var f = Installation();
+        var service = ComponentActions(f, (_, _) => throw new Xunit.Sdk.XunitException("No confirmation expected"), preparation);
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), CancellationToken.None);
+        Assert.Equal(preparation.ToString(), result.State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentActionDoesNotChangeTheConfirmedBackupLocationIfItBecomesOccupied()
+    {
+        var f = Installation();
+        string? backup = null;
+        var service = ComponentActions(f, (prompt, _) =>
+        {
+            backup = prompt.Message.Split('\n').Single(x => x.StartsWith("新备份位置：", StringComparison.Ordinal))["新备份位置：".Length..];
+            Directory.CreateDirectory(backup);
+            File.WriteAllText(Path.Combine(backup, "synthetic-sentinel"), "owned by another operation");
+            return Task.FromResult(true);
+        });
+        var result = await service.ExecuteAsync(f.DataRoot, new("install", f.Component.Id), CancellationToken.None);
+        Assert.Equal("StorageFailed", result.State);
+        Assert.Null(result.OperationId);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(new[] { backup }, Directory.GetDirectories(Path.GetDirectoryName(backup!)!));
+        Assert.Equal("owned by another operation", File.ReadAllText(Path.Combine(backup!, "synthetic-sentinel")));
+    }
+
+    [Fact]
+    public async Task ComponentActionRestoreConfirmationContainsBothFileIdentities()
+    {
+        var f = Installation();
+        var installer = f.Installer();
+        var installed = await installer.InstallAsync(await Ready(installer, f), CancellationToken.None);
+        CoreActionPrompt? shown = null;
+        var service = ComponentActions(f, (prompt, _) => { shown = prompt; return Task.FromResult(false); });
+        Assert.Equal("Cancelled", (await service.ExecuteAsync(f.DataRoot,
+            new("restore", f.Component.Id, installed.OperationId!.Value.ToString("N")), CancellationToken.None)).State);
+        Assert.Contains(ComponentDigest(SyntheticCoreBytes), shown!.Message);
+        Assert.Contains(ComponentDigest(ExistingCoreBytes), shown.Message);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+    }
+
+    [Fact]
+    public async Task ComponentActionRestoreBindsTheJournalShownAtConfirmation()
+    {
+        var f = Installation();
+        var installer = f.Installer();
+        var installed = await installer.InstallAsync(await Ready(installer, f), CancellationToken.None);
+        var operation = installed.OperationId!.Value;
+        var path = Path.Combine(f.Backup(operation), "install.json");
+        var service = ComponentActions(f, (_, _) =>
+        {
+            var journal = JsonSerializer.Deserialize<CoreInstallJournal>(File.ReadAllText(path))!;
+            File.WriteAllText(path, JsonSerializer.Serialize(journal with { State = "ChangedAfterConsent" }));
+            return Task.FromResult(true);
+        });
+        var result = await service.ExecuteAsync(f.DataRoot, new("restore", f.Component.Id, operation.ToString("N")), CancellationToken.None);
+        Assert.Equal("PlanChanged", result.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("install", "arbitrary", null)]
+    [InlineData("execute", "sing-box-statistics", null)]
+    [InlineData("restore", "sing-box-statistics", "../install.json")]
+    [InlineData("install", "sing-box-statistics", "00000000000000000000000000000000")]
+    public async Task ComponentActionRejectsUnboundedRequestsBeforeDiscovery(string action, string component, string? operation)
+    {
+        var service = new CoreComponentActions(CoreComponents.Catalog, _ => throw new Xunit.Sdk.XunitException("No discovery"),
+            (_, _) => throw new Xunit.Sdk.XunitException("No confirmation"),
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("No preparation"));
+        Assert.Equal("InvalidRequest", (await service.ExecuteAsync("", new(action, component, operation), CancellationToken.None)).State);
+    }
+
+    private sealed record SidecarFixture(InstallFixture Files, XraySnapshot Baseline, SidecarPlan Plan,
+        string Target, string Candidate, byte[] Previous, IPEndPoint Endpoint)
+    {
+        internal CoreComponentInstaller Installer() => CoreComponentInstaller.ForSidecar(Files.Component,
+            () => Files.Observation, Baseline, Plan, point => Files.Fault?.Invoke(point));
+    }
+
+    private SidecarFixture SidecarInstallation(bool existing = true, bool appData = false)
+    {
+        var files = Installation(appData: appData);
+        File.WriteAllBytes(files.Target, SyntheticCoreBytes);
+        Directory.CreateDirectory(Path.Combine(files.DataRoot, "binConfigs"));
+        Directory.CreateDirectory(Path.Combine(files.DataRoot, "guiConfigs"));
+        File.WriteAllText(Path.Combine(files.DataRoot, "binConfigs", "config.json"), AnyTlsConfiguration);
+        File.WriteAllText(Path.Combine(files.DataRoot, "guiConfigs", "guiNConfig.json"), Gui);
+        CreateProfiles(AnyTlsProfile());
+        File.Copy(Profiles, Path.Combine(files.DataRoot, "guiConfigs", "guiNDB.db"));
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        listener.Stop();
+        var previous = JsonSerializer.SerializeToUtf8Bytes(new { listen = endpoint.ToString() });
+        var target = Path.Combine(Path.GetDirectoryName(files.Target)!, "monitor-stats.json");
+        if (existing) File.WriteAllBytes(target, previous);
+        else File.Delete(target); // Only this test's synthetic fixture.
+        var baseline = MemberSnapshot(AnyTlsConfiguration) with
+        { InstanceId = XrayParser.Hash(Path.GetFullPath(files.DataRoot).ToUpperInvariant()) };
+        var prepared = CoreCapabilityPreparation.PrepareSidecar(baseline, Bytes(AnyTlsConfiguration),
+            existing ? previous : (ReadOnlyMemory<byte>?)null, endpoint.ToString());
+        var plan = Assert.IsType<SidecarPlan>(prepared.Plan);
+        var candidate = Path.Combine(files.Root, "sidecar-candidate.json");
+        File.WriteAllText(candidate, plan.Json);
+        return new(files, baseline, plan, target, candidate, previous, endpoint);
+    }
+
+    private static async Task<CoreInstallPlan> SidecarReady(SidecarFixture fixture, CoreComponentInstaller service)
+    {
+        var prepared = await service.PrepareAsync(fixture.Candidate, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Ready, prepared.State);
+        return Assert.IsType<CoreInstallPlan>(prepared.Plan);
+    }
+
+    private Task<SidecarDiscovery> DiscoverSidecar(SidecarFixture fixture) => CoreSidecarDiscovery.CaptureAsync(
+        fixture.Files.Observation, fixture.Files.Component,
+        _ => [fixture.Files.Target, "run", "-c", "config.json", "--disable-color"], CancellationToken.None);
+
+    [Fact]
+    public async Task SidecarDiscoveryUsesBoundRunningCoreForFirstMissingSidecarWithoutInventingListenerEvidence()
+    {
+        var f = SidecarInstallation(existing: false);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var discovered = await DiscoverSidecar(f);
+        Assert.Equal(SidecarPreparationState.Prepared, discovered.Preparation.State);
+        Assert.Null(discovered.Preparation.Plan!.PreviousHash);
+        Assert.Equal(XrayParser.Hash(f.Files.DataRoot.ToUpperInvariant()), discovered.Baseline.InstanceId);
+        Assert.Equal(f.Files.Observation.Processes[1].StartedAt, discovered.Baseline.ProcessStartedAt);
+        Assert.Empty(discovered.Baseline.ListenerIdentity);
+        Assert.Equal("sing-box", discovered.Baseline.CoreName);
+        Assert.False(File.Exists(f.Target));
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Files.Target));
+    }
+
+    [Theory]
+    [InlineData("stopped")]
+    [InlineData("new-config")]
+    [InlineData("unapproved")]
+    [InlineData("unknown-field")]
+    public async Task SidecarDiscoveryRefusesUnverifiedOrChangedInputs(string scenario)
+    {
+        var f = SidecarInstallation();
+        if (scenario != "new-config")
+            File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        if (scenario != "stopped") f.Files.Running();
+        if (scenario == "unapproved") File.AppendAllText(f.Files.Target, "changed");
+        if (scenario == "unknown-field") File.WriteAllText(f.Target, """{"listen":"127.0.0.1:1234","unknown":true}""");
+        await Assert.ThrowsAsync<CoreComponentInstaller.Rejected>(() => DiscoverSidecar(f));
+    }
+
+    [Fact]
+    public async Task SidecarActionRetainsRunningWritePlanAndRestoresByOperationWithFreshConfirmation()
+    {
+        var f = SidecarInstallation(existing: false);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var prompts = new List<CoreActionPrompt>();
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (prompt, _) => { prompts.Add(prompt); return Task.FromResult(true); },
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Sidecar must not download a core"),
+            (_, _, _) => DiscoverSidecar(f));
+        var prepared = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
+        Assert.Equal("SidecarPrepared", prepared.State);
+        Assert.Empty(prompts);
+        var running = await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None);
+        Assert.Equal("CoreRunning", running.State);
+        Assert.Equal(prepared.PlanId, running.PlanId);
+        Assert.False(File.Exists(f.Target));
+        f.Files.Stopped();
+        var installed = await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None);
+        Assert.Equal("SidecarInstalledPendingReload", installed.State);
+        Assert.Contains(installed.BackupDirectory!, Assert.Single(prompts).Message);
+        Assert.True(File.Exists(f.Target));
+        Assert.Equal("PlanChanged", (await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None)).State);
+        var restored = await service.ExecuteAsync(f.Files.DataRoot,
+            new("restore-sidecar", "sing-box-statistics", installed.OperationId), CancellationToken.None);
+        Assert.Equal("SidecarRestored", restored.State);
+        Assert.False(File.Exists(f.Target));
+        Assert.Equal(2, prompts.Count);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Files.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SidecarActionRestoresAfterFailedReloadInANewHostWithoutARunningPlan(bool existing)
+    {
+        var f = SidecarInstallation(existing);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (_, _) => Task.FromResult(true),
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Sidecar must not download"),
+            (_, _, _) => DiscoverSidecar(f));
+        var prepared = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
+        f.Files.Stopped();
+        var installed = await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None);
+        Assert.Equal("SidecarInstalledPendingReload", installed.State);
+        CoreActionPrompt? prompt = null;
+        var restarted = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (shown, _) => { prompt = shown; return Task.FromResult(true); },
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Restore must not download"),
+            (_, _, _) => throw new Xunit.Sdk.XunitException("Restore must not need a running core"));
+        var restored = await restarted.ExecuteAsync(f.Files.DataRoot,
+            new("restore-sidecar", "sing-box-statistics", installed.OperationId), CancellationToken.None);
+        Assert.Equal("SidecarRestored", restored.State);
+        Assert.Contains(installed.OperationId!, prompt!.Message);
+        Assert.Contains(installed.BackupDirectory!, prompt.Message);
+        if (existing) Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+        else Assert.False(File.Exists(f.Target));
+        Assert.True(Directory.Exists(installed.BackupDirectory));
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Files.Target));
+    }
+
+    [Theory]
+    [InlineData("running", "CoreRunning")]
+    [InlineData("core-changed", "InvalidCandidate")]
+    [InlineData("target-changed", "PlanChanged")]
+    [InlineData("same-bytes-replaced", "PlanChanged")]
+    [InlineData("backup-changed", "PlanChanged")]
+    [InlineData("journal-after-consent", "PlanChanged")]
+    [InlineData("cancel", "Cancelled")]
+    public async Task SidecarOperationRestoreKeepsIdentityBackupAndConsentGuards(string change, string expected)
+    {
+        if (change == "same-bytes-replaced" && !OperatingSystem.IsWindows()) return;
+        var f = SidecarInstallation();
+        var installer = f.Installer();
+        var installed = await installer.InstallAsync(await SidecarReady(f, installer), CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var operation = installed.OperationId!.Value;
+        var backup = Path.Combine(f.Files.Backup(operation), "previous.json");
+        if (change == "running") f.Files.Running();
+        if (change == "core-changed") File.AppendAllText(f.Files.Target, "changed");
+        if (change == "target-changed") File.AppendAllText(f.Target, " ");
+        if (change == "same-bytes-replaced")
+        {
+            var bytes = File.ReadAllBytes(f.Target);
+            File.Move(f.Target, f.Target + ".previous-entry");
+            File.WriteAllBytes(f.Target, bytes);
+        }
+        if (change == "backup-changed") File.AppendAllText(backup, "changed");
+        var originalTarget = File.ReadAllBytes(f.Target);
+        var originalBackup = File.ReadAllBytes(backup);
+        var untouched = new[]
+        {
+            f.Files.ClientPath, f.Files.Target, f.Files.Candidate,
+            Path.Combine(f.Files.Root, "monitor", "history.db"),
+            Path.Combine(f.Files.Root, "monitor", "provider.db"),
+            Path.Combine(f.Files.Root, "monitor", "settings.json"),
+            Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"),
+            Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNConfig.json"),
+            Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNDB.db")
+        }.ToDictionary(path => path, File.ReadAllBytes);
+        var confirmations = 0;
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation, (_, _) =>
+        {
+            confirmations++;
+            if (change == "journal-after-consent")
+            {
+                var path = Path.Combine(f.Files.Backup(operation), "install.json");
+                var journal = JsonSerializer.Deserialize<CoreInstallJournal>(File.ReadAllText(path))!;
+                File.WriteAllText(path, JsonSerializer.Serialize(journal with { State = "ChangedAfterConsent" }));
+            }
+            return Task.FromResult(change != "cancel");
+        }, (_, _, _, _) => throw new Xunit.Sdk.XunitException("Restore must not download"),
+            (_, _, _) => throw new Xunit.Sdk.XunitException("Restore must not invent a running baseline"));
+        var result = await service.ExecuteAsync(f.Files.DataRoot,
+            new("restore-sidecar", "sing-box-statistics", operation.ToString("N")), CancellationToken.None);
+        Assert.Equal(expected, result.State);
+        Assert.Equal(change is "cancel" or "journal-after-consent" ? 1 : 0, confirmations);
+        Assert.Equal(originalTarget, File.ReadAllBytes(f.Target));
+        Assert.Equal(originalBackup, File.ReadAllBytes(backup));
+        foreach (var (path, bytes) in untouched) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public async Task SidecarActionSettingInvalidationDropsThePreparedBaseline()
+    {
+        var f = SidecarInstallation(existing: false);
+        File.SetLastWriteTimeUtc(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), Start.AddSeconds(-1).UtcDateTime);
+        f.Files.Running();
+        var service = new CoreComponentActions([f.Files.Component], _ => f.Files.Observation,
+            (_, _) => throw new Xunit.Sdk.XunitException("Must not confirm"),
+            (_, _, _, _) => throw new Xunit.Sdk.XunitException("Must not download"),
+            (_, _, _) => DiscoverSidecar(f));
+        var prepared = await service.ExecuteAsync(f.Files.DataRoot, new("prepare-sidecar", "sing-box-statistics"), CancellationToken.None);
+        Assert.Equal("SidecarPrepared", prepared.State);
+        service.Invalidate();
+        f.Files.Stopped();
+        Assert.Equal("PlanChanged", (await service.ExecuteAsync(f.Files.DataRoot,
+            new("apply-sidecar", "sing-box-statistics", PlanId: prepared.PlanId), CancellationToken.None)).State);
+        Assert.False(File.Exists(f.Target));
+    }
+
+    [Theory]
+    [InlineData("sing-box", "sing-box-statistics", true, "verified")]
+    [InlineData("sing-box", "xray-probes", true, "different_core")]
+    [InlineData("Xray", "xray-probes", false, "unverified_core")]
+    [InlineData("Xray", "xray-probes", true, "verified")]
+    public void RuntimeVerificationSeparatesOrdinaryInterfaceFromApprovedFileAndOptionalProbes(
+        string core, string requested, bool approved, string expected)
+    {
+        var snapshot = MemberSnapshot(AnyTlsConfiguration) with { CoreName = core, XrayProbeExtensionVerified = approved };
+        var member = new MeasurementScope("actual_member", "index_id", "synthetic", "Synthetic", "synthetic", "proxy");
+        var reading = new ScopeCollectorReading(new("synthetic", "session", "generation", Start,
+            [new(member, 1, 2)], []), "connected", "synthetic",
+            Probes: new(true, "unavailable", "synthetic probe counters missing"));
+        var result = WindowsDiscovery.RuntimeResult(requested, snapshot,
+            approved ? WindowsDiscovery.ApprovedProbeSingboxSha256 : "other", reading);
+        Assert.Equal(expected, result.State);
+        Assert.True(result.StatisticsAvailable);
+        Assert.Equal(expected == "verified", result.FileIdentityVerified);
+        Assert.Equal(1, result.MemberCount);
+        Assert.Equal("unavailable", result.ProbeState);
+    }
+
+    [Fact]
+    public void RuntimeVerificationNeverTurnsFailureOrMissingCountersIntoAvailable()
+    {
+        var result = WindowsDiscovery.RuntimeResult("sing-box-statistics", null, null,
+            new(null, "missing_counters", "synthetic"));
+        Assert.Equal("missing_counters", result.State);
+        Assert.False(result.StatisticsAvailable);
+        Assert.False(result.FileIdentityVerified);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task SidecarInstallBacksUpAndRestoresOnlyTheFixedSidecar(bool existing, bool appData)
+    {
+        var f = SidecarInstallation(existing, appData);
+        var preserved = Directory.GetFiles(f.Files.Root, "*", SearchOption.AllDirectories)
+            .Where(path => path != f.Target).ToDictionary(path => path, File.ReadAllBytes);
+        var service = f.Installer();
+        var result = await service.InstallAsync(await SidecarReady(f, service), CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, result.State);
+        Assert.Equal(f.Plan.Json, File.ReadAllText(f.Target));
+        var id = Assert.IsType<Guid>(result.OperationId);
+        if (existing) Assert.Equal(f.Previous, File.ReadAllBytes(Path.Combine(f.Files.Backup(id), "previous.json")));
+        using (var listener = new System.Net.Sockets.TcpListener(f.Endpoint))
+        { listener.Start(); listener.Stop(); } // Reservation is released; no core was started.
+        f.Files.Observation = f.Files.Observation with
+        { Processes = [f.Files.Observation.Processes[0] with { Pid = 303, StartedAt = Start.AddMinutes(1) }] };
+        Assert.Equal(CoreInstallState.Restored, (await f.Installer().RestoreAsync(id, CancellationToken.None)).State);
+        Assert.Equal(existing, File.Exists(f.Target));
+        if (existing) Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+        else Assert.Single(Directory.GetFiles(f.Files.Backup(id), "removed-*.json"));
+        Assert.Equal(CoreInstallState.AlreadyRestored, (await f.Installer().RestoreAsync(id, CancellationToken.None)).State);
+        foreach (var (path, bytes) in preserved) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    [Theory]
+    [InlineData("core", nameof(CoreInstallState.InvalidCandidate))]
+    [InlineData("config", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("selection", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("profile", nameof(CoreInstallState.InvalidConfiguration))]
+    [InlineData("sidecar", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("unknown-field", nameof(CoreInstallState.InvalidConfiguration))]
+    [InlineData("running", nameof(CoreInstallState.CoreRunning))]
+    public async Task SidecarInstallRevalidatesOfflineInputsBeforeWriting(string mutation, string expected)
+    {
+        var f = SidecarInstallation();
+        var service = f.Installer();
+        var plan = await SidecarReady(f, service);
+        switch (mutation)
+        {
+            case "core": File.AppendAllText(f.Files.Target, "changed"); break;
+            case "config": File.AppendAllText(Path.Combine(f.Files.DataRoot, "binConfigs", "config.json"), " "); break;
+            case "selection": File.WriteAllText(Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNConfig.json"), Gui.Replace("\"A\"", "\"B\"")); break;
+            case "profile":
+                using (var db = new SqliteConnection($"Data Source={Path.Combine(f.Files.DataRoot, "guiConfigs", "guiNDB.db")};Pooling=False"))
+                {
+                    db.Open(); using var command = db.CreateCommand();
+                    command.CommandText = "UPDATE ProfileItem SET Password='changed'"; command.ExecuteNonQuery();
+                }
+                break;
+            case "sidecar": File.AppendAllText(f.Target, " "); break;
+            case "unknown-field": File.WriteAllText(f.Target, "{\"listen\":\"127.0.0.1:1\",\"future\":true}"); break;
+            case "running": f.Files.Running(); break;
+        }
+        var before = File.ReadAllBytes(f.Target);
+        Assert.Equal(Enum.Parse<CoreInstallState>(expected), (await service.InstallAsync(plan, CancellationToken.None)).State);
+        Assert.Equal(before, File.ReadAllBytes(f.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SidecarInstallReservesPortAgainAtCommit(bool occupyAfterPreparation)
+    {
+        var f = SidecarInstallation();
+        var service = f.Installer();
+        using var listener = new System.Net.Sockets.TcpListener(f.Endpoint);
+        if (!occupyAfterPreparation)
+        {
+            listener.Start();
+            Assert.Equal(CoreInstallState.PortUnavailable, (await service.PrepareAsync(f.Candidate, CancellationToken.None)).State);
+        }
+        else
+        {
+            var plan = await SidecarReady(f, service);
+            f.Files.Fault = point => { if (point == CoreInstallCheckpoint.BeforeReplace) listener.Start(); };
+            Assert.Equal(CoreInstallState.PortUnavailable, (await service.InstallAsync(plan, CancellationToken.None)).State);
+        }
+        Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SidecarInstallFailureRestoresAndDoesNotOverwriteLaterChanges(bool laterChange)
+    {
+        var f = SidecarInstallation();
+        var service = f.Installer();
+        var plan = await SidecarReady(f, service);
+        f.Files.Fault = point =>
+        {
+            if (point != CoreInstallCheckpoint.AfterReplace) return;
+            if (laterChange) File.WriteAllText(f.Target, "a later edit");
+            throw new IOException("Synthetic post-replace failure");
+        };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(laterChange ? CoreInstallState.RecoveryRequired : CoreInstallState.FailedRestored, result.State);
+        if (laterChange) Assert.Equal("a later edit", File.ReadAllText(f.Target));
+        else Assert.Equal(f.Previous, File.ReadAllBytes(f.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallRestoreRejectsSameBytesFromANewerFile(bool sidecar)
+    {
+        if (!OperatingSystem.IsWindows()) return; // Physical Windows file identity is the production boundary.
+        CoreComponentInstaller service;
+        CoreInstallPlan plan;
+        string target;
+        if (sidecar)
+        {
+            var f = SidecarInstallation();
+            service = f.Installer();
+            plan = await SidecarReady(f, service);
+            target = f.Target;
+        }
+        else
+        {
+            var f = Installation();
+            service = f.Installer();
+            plan = await Ready(service, f);
+            target = f.Target;
+        }
+        var installed = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var bytes = File.ReadAllBytes(target);
+        var replacement = target + ".synthetic-newer";
+        File.WriteAllBytes(replacement, bytes);
+        File.Move(replacement, target, overwrite: true);
+        Assert.Equal(CoreInstallState.PlanChanged,
+            (await service.RestoreAsync(installed.OperationId!.Value, CancellationToken.None)).State);
+        Assert.Equal(bytes, File.ReadAllBytes(target));
+    }
+
+    private sealed class InstallFixture
+    {
+        internal readonly string Root, ClientPath, DataRoot, Candidate, Target;
+        internal readonly CoreComponent Component;
+        internal CoreInstallObservation Observation;
+        internal Action<CoreInstallCheckpoint>? Fault;
+        private readonly Dictionary<string, byte[]> untouched = [];
+        internal InstallFixture(string root, string id = "sing-box-statistics", bool appData = false, bool existing = true)
+        {
+            Root = root;
+            DataRoot = Path.Combine(root, appData ? "appdata/v2rayN" : "portable");
+            ClientPath = Path.Combine(appData ? Path.Combine(root, "program") : DataRoot, "v2rayN.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(ClientPath)!);
+            File.WriteAllBytes(ClientPath, Bytes("synthetic client identity; never executable"));
+            Component = CoreComponents.Catalog.Single(x => x.Id == id) with
+            { Sha256 = ComponentDigest(SyntheticCoreBytes), ExpectedBytes = SyntheticCoreBytes.Length };
+            Target = Path.Combine(DataRoot, "bin", id == "sing-box-statistics" ? "sing_box" : "xray", Component.FileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(Target)!);
+            if (existing) File.WriteAllBytes(Target, ExistingCoreBytes);
+            Candidate = Path.Combine(root, "candidate.bin");
+            File.WriteAllBytes(Candidate, SyntheticCoreBytes);
+            Observation = new(ClientPath, DataRoot, Path.Combine(root, "appdata/v2rayN"), Component.ClientVersion,
+                "win-x64", [new(101, 1, Start, ClientPath, "synthetic command line must not persist", "v2rayN.exe")]);
+            foreach (var relative in new[] { "monitor/history.db", "monitor/provider.db", "monitor/settings.json",
+                "portable-not-selected/bin/xray/xray.exe", "data/guiNConfig.json", "data/monitor-stats.json" })
+            {
+                var path = Path.Combine(root, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                untouched[path] = Bytes("synthetic preserved " + relative);
+                File.WriteAllBytes(path, untouched[path]);
+            }
+            var sidecar = Path.Combine(Path.GetDirectoryName(Target)!, "monitor-stats.json");
+            untouched[sidecar] = Bytes("synthetic existing sidecar");
+            File.WriteAllBytes(sidecar, untouched[sidecar]);
+        }
+        internal CoreComponentInstaller Installer() => new(Component, () => Observation, point => Fault?.Invoke(point));
+        internal string Backup(Guid id) => Path.Combine(Path.GetDirectoryName(Target)!, ".monitor-core-backups", id.ToString("N"));
+        internal void Preserved()
+        {
+            foreach (var (path, bytes) in untouched) Assert.Equal(bytes, File.ReadAllBytes(path));
+            Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(Candidate));
+        }
+        internal void Running()
+        {
+            Observation = Observation with { Processes = [.. Observation.Processes,
+                new(202, 101, Start.AddSeconds(1), Target, "synthetic run", Component.FileName)] };
+        }
+        internal void Stopped() => Observation = Observation with { Processes = [Observation.Processes[0]] };
+    }
+    private InstallFixture Installation(string id = "sing-box-statistics", bool appData = false, bool existing = true) =>
+        new(Path.Combine(directory, "install-" + Guid.NewGuid().ToString("N")), id, appData, existing);
+    private static async Task<CoreInstallPlan> Ready(CoreComponentInstaller installer, InstallFixture files)
+    {
+        var result = await installer.PrepareAsync(files.Candidate, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Ready, result.State);
+        return Assert.IsType<CoreInstallPlan>(result.Plan);
+    }
+
+    [Theory]
+    [InlineData("sing-box-statistics", false, true)]
+    [InlineData("sing-box-statistics", true, false)]
+    [InlineData("xray-probes", true, true)]
+    [InlineData("xray-probes", false, false)]
+    public async Task ComponentInstallBacksUpReplacesAndRestoresAcrossFreshSession(string id, bool appData, bool existing)
+    {
+        var f = Installation(id, appData, existing);
+        var service = f.Installer();
+        var plan = await Ready(service, f);
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-install.lock")));
+        var installed = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var operation = Assert.IsType<Guid>(installed.OperationId);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(existing, File.Exists(Path.Combine(f.Backup(operation), "previous.exe")));
+        if (existing) Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(operation), "previous.exe")));
+        var journal = File.ReadAllText(Path.Combine(f.Backup(operation), "install.json"));
+        Assert.Contains("InstalledPendingReload", journal);
+        Assert.DoesNotContain(f.DataRoot, journal);
+        Assert.DoesNotContain("synthetic command line", journal);
+        f.Observation = f.Observation with { Processes = [f.Observation.Processes[0] with { Pid = 303, StartedAt = Start.AddMinutes(1) }] };
+        var restored = await f.Installer().RestoreAsync(operation, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Restored, restored.State);
+        Assert.Equal(existing, File.Exists(f.Target));
+        if (existing) Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(CoreInstallState.AlreadyRestored,
+            (await f.Installer().RestoreAsync(operation, CancellationToken.None)).State);
+        Assert.True(Directory.Exists(f.Backup(operation)));
+        if (!existing) Assert.Single(Directory.GetFiles(f.Backup(operation), "removed-*.exe"));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("running", nameof(CoreInstallState.CoreRunning))]
+    [InlineData("missing-parent", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("multiple", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("incomplete", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("unknown-process", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("version", nameof(CoreInstallState.UnsupportedTarget))]
+    [InlineData("runtime", nameof(CoreInstallState.UnsupportedTarget))]
+    [InlineData("unrelated-root", nameof(CoreInstallState.UnknownTarget))]
+    [InlineData("missing-core-folder", nameof(CoreInstallState.UnsafePath))]
+    public async Task ComponentInstallPreflightRejectsUnverifiedTargetsWithoutWrites(string kind, string expected)
+    {
+        var f = Installation();
+        switch (kind)
+        {
+            case "running": f.Running(); break;
+            case "missing-parent": f.Observation = f.Observation with { Processes = [] }; break;
+            case "multiple": f.Observation = f.Observation with { Processes = [.. f.Observation.Processes, f.Observation.Processes[0] with { Pid = 404 }] }; break;
+            case "incomplete": f.Observation = f.Observation with { Complete = false }; break;
+            case "unknown-process": f.Observation = f.Observation with { Processes = [.. f.Observation.Processes, new(202, 101, Start, "", "", "xray.exe", "process_path_unverified")] }; break;
+            case "version": f.Observation = f.Observation with { ClientVersion = "unknown" }; break;
+            case "runtime": f.Observation = f.Observation with { Runtime = "linux-x64" }; break;
+            case "unrelated-root": f.Observation = f.Observation with { DataRoot = f.Root }; break;
+            case "missing-core-folder": Directory.Move(Path.GetDirectoryName(f.Target)!, Path.Combine(f.Root, "saved-core")); break;
+        }
+        var before = Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).OrderBy(x => x).ToArray();
+        var result = await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None);
+        Assert.Equal(expected, result.State.ToString()); Assert.Null(result.Plan);
+        Assert.Equal(before, Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).OrderBy(x => x));
+    }
+
+    [Fact]
+    public async Task ComponentInstallAlreadyMatchingFileDoesNotCreateBackups()
+    {
+        var f = Installation(); File.WriteAllBytes(f.Target, SyntheticCoreBytes);
+        Assert.Equal(CoreInstallState.AlreadyMatched, (await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None)).State);
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-core-backups")));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("old-file", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("parent", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("client", nameof(CoreInstallState.PlanChanged))]
+    [InlineData("candidate", nameof(CoreInstallState.InvalidCandidate))]
+    [InlineData("started", nameof(CoreInstallState.CoreRunning))]
+    public async Task ComponentInstallRechecksTheConfirmedPlan(string change, string expected)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        if (change == "old-file") File.WriteAllText(f.Target, "synthetic intervening version");
+        if (change == "parent") f.Observation = f.Observation with { Processes = [f.Observation.Processes[0] with { StartedAt = Start.AddSeconds(1) }] };
+        if (change == "client") File.AppendAllText(f.ClientPath, "changed");
+        if (change == "candidate") File.AppendAllText(f.Candidate, "wrong version");
+        if (change == "started") f.Running();
+        var old = File.ReadAllBytes(f.Target);
+        Assert.Equal(expected, (await service.InstallAsync(plan, CancellationToken.None)).State.ToString());
+        Assert.Equal(old, File.ReadAllBytes(f.Target));
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-core-backups")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallRejectsFileAndTransactionLocks(bool targetLock)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        var path = targetLock ? f.Target : Path.Combine(Path.GetDirectoryName(f.Target)!, ".monitor-install.lock");
+        using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        Assert.Equal(CoreInstallState.FileBusy, (await service.InstallAsync(plan, CancellationToken.None)).State);
+        held.Dispose(); Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallWindowsReadOnlyTargetKeepsOriginalAndBackup()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Windows attribute enforcement, exercised on Windows CI/local.
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        File.SetAttributes(f.Target, FileAttributes.ReadOnly);
+        try
+        {
+            var result = await service.InstallAsync(plan, CancellationToken.None);
+            Assert.Equal(CoreInstallState.PermissionDenied, result.State);
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(result.OperationId!.Value), "previous.exe")));
+            f.Preserved();
+        }
+        finally { File.SetAttributes(f.Target, FileAttributes.Normal); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallFailureBeforeOrAfterReplacementPreservesOriginal(bool after)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point => { if (point == (after ? CoreInstallCheckpoint.AfterReplace : CoreInstallCheckpoint.BackupVerified)) throw new IOException("Synthetic failure"); };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(after ? CoreInstallState.FailedRestored : CoreInstallState.StorageFailed, result.State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(result.OperationId!.Value), "previous.exe")));
+        f.Preserved();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComponentInstallCancellationDoesNotMisreportAnAlreadyReplacedFile(bool after)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        using var cancellation = new CancellationTokenSource();
+        f.Fault = point => { if (point == (after ? CoreInstallCheckpoint.AfterReplace : CoreInstallCheckpoint.BeforeReplace)) cancellation.Cancel(); };
+        var result = await service.InstallAsync(plan, cancellation.Token);
+        Assert.Equal(after ? CoreInstallState.InstalledPendingReload : CoreInstallState.Cancelled, result.State);
+        Assert.Equal(after ? SyntheticCoreBytes : ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Theory]
+    [InlineData("target")]
+    [InlineData("backup")]
+    [InlineData("journal")]
+    [InlineData("journal-previous")]
+    [InlineData("client")]
+    [InlineData("running")]
+    public async Task ComponentInstallRestoreRefusesInterveningChanges(string kind)
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        var installed = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        var operation = installed.OperationId!.Value;
+        if (kind == "target") File.WriteAllText(f.Target, "synthetic newer user version");
+        if (kind == "backup") File.WriteAllText(Path.Combine(f.Backup(operation), "previous.exe"), "synthetic damaged backup");
+        if (kind == "journal") File.WriteAllText(Path.Combine(f.Backup(operation), "install.json"), "{}");
+        if (kind == "journal-previous")
+        {
+            var path = Path.Combine(f.Backup(operation), "install.json");
+            var record = JsonNode.Parse(File.ReadAllText(path))!.AsObject(); record.Remove("Previous");
+            File.WriteAllText(path, record.ToJsonString());
+        }
+        if (kind == "client") File.AppendAllText(f.ClientPath, "changed");
+        if (kind == "running") f.Running();
+        var before = File.ReadAllBytes(f.Target);
+        var result = await f.Installer().RestoreAsync(operation, CancellationToken.None);
+        Assert.Equal(kind == "running" ? CoreInstallState.CoreRunning : CoreInstallState.PlanChanged, result.State);
+        Assert.Equal(before, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallRecoveryRequiredCanResumeFromTheDurableJournal()
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point => { if (point == CoreInstallCheckpoint.AfterReplace) { f.Running(); throw new IOException("Synthetic post-replacement failure"); } };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.RecoveryRequired, result.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        f.Stopped(); f.Fault = null;
+        Assert.Equal(CoreInstallState.Restored, (await f.Installer().RestoreAsync(result.OperationId!.Value, CancellationToken.None)).State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallDoesNotOverwriteAPathSwappedAfterBackup()
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        var unexpected = Bytes("synthetic intervening atomic replacement");
+        f.Fault = point =>
+        {
+            if (point != CoreInstallCheckpoint.BeforeReplace) return;
+            var file = Path.Combine(f.Root, "intervening.exe"); File.WriteAllBytes(file, unexpected);
+            File.Replace(file, f.Target, null);
+        };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.PlanChanged, result.State);
+        Assert.Equal(unexpected, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallRejectsLinkedCoreDirectory()
+    {
+        var f = Installation(); var link = Path.GetDirectoryName(f.Target)!;
+        var actual = Path.Combine(f.Root, "saved-core"); Directory.Move(link, actual);
+        if (OperatingSystem.IsWindows())
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true };
+            start.ArgumentList.Add("-NoProfile"); start.ArgumentList.Add("-NonInteractive"); start.ArgumentList.Add("-Command");
+            start.ArgumentList.Add("$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '" + link.Replace("'", "''") + "' -Target '" + actual.Replace("'", "''") + "' | Out-Null");
+            using var process = System.Diagnostics.Process.Start(start)!; await process.WaitForExitAsync(); Assert.Equal(0, process.ExitCode);
+        }
+        else Directory.CreateSymbolicLink(link, actual);
+        try
+        {
+            Assert.Equal(CoreInstallState.UnsafePath, (await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None)).State);
+            Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(actual, f.Component.FileName)));
+        }
+        finally { Directory.Delete(link); }
+    }
+
+    [Fact]
+    public async Task ComponentInstallFailedFirstMoveDoesNotRemoveAnotherIdenticalInstall()
+    {
+        var f = Installation(existing: false); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point => { if (point == CoreInstallCheckpoint.BeforeReplace) File.WriteAllBytes(f.Target, SyntheticCoreBytes); };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.RecoveryRequired, result.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallRefusesBackupChangedBeforeReplacement()
+    {
+        var f = Installation(); var service = f.Installer(); var plan = await Ready(service, f);
+        f.Fault = point =>
+        {
+            if (point != CoreInstallCheckpoint.BeforeReplace) return;
+            var backup = Assert.Single(Directory.GetFiles(Path.GetDirectoryName(f.Target)!, "previous.exe", SearchOption.AllDirectories));
+            File.WriteAllText(backup, "synthetic damaged backup");
+        };
+        var result = await service.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.PlanChanged, result.State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    [Fact]
+    public async Task ComponentInstallWindowsRejectsAnActiveImageUnderAHardLinkAlias()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Physical file IDs are a Windows installation guard.
+        var f = Installation(); var alias = Path.Combine(f.Root, "xray.exe");
+        var start = new System.Diagnostics.ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true };
+        start.ArgumentList.Add("-NoProfile"); start.ArgumentList.Add("-NonInteractive"); start.ArgumentList.Add("-Command");
+        start.ArgumentList.Add("$ErrorActionPreference='Stop'; New-Item -ItemType HardLink -Path '" + alias.Replace("'", "''") + "' -Target '" + f.Target.Replace("'", "''") + "' | Out-Null");
+        using var process = System.Diagnostics.Process.Start(start)!; await process.WaitForExitAsync(); Assert.Equal(0, process.ExitCode);
+        f.Observation = f.Observation with { Processes = [.. f.Observation.Processes,
+            new(202, 101, Start.AddSeconds(1), alias, "synthetic run", "xray.exe")] };
+        Assert.Equal(CoreInstallState.CoreRunning, (await f.Installer().PrepareAsync(f.Candidate, CancellationToken.None)).State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target)); f.Preserved();
+    }
+
+    public void Dispose()
+    {
+        foreach (var stage in componentStages)
+        {
+            Assert.Equal(Path.TrimEndingDirectorySeparator(Path.GetTempPath()), Path.GetDirectoryName(stage));
+            Assert.StartsWith("v2rayn-monitor-component-", Path.GetFileName(stage));
+            if (Directory.Exists(stage))
+            {
+                Assert.False((File.GetAttributes(stage) & FileAttributes.ReparsePoint) != 0);
+                foreach (var file in Directory.GetFiles(stage))
+                {
+                    Assert.False((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0);
+                    File.Delete(file);
+                }
+                Directory.Delete(stage);
+            }
+        }
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
 }

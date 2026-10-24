@@ -6,6 +6,7 @@ namespace V2rayNMonitor.Core;
 public sealed record ScopeMigrationResult(string HistoryPath, string BackupPath, long LegacyScopes);
 public sealed record ProbeMigrationResult(string HistoryPath, string BackupPath, long PreservedScopes);
 public sealed record DisplayMigrationResult(string HistoryPath, string BackupPath, long HistoryVersion);
+public sealed record OfflineMigrationResult(string HistoryPath, string BackupPath, int HistoryVersion);
 
 /// <summary>Explicit offline migration. The caller must stop all writers and obtain authorization first.</summary>
 public static class ScopeLedgerMigration
@@ -86,6 +87,41 @@ public static class ScopeLedgerMigration
         return new(history, backup, Scalar(target, null, "SELECT COUNT(*) FROM measurement_scopes;"));
     }
 
+    /// <summary>One offline step on a continuously exclusive connection; confirmation runs under its lock.</summary>
+    public static OfflineMigrationResult MigrateOffline(string historyPath, string backupPath, int expectedVersion,
+        Action confirmLockedInput)
+    {
+        if (expectedVersion is not (1 or 2)) throw new ArgumentOutOfRangeException(nameof(expectedVersion));
+        ArgumentNullException.ThrowIfNull(confirmLockedInput);
+        var history = CheckedPath(historyPath);
+        using var target = Open(history, SqliteOpenMode.ReadWrite);
+        target.DefaultTimeout = 1; // Zero means unlimited, not fail-fast.
+        // EXCLUSIVE locking mode retains the lock after COMMIT, through backup and Apply*.
+        // No active write transaction remains while BackupDatabase reads this same connection.
+        Execute(target, null, "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
+        Require(Scalar(target, null, "PRAGMA user_version;") == expectedVersion, "Offline input version changed.");
+        confirmLockedInput();
+        if (expectedVersion == 1) Preflight(target, null);
+        else PreflightProbes(target, null);
+        var backup = BackupFrom(target, history, backupPath);
+        using var snapshot = Open(backup, SqliteOpenMode.ReadOnly);
+        Execute(target, null, "PRAGMA synchronous=FULL;");
+        if (expectedVersion == 1)
+        {
+            Execute(target, null, "PRAGMA foreign_keys=ON;");
+            Apply(target, snapshot, ScopeLedger.SchemaSql);
+        }
+        else
+        {
+            Execute(target, null, "PRAGMA foreign_keys=OFF;");
+            try { ApplyProbes(target, snapshot, ScopeLedger.ProbeUpgradeSql); }
+            finally { Execute(target, null, "PRAGMA foreign_keys=ON;"); }
+        }
+        var version = checked((int)Scalar(target, null, "PRAGMA user_version;"));
+        Require(version == expectedVersion + 1, "Offline migration version is missing.");
+        return new(history, backup, version);
+    }
+
     /// <summary>Additive, explicit offline UI metadata extension. Old rows/DDL and user_version remain unchanged.</summary>
     public static DisplayMigrationResult InitializeDisplay(string historyPath, string backupPath)
     {
@@ -136,22 +172,24 @@ public static class ScopeLedgerMigration
         Action<SqliteConnection, SqliteTransaction?> preflight)
     {
         var history = CheckedPath(historyPath);
+        using var source = Open(history, SqliteOpenMode.ReadOnly);
+        preflight(source, null);
+        return (history, BackupFrom(source, history, backupPath));
+    }
+
+    private static string BackupFrom(SqliteConnection source, string history, string backupPath)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
         var backup = Path.GetFullPath(backupPath);
         if (StringComparer.OrdinalIgnoreCase.Equals(history, backup))
             throw new ArgumentException("History and backup must be different new files.");
-        // Preflight is read-only, before creating a backup or changing any persistent setting.
-        using (var source = Open(history, SqliteOpenMode.ReadOnly))
-        {
-            preflight(source, null);
-            CheckedParents(backup);
-            Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
-            CheckedParents(backup);
-            using (new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
-            using var destination = Open(backup, SqliteOpenMode.ReadWrite);
-            source.BackupDatabase(destination);
-        }
-        return (history, backup);
+        CheckedParents(backup);
+        Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+        CheckedParents(backup);
+        using (new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
+        using var destination = Open(backup, SqliteOpenMode.ReadWrite);
+        source.BackupDatabase(destination);
+        return backup;
     }
 
     // SQL is not a public input. Keeping the transactional application separate also allows

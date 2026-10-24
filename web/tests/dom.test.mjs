@@ -745,6 +745,334 @@ test('settings save round-trips the data path and timezone', async t => {
   const saved = calls.filter(c => c.path === '/api/settings' && c.body).at(-1);
   assert.equal(saved.body.v2rayNPath, 'D:\\Synthetic'); assert.equal(saved.body.timeZoneId, 'Asia/Shanghai'); assert.equal(calls.filter(c => c.path === '/api/history').at(-1).query.get('timeZoneId'), 'Asia/Shanghai');
 });
+// Synthetic capability responses; no installed core, real directory or ledger is inspected.
+const coreCapabilities = {
+  targetState: 'identified', ledgerVersion: 3, startupMode: '--probe-ledger',
+  collectorState: 'collecting', lastSample: '2026-10-09T10:01:00Z', collectionBasis: 'actual_member', probeState: 'unavailable',
+  components: [
+    { id: 'sing-box-statistics', name: 'Synthetic sing-box', version: 'test.5', fileState: 'identity_matched', downloadState: 'asset_unavailable', license: 'GPL-3.0' },
+    { id: 'xray-probes', name: 'Synthetic Xray', version: 'test.1', fileState: 'digest_mismatch', downloadState: 'asset_unavailable', license: 'MPL-2.0' }
+  ]
+};
+test('core capabilities are explicit authenticated reads, not installation or runtime verification', async t => {
+  const { w, get, calls } = await fixture(t, {
+    '/api/core-capabilities': () => Response.json({ ...coreCapabilities,
+      components: [{ ...coreCapabilities.components[0], name: '<img src=x onerror=alert(1)>' }, coreCapabilities.components[1]] })
+  });
+  w.document.querySelector('.nav-item[data-view=settings]').click();
+  assert.equal(calls.filter(c => c.path === '/api/core-capabilities').length, 0);
+  get('check-core-capabilities').click();
+  await until(() => !get('core-capabilities-details').hidden);
+  const call = calls.find(c => c.path === '/api/core-capabilities');
+  assert.equal(call.headers['x-monitor-request'], '1');
+  assert.equal(call.body, undefined); assert.equal(call.query.size, 0);
+  assert.ok(get('core-components').textContent.includes('文件摘要一致'));
+  assert.ok(get('core-components').textContent.includes('文件摘要不符'));
+  assert.ok(get('core-components').textContent.includes('不影响原生 Xray 普通统计'));
+  assert.ok(get('core-components').textContent.includes('独立组件尚未发布'));
+  assert.ok(get('core-components').textContent.includes('GPL-3.0'));
+  assert.ok(get('core-components').textContent.includes('<img src=x onerror=alert(1)>'));
+  assert.equal(get('core-components').querySelector('img'), null);
+  assert.ok(!/已安装|已生效/.test(get('core-capabilities-panel').textContent));
+  assert.ok(get('core-capabilities-panel').textContent.includes('当前进程、普通统计接口与独立探测分别核验'));
+  assert.ok(get('core-ledger').textContent.includes('v3 · 启动模式：--probe-ledger'));
+  assert.ok(get('core-collector').textContent.includes('最近采样：'));
+  assert.ok(get('core-collector').textContent.includes('10:01:00'));
+  assert.ok(get('core-probe').textContent.includes('探测计数暂不可用'));
+  assert.equal(get('core-capabilities-panel').querySelectorAll('button').length, 7);
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 0);
+});
+test('core capability demo and unavailable targets do not imply checked files', async t => {
+  for (const [targetState, text, ledgerVersion, startupMode] of [
+    ['demo', '不检查本机核心文件', 1, ''], ['unavailable', '暂时无法核实目标', 2, '--scope-ledger'],
+    ['not_selected', '未选择数据根目录', 3, '--probe-ledger']
+  ]) await t.test(targetState, async t => {
+    const { get } = await fixture(t, { '/api/core-capabilities': () => Response.json({
+      ...coreCapabilities, targetState, components: [], ledgerVersion, startupMode, lastSample: null
+    }) });
+    get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+    assert.ok(get('core-target').textContent.includes(text));
+    assert.equal(get('core-components').children.length, 0);
+    assert.ok(get('core-capabilities-result').textContent.includes('未核实配套核心文件身份'));
+    assert.ok(get('core-ledger').textContent.includes(`v${ledgerVersion}`));
+    assert.ok(get('core-ledger').textContent.includes(startupMode || '默认入口'));
+    assert.ok(get('core-collector').textContent.includes('尚无有效采样'));
+  });
+});
+test('core check failures allow retry and session expiry clears results and disables checks', async t => {
+  let attempt = 0;
+  const { get } = await fixture(t, { '/api/core-capabilities': () => {
+    attempt++;
+    return attempt === 1 ? Response.json({ error: 'Synthetic unavailable' }, { status: 503 })
+      : attempt === 2 ? Response.json(coreCapabilities) : new Response('{}', { status: 403 });
+  } });
+  get('check-core-capabilities').click();
+  await until(() => get('core-capabilities-result').textContent.includes('检查失败'));
+  assert.ok(get('core-capabilities-result').textContent.includes('重试'));
+  assert.equal(get('check-core-capabilities').disabled, false);
+  get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+  get('check-core-capabilities').click(); await until(() => !get('session-alert').hidden);
+  assert.equal(get('check-core-capabilities').disabled, true);
+  assert.equal(get('core-capabilities-details').hidden, true);
+  assert.equal(get('core-components').textContent, '');
+  assert.ok(get('core-capabilities-result').textContent.includes('托盘'));
+});
+test('directory edits discard even late core checks and never send the unsaved path', async t => {
+  let resolve;
+  const { w, get, calls, submit } = await fixture(t, { '/api/core-capabilities': () => new Promise(r => { resolve = r; }) });
+  get('check-core-capabilities').click();
+  assert.equal(get('check-core-capabilities').disabled, true);
+  await until(() => resolve);
+  const oldCall = calls.find(c => c.path === '/api/core-capabilities');
+  get('v2rayn-path').value = 'D:\\Unsaved synthetic'; get('v2rayn-path').dispatchEvent(new w.Event('input'));
+  assert.equal(oldCall.signal.aborted, true);
+  assert.equal(get('check-core-capabilities').disabled, true);
+  assert.ok(get('core-capabilities-result').textContent.includes('先保存'));
+  resolve(Response.json(coreCapabilities)); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('core-capabilities-details').hidden, true);
+  assert.equal(get('core-components').textContent, '');
+  get('check-core-capabilities').click();
+  assert.equal(calls.filter(c => c.path === '/api/core-capabilities').length, 1);
+  submit('settings-form'); await until(() => get('settings-result').textContent.includes('设置已保存'));
+  assert.equal(get('check-core-capabilities').disabled, false);
+  assert.equal(get('core-capabilities-details').hidden, true);
+  assert.equal(oldCall.query.size, 0); assert.equal(oldCall.body, undefined);
+});
+test('settings saves invalidate completed and pending core checks, including failed saves', async t => {
+  let resolve, pending = false, failSave = false;
+  const { get, submit } = await fixture(t, {
+    '/api/core-capabilities': () => pending ? new Promise(r => { resolve = r; }) : Response.json(coreCapabilities),
+    '/api/settings': (_url, options) => options.body && failSave ? Response.json({ error: 'Synthetic save failed' }, { status: 409 })
+      : Response.json({ v2rayNPath: 'C:\\Synthetic', timeZoneId: 'UTC', demo: true })
+  });
+  get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+  failSave = true; submit('settings-form');
+  assert.equal(get('core-capabilities-details').hidden, true); assert.equal(get('core-components').textContent, '');
+  await until(() => get('settings-result').textContent.includes('Synthetic save failed'));
+  assert.equal(get('check-core-capabilities').disabled, false);
+  pending = true; failSave = false; get('check-core-capabilities').click(); await until(() => resolve);
+  submit('settings-form');
+  assert.equal(get('check-core-capabilities').disabled, true);
+  await until(() => get('settings-result').textContent.includes('设置已保存'));
+  resolve(Response.json(coreCapabilities)); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('core-capabilities-details').hidden, true); assert.equal(get('core-components').textContent, '');
+  assert.equal(get('check-core-capabilities').disabled, false);
+});
+test('core installation is an explicit authenticated action and remains pending until Host returns', async t => {
+  let resolve;
+  const timers = new Map();
+  const { get, calls, submit } = await fixture(t, {
+    '/api/core-capabilities': () => Response.json(coreCapabilities),
+    '/api/core-actions': () => new Promise(r => { resolve = r; })
+  }, {}, timers);
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 0);
+  get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 0);
+  assert.equal(get('core-action-result').textContent, '尚未发起安装或恢复。');
+  get('prepare-core-install').click(); await until(() => resolve);
+  const call = calls.find(c => c.path === '/api/core-actions');
+  assert.deepEqual(call.body, { action: 'install', componentId: 'sing-box-statistics' });
+  assert.equal(call.headers['x-monitor-request'], '1'); assert.equal(call.query.size, 0);
+  assert.equal(get('save-settings').disabled, true); assert.equal(get('v2rayn-path').disabled, true);
+  assert.equal(get('time-zone').disabled, true); assert.equal(get('check-core-capabilities').disabled, true);
+  assert.equal(get('prepare-core-restore').disabled, true);
+  assert.ok(get('core-action-result').textContent.includes('原生确认窗口'));
+  assert.ok(!get('core-action-result').textContent.includes('已替换'));
+  submit('settings-form'); assert.equal(calls.filter(c => c.path === '/api/settings' && c.body).length, 0);
+  resolve(Response.json({ state: 'InstalledPendingReload', operationId: '11111111-2222-3333-4444-555555555555',
+    backupDirectory: 'Synthetic <img src=x>', details: '临时文件未完全清理：Synthetic <img src=x>' }));
+  await until(() => get('core-action-result').textContent.includes('核心文件已替换'));
+  assert.ok(get('core-action-result').textContent.includes('手动重载'));
+  assert.ok(!get('core-action-result').textContent.includes('已生效'));
+  assert.equal(get('v2rayn-path').disabled, false); assert.equal(get('save-settings').disabled, false);
+  assert.ok(get('core-action-record').textContent.includes('Synthetic <img src=x>'));
+  assert.ok(get('core-action-record').textContent.includes('临时文件未完全清理'));
+  assert.equal(get('core-action-record').querySelector('img'), null);
+  const outcome = get('core-action-result').textContent, record = get('core-action-record').textContent;
+  const reads = calls.filter(c => c.path === '/api/status').length;
+  timers.get(2000)(); await until(() => calls.filter(c => c.path === '/api/status').length > reads);
+  assert.equal(get('core-action-result').textContent, outcome); assert.equal(get('core-action-record').textContent, record);
+  get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+  assert.equal(get('core-action-result').textContent, outcome); assert.equal(get('core-action-record').textContent, record);
+});
+test('core restoration accepts only a fixed component and operation GUID, never a path', async t => {
+  const { get, calls, change } = await fixture(t, { '/api/core-actions': () => Response.json({
+    state: 'Restored', operationId: '11111111222233334444555555555555'
+  }) });
+  for (const invalid of ['', 'F:\\Synthetic\\backup', 'not-a-guid', '00000000-0000-0000-0000-000000000000',
+    '00000000000000000000000000000000', '1111111122223333-4444555555555555']) {
+    get('core-restore-operation').value = invalid; get('prepare-core-restore').click();
+    assert.ok(get('core-action-result').textContent.includes('GUID'));
+  }
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 0);
+  get('core-action-component').value = 'arbitrary-component'; get('prepare-core-install').click();
+  assert.ok(get('core-action-result').textContent.includes('支持的配套组件'));
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 0);
+  change('core-action-component', 'xray-probes');
+  get('core-restore-operation').value = ' 11111111-2222-3333-4444-555555555555 ';
+  get('prepare-core-restore').click(); await until(() => get('core-action-result').textContent.includes('核心文件已恢复'));
+  assert.deepEqual(calls.find(c => c.path === '/api/core-actions').body, {
+    action: 'restore', componentId: 'xray-probes', operationId: '11111111222233334444555555555555'
+  });
+  assert.ok(get('core-action-result').textContent.includes('账本未改动'));
+  get('core-restore-operation').value = get('core-action-record').textContent.replace('操作 ID：', '');
+  get('prepare-core-restore').click(); await until(() => get('core-action-result').textContent.includes('核心文件已恢复'));
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 2);
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').at(-1).body.operationId, '11111111222233334444555555555555');
+});
+test('core action states retain precise outcomes without implying statistics are effective', async t => {
+  let state;
+  const { get } = await fixture(t, { '/api/core-actions': () => Response.json({
+    state, operationId: '11111111-2222-3333-4444-555555555555', backupDirectory: 'Synthetic backup'
+  }) });
+  for (const [next, label] of [
+    ['AssetUnavailable', '未下载或安装'], ['ExistingFileMatched', '现有文件摘要一致'], ['AlreadyMatched', '现有文件摘要一致'],
+    ['Unavailable', '未提供配套核心操作能力'], ['UnsafePath', '路径未通过安全核验'],
+    ['InvalidCandidate', '候选组件未通过核验'], ['UnsupportedExisting', '现有文件不受支持'], ['CoreRunning', '仍在运行'],
+    ['Ready', '尚未完成文件操作'], ['ConfirmationRequired', '尚需 Host 原生窗口确认'], ['RecoveryRequired', '需要恢复处理'],
+    ['FailedRestored', '操作失败，原核心文件已恢复'], ['AlreadyRestored', '无需重复恢复'], ['PlanChanged', '准备条件已变化'],
+    ['Cancelled', '操作已取消'], ['TimedOut', '不会自动重试'], ['DownloadFailed', '组件下载失败'],
+    ['InvalidArchive', '归档校验失败'], ['PermissionDenied', '未自动提权'], ['FileBusy', '正在占用'],
+    ['StorageFailed', '文件操作失败'], ['UnknownTarget', '目标身份尚未核实'], ['UnsupportedTarget', '当前目标不受支持'],
+    ['InvalidRequest', '请求无效'], ['future_state', '返回状态未知']
+  ]) {
+    state = next; get('prepare-core-install').click();
+    await until(() => get('core-action-result').textContent.includes(label));
+    assert.ok(!get('core-action-result').textContent.includes('已生效'));
+    assert.ok(get('core-action-record').textContent.includes('11111111-2222-3333-4444-555555555555'));
+  }
+});
+test('settings invalidate action records and late action responses after directory edits are ignored', async t => {
+  let pending = false, resolve;
+  const { w, get, calls, submit } = await fixture(t, { '/api/core-actions': () => pending
+    ? new Promise(r => { resolve = r; }) : Response.json({ state: 'RecoveryRequired', operationId: '11111111-2222-3333-4444-555555555555' }) });
+  get('prepare-core-install').click(); await until(() => get('core-action-result').textContent.includes('需要恢复处理'));
+  submit('settings-form'); await until(() => get('settings-result').textContent.includes('设置已保存'));
+  assert.equal(get('core-action-record').hidden, true); assert.equal(get('core-action-record').textContent, '');
+  pending = true; get('prepare-core-install').click(); await until(() => resolve);
+  const old = calls.filter(c => c.path === '/api/core-actions').at(-1);
+  // Programmatic edits still invalidate an in-flight response even though the input is disabled.
+  get('v2rayn-path').value = 'D:\\Changed synthetic'; get('v2rayn-path').dispatchEvent(new w.Event('input'));
+  assert.equal(old.signal.aborted, true);
+  resolve(Response.json({ state: 'InstalledPendingReload', operationId: 'old' }));
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(!get('core-action-result').textContent.includes('核心文件已替换'));
+  assert.equal(get('core-action-record').hidden, true); assert.equal(get('prepare-core-install').disabled, true);
+});
+test('session expiry cancels a pending core action and does not display its late result', async t => {
+  let resolve, expired = false;
+  const { get, calls, change } = await fixture(t, {
+    '/api/core-actions': () => new Promise(r => { resolve = r; }),
+    '/api/history': () => expired ? new Response('{}', { status: 401 }) : Response.json(history)
+  });
+  get('prepare-core-install').click(); await until(() => resolve);
+  expired = true; change('bucket', 'week'); await until(() => !get('session-alert').hidden);
+  assert.equal(calls.find(c => c.path === '/api/core-actions').signal.aborted, true);
+  resolve(Response.json({ state: 'InstalledPendingReload', operationId: 'old' })); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('prepare-core-install').disabled, true); assert.equal(get('prepare-core-restore').disabled, true);
+  assert.equal(get('core-action-record').hidden, true);
+  assert.ok(get('core-action-result').textContent.includes('托盘'));
+  assert.ok(!get('core-action-result').textContent.includes('核心文件已替换'));
+});
+const sidecarPlan = '11111111222233334444555555555555';
+const runtimeObservation = { state: 'verified', coreName: 'sing-box', fileIdentityVerified: true,
+  statisticsAvailable: true, memberCount: 3, probeState: 'unavailable', checkedAt: '2026-10-23T01:00:00Z' };
+test('sidecar uses only fixed payloads and retains a Host plan only for explicit retry states', async t => {
+  let applies = 0;
+  const { get, calls } = await fixture(t, { '/api/core-actions': (_url, options) => {
+    const action = JSON.parse(options.body).action;
+    return Response.json(action === 'install' ? { state: 'RecoveryRequired', operationId: sidecarPlan }
+      : action === 'prepare-sidecar' ? { state: 'SidecarPrepared', planId: sidecarPlan, details: 'Synthetic <img src=x>' }
+      : action === 'apply-sidecar' ? { state: ['CoreRunning', 'Cancelled', 'FileBusy', 'PortUnavailable', 'SidecarInstalledPendingReload'][applies++], planId: sidecarPlan }
+      : { state: 'SidecarRestored', operationId: sidecarPlan });
+  } });
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 0);
+  assert.equal(get('apply-core-sidecar').disabled, true);
+  get('prepare-core-install').click(); await until(() => get('core-action-result').textContent.includes('需要恢复处理'));
+  const recovery = get('core-action-record').textContent;
+  get('prepare-core-sidecar').click(); await until(() => !get('apply-core-sidecar').disabled);
+  assert.deepEqual(calls.filter(c => c.path === '/api/core-actions').at(-1).body,
+    { action: 'prepare-sidecar', componentId: 'sing-box-statistics' });
+  assert.equal(get('core-sidecar-details').querySelector('img'), null);
+  assert.ok(get('core-sidecar-details').textContent.includes('<img src=x>'));
+  for (const label of ['仍在运行', '操作已取消', '正在占用', '返回状态未知', '统计配置已写入']) {
+    get('apply-core-sidecar').click(); await until(() => get('core-sidecar-result').textContent.includes(label));
+    assert.deepEqual(calls.filter(c => c.path === '/api/core-actions').at(-1).body,
+      { action: 'apply-sidecar', componentId: 'sing-box-statistics', planId: sidecarPlan });
+    assert.equal(get('apply-core-sidecar').disabled, label === '统计配置已写入');
+  }
+  assert.equal(get('apply-core-sidecar').disabled, true);
+  assert.equal(get('restore-core-sidecar').disabled, false);
+  const preparations = calls.filter(c => c.path === '/api/core-actions' && c.body.action === 'prepare-sidecar').length;
+  get('core-restore-operation').value = '11111111-2222-3333-4444-555555555555';
+  get('restore-core-sidecar').click(); await until(() => get('core-sidecar-result').textContent.includes('统计配置已恢复'));
+  assert.deepEqual(calls.filter(c => c.path === '/api/core-actions').at(-1).body,
+    { action: 'restore-sidecar', componentId: 'sing-box-statistics', operationId: sidecarPlan });
+  assert.equal(calls.filter(c => c.path === '/api/core-actions' && c.body.action === 'prepare-sidecar').length, preparations);
+  assert.equal(get('restore-core-sidecar').disabled, false);
+  assert.equal(get('core-action-record').textContent, recovery);
+  assert.ok(get('core-action-result').textContent.includes('需要恢复处理'));
+});
+test('runtime verification is explicit and ordinary statistics never imply probe availability or a selected-core match', async t => {
+  let runtime = runtimeObservation;
+  const { get, calls } = await fixture(t, {
+    '/api/core-capabilities': () => Response.json({ ...coreCapabilities,
+      components: [{ ...coreCapabilities.components[0], downloadState: 'available' }] }),
+    '/api/core-actions': () => Response.json({ state: 'RuntimeChecked', runtime })
+  });
+  get('check-core-capabilities').click(); await until(() => !get('core-capabilities-details').hidden);
+  assert.ok(get('core-components').textContent.includes('固定兼容版本可下载'));
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').length, 0);
+  get('verify-core-runtime').click(); await until(() => !get('core-runtime-details').hidden);
+  assert.deepEqual(calls.filter(c => c.path === '/api/core-actions').at(-1).body,
+    { action: 'verify-runtime', componentId: 'sing-box-statistics' });
+  assert.ok(get('core-runtime-details').textContent.includes('普通统计接口：可读（reset=false） · 成员数：3'));
+  assert.ok(get('core-runtime-details').textContent.includes('独立探测：计数不可用'));
+  runtime = { ...runtimeObservation, state: 'different_core', coreName: 'Synthetic <img src=x>', probeState: 'available' };
+  get('verify-core-runtime').click(); await until(() => get('core-runtime-result').textContent.includes('另一种核心'));
+  assert.ok(!get('core-runtime-result').textContent.includes('普通统计接口已核实'));
+  assert.equal(get('core-runtime-details').querySelector('img'), null);
+  runtime = { ...runtimeObservation, state: 'unverified_core', fileIdentityVerified: false, statisticsAvailable: false, probeState: 'available' };
+  get('verify-core-runtime').click(); await until(() => get('core-runtime-result').textContent.includes('身份尚未核实'));
+  assert.ok(get('core-runtime-details').textContent.includes('成员数：未知'));
+  assert.ok(get('core-runtime-details').textContent.includes('独立探测：计数可用'));
+});
+test('settings edits saves and component changes clear sidecar plans runtime results and restore IDs', async t => {
+  const { w, get, change, submit } = await fixture(t, { '/api/core-actions': (_url, options) => Response.json(
+    JSON.parse(options.body).action === 'verify-runtime' ? { state: 'RuntimeChecked', runtime: runtimeObservation }
+      : { state: 'SidecarAlreadyMatched', planId: sidecarPlan }) });
+  get('prepare-core-sidecar').click(); await until(() => !get('apply-core-sidecar').disabled);
+  get('verify-core-runtime').click(); await until(() => !get('core-runtime-details').hidden);
+  get('core-restore-operation').value = sidecarPlan;
+  change('core-action-component', 'xray-probes');
+  assert.equal(get('prepare-core-sidecar').disabled, true); assert.equal(get('apply-core-sidecar').disabled, true);
+  assert.equal(get('core-restore-operation').value, ''); assert.equal(get('core-runtime-details').hidden, true);
+  change('core-action-component', 'sing-box-statistics');
+  get('prepare-core-sidecar').click(); await until(() => !get('apply-core-sidecar').disabled);
+  submit('settings-form'); await until(() => get('settings-result').textContent.includes('设置已保存'));
+  assert.equal(get('apply-core-sidecar').disabled, true);
+  get('prepare-core-sidecar').click(); await until(() => !get('apply-core-sidecar').disabled);
+  get('v2rayn-path').value = 'D:\\Synthetic changed'; get('v2rayn-path').dispatchEvent(new w.Event('input'));
+  assert.equal(get('apply-core-sidecar').disabled, true);
+  assert.equal(get('core-sidecar-record').textContent, '');
+});
+test('late sidecar and runtime replies cannot survive a settings edit or session expiry', async t => {
+  let resolve, expired = false;
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/core-actions': () => new Promise(r => { resolve = r; }),
+    '/api/history': () => expired ? new Response('{}', { status: 401 }) : Response.json(history)
+  });
+  get('prepare-core-sidecar').click(); await until(() => resolve);
+  get('v2rayn-path').dispatchEvent(new w.Event('input'));
+  assert.equal(calls.filter(c => c.path === '/api/core-actions').at(-1).signal.aborted, true);
+  resolve(Response.json({ state: 'SidecarPrepared', planId: sidecarPlan })); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('apply-core-sidecar').disabled, true);
+  get('verify-core-runtime').click(); await until(() => calls.filter(c => c.path === '/api/core-actions').length === 2);
+  expired = true; change('bucket', 'week'); await until(() => !get('session-alert').hidden);
+  resolve(Response.json({ state: 'RuntimeChecked', runtime: runtimeObservation })); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('core-runtime-details').hidden, true);
+  assert.equal(get('verify-core-runtime').disabled, true); assert.equal(get('apply-core-sidecar').disabled, true);
+});
 test('provider preview is invalidated on edits and commit remains an explicit separate action', async t => {
   const { w, get, submit, calls } = await fixture(t);
   w.document.querySelector('.nav-item[data-view=provider]').click(); get('provider-source').value = 'Synthetic';
