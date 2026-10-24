@@ -1,8 +1,13 @@
+using System.Runtime.InteropServices;
+
 namespace V2rayNMonitor.Host;
 
 internal static class NativeCoreConfirmation
 {
     [ThreadStatic] private static bool showing;
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr window, int command);
 
     internal static bool Show(CoreActionPrompt prompt, CancellationToken token)
     {
@@ -34,6 +39,9 @@ internal static class NativeCoreConfirmation
         form.Controls.Add(details); form.Controls.Add(buttons);
         form.CancelButton = cancel;
         form.AcceptButton = cancel;
+        // A hidden process startup can suppress the first native ShowWindow even though
+        // WinForms reports Visible=true. Explicit consent must never wait in a hidden window.
+        form.Shown += (_, _) => { ShowWindow(form.Handle, 5 /* SW_SHOW */); form.Activate(); };
         using var timer = new System.Windows.Forms.Timer { Interval = 100 };
         timer.Tick += (_, _) => { if (token.IsCancellationRequested) form.Close(); };
         timer.Start();

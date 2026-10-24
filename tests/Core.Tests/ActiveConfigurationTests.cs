@@ -2506,6 +2506,38 @@ public sealed class ActiveConfigurationTests : IDisposable
     }
 
     [Theory]
+    [InlineData("sing-box-statistics", false)]
+    [InlineData("xray-probes", false)]
+    [InlineData("sing-box-statistics", true)]
+    [InlineData("xray-probes", true)]
+    public async Task ComponentInstallAndRestoreKeepIdentityChecksWhenBackupPathExceedsWin32Limit(string component, bool longTarget)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var descriptor = CoreComponents.Catalog.Single(x => x.Id == component);
+        var suffix = Path.Combine("portable", "bin",
+            component == "sing-box-statistics" ? "sing_box" : "xray", descriptor.FileName);
+        var padding = (longTarget ? 280 : 235) - directory.Length - suffix.Length - 2;
+        Assert.InRange(padding, 1, 200);
+        var f = new InstallFixture(Path.Combine(directory, new string('l', padding)), component);
+        Assert.Equal(longTarget, f.Target.Length >= 260);
+        var installer = f.Installer();
+        var plan = await Ready(installer, f);
+        Assert.True(Path.Combine(f.Backup(plan.OperationId), "candidate.exe").Length >= 260);
+
+        var installed = await installer.InstallAsync(plan, CancellationToken.None);
+        Assert.Equal(CoreInstallState.InstalledPendingReload, installed.State);
+        Assert.Equal(SyntheticCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(Path.Combine(f.Backup(plan.OperationId), "previous.exe")));
+        var restore = await installer.PrepareRestoreAsync(plan.OperationId, CancellationToken.None);
+        Assert.Equal(CoreInstallState.Ready, restore.State);
+        Assert.Equal(CoreInstallState.Restored,
+            (await installer.RestoreAsync(plan.OperationId, CancellationToken.None, restore.Journal)).State);
+        Assert.Equal(ExistingCoreBytes, File.ReadAllBytes(f.Target));
+        Assert.True(Directory.Exists(f.Backup(plan.OperationId)));
+        f.Preserved();
+    }
+
+    [Theory]
     [InlineData("cancel", "Cancelled")]
     [InlineData("running", "CoreRunning")]
     [InlineData("changed", "PlanChanged")]

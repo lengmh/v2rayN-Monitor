@@ -359,7 +359,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         CoreFileIdentity expected, CancellationToken token)
     {
         if (!OperatingSystem.IsWindows()) return await IdentifyFileAsync(path, token) == expected;
-        using var current = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+        using var current = CreateFileW(MetadataPath(path), 0, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
         if (current.IsInvalid || !GetFileInformationByHandle(held.SafeFileHandle, out var before) ||
             !GetFileInformationByHandle(current, out var now)) return false;
         return (now.Attributes & 0x410) == 0 && before.Volume == now.Volume &&
@@ -368,10 +368,17 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
     private static (uint Volume, uint High, uint Low) PhysicalIdentity(string path)
     {
         // Running image paths may be hard links or alternate spellings of the same file.
-        using var file = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        using var file = CreateFileW(MetadataPath(path), 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
         if (file.IsInvalid || !GetFileInformationByHandle(file, out var identity))
             throw new Rejected(CoreInstallState.UnknownTarget);
         return (identity.Volume, identity.IndexHigh, identity.IndexLow);
+    }
+    private static string MetadataPath(string path)
+    {
+        var full = Path.GetFullPath(path);
+        // A valid short target can produce a backup path beyond Win32 MAX_PATH.
+        if (full.Length < 260 || full.StartsWith(@"\\?\", StringComparison.Ordinal)) return full;
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
     private static string FileId(string path)
     {
