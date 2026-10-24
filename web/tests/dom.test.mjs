@@ -1082,6 +1082,153 @@ test('provider preview is invalidated on edits and commit remains an explicit se
   submit('import-form'); await until(() => !get('import-preview').hidden); get('commit-import').click(); await until(() => get('import-result').textContent.includes('导入完成'));
   assert.equal(calls.filter(c => c.path === '/api/imports/commit').length, 1); assert.equal(get('total-value').textContent, '16.106 GB');
 });
+test('provider tracking upgrade is explicit and legacy file totals and references stay unknown', async t => {
+  let tracking = false;
+  const { w, get, calls } = await fixture(t, {
+    '/api/imports': () => Response.json([{ source: 'Synthetic legacy', hash: 'legacy', rowCount: 1, rawBytes: '1', billedBytes: '0.1', referencesComplete: false }]),
+    '/api/imports/features': () => Response.json({ trackingAvailable: tracking, upgradeAvailable: !tracking }),
+    '/api/imports/enable-tracking': () => { tracking = true; return Response.json({ state: 'Enabled', backupPath: 'Synthetic backup', preservedBatches: 1, preservedRecords: 1 }); }
+  });
+  w.document.querySelector('.nav-item[data-view=provider]').click();
+  await until(() => !get('enable-import-tracking').disabled);
+  assert.equal(calls.filter(c => c.path === '/api/imports/enable-tracking').length, 0);
+  assert.ok(get('import-batches').textContent.includes('引用未知，不可撤销'));
+  assert.ok(get('import-batches').textContent.includes('原始量：未知'));
+  get('enable-import-tracking').click(); await until(() => get('tracking-result').textContent.includes('批次引用已启用'));
+  assert.deepEqual(calls.find(c => c.path === '/api/imports/enable-tracking').body, {});
+  assert.ok(get('tracking-result').textContent.includes('Synthetic backup'));
+  await until(() => get('enable-import-tracking').disabled);
+  assert.equal(get('import-batches').querySelector('[data-revoke-preview]'), null);
+});
+test('a distinct fully overlapped file can explicitly save zero-increment batch references', async t => {
+  const preview = { hash: 'different-synthetic-text', rowCount: 1, rawBytes: '1', billedBytes: '0.1',
+    firstTime: null, lastTime: null, duplicate: false, warnings: [], newRowCount: 0, skippedRowCount: 1, newRawBytes: '0', newBilledBytes: '0' };
+  const { get, submit, calls } = await fixture(t, {
+    '/api/imports/preview': () => Response.json(preview), '/api/imports/commit': () => Response.json(preview)
+  });
+  Object.defineProperty(get('csv-file'), 'files', { value: [{ size: 1, text: async () => 'Synthetic CSV' }] });
+  get('provider-source').value = 'Synthetic'; submit('import-form'); await until(() => !get('import-preview').hidden);
+  assert.equal(get('commit-import').disabled, false);
+  assert.ok(get('import-result').textContent.includes('可新增本批引用'));
+  get('commit-import').click(); await until(() => get('import-result').textContent.includes('已保存批次引用'));
+  assert.equal(calls.filter(c => c.path === '/api/imports/commit').length, 1);
+});
+test('late revoke previews are invalidated by form edits and session expiry clears confirmation', async t => {
+  let resolve, expired = false;
+  const preview = { source: 'Synthetic', hash: 'hash', token: 'token', canRevoke: true, reason: null, rowCount: 1,
+    deletedRowCount: 1, retainedRowCount: 0, deletedRawBytes: '1', deletedBilledBytes: '1', retainedRawBytes: '0', retainedBilledBytes: '0' };
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/imports/features': () => Response.json({ trackingAvailable: true, upgradeAvailable: false }),
+    '/api/imports': () => Response.json([{ ...preview, referencesComplete: true, rawBytes: '1', billedBytes: '1' }]),
+    '/api/imports/revoke-preview': () => new Promise(r => { resolve = r; }),
+    '/api/history': () => expired ? new Response('{}', { status: 401 }) : Response.json(history)
+  });
+  w.document.querySelector('.nav-item[data-view=provider]').click(); await until(() => get('import-batches').querySelector('[data-revoke-preview]'));
+  get('import-batches').querySelector('[data-revoke-preview]').click(); await until(() => resolve);
+  get('provider-source').dispatchEvent(new w.Event('input'));
+  assert.equal(calls.find(c => c.path === '/api/imports/revoke-preview').signal.aborted, true);
+  resolve(Response.json(preview)); await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('confirm-revoke').disabled, true); assert.equal(get('revoke-preview').hidden, true);
+  w.document.querySelector('.nav-item[data-view=overview]').click(); expired = true; change('bucket', 'week');
+  await until(() => !get('session-alert').hidden);
+  assert.equal(get('confirm-revoke').disabled, true); assert.equal(get('enable-import-tracking').disabled, true);
+});
+test('provider revoke previews exact shared amounts before confirmation and last-source removal falls back to local', async t => {
+  let removed = false;
+  const preview = { source: 'Synthetic', hash: 'synthetic-hash', token: 'synthetic-token', canRevoke: true, reason: null,
+    rowCount: 2, deletedRowCount: 1, retainedRowCount: 1, deletedRawBytes: '1', deletedBilledBytes: '0.000000000001',
+    retainedRawBytes: '9007199254740993', retainedBilledBytes: '123456789.000000000001' };
+  const { w, get, calls, change } = await fixture(t, {
+    '/api/provider/sources': () => Response.json(removed ? [] : ['Synthetic']),
+    '/api/provider/nodes': () => Response.json([]),
+    '/api/provider/history': () => Response.json({ source: 'Synthetic', rawBytes: '1', billedBytes: '1', recordCount: 0, nodes: [], series: [], records: [] }),
+    '/api/imports/features': () => Response.json({ trackingAvailable: true, upgradeAvailable: false }),
+    '/api/imports': () => Response.json(removed ? [] : [{ ...preview, referencesComplete: true, rowCount: 0, rawBytes: '0', billedBytes: '0', fileRowCount: 2, fileRawBytes: '9007199254740994', fileBilledBytes: '123456789.000000000002' }]),
+    '/api/imports/revoke-preview': () => Response.json(preview),
+    '/api/imports/revoke': () => { removed = true; return Response.json({ state: 'Revoked' }); }
+  });
+  await until(() => get('statistics-source').options.length === 2); change('statistics-source', 'Synthetic');
+  w.document.querySelector('.nav-item[data-view=provider]').click(); await until(() => get('import-batches').querySelector('[data-revoke-preview]'));
+  get('import-batches').querySelector('[data-revoke-preview]').click(); await until(() => !get('confirm-revoke').disabled);
+  assert.equal(calls.filter(c => c.path === '/api/imports/revoke').length, 0);
+  assert.ok(get('revoke-details').textContent.includes('0.000000000001 bytes'));
+  assert.ok(get('revoke-details').textContent.includes('9,007,199,254,740,993 bytes'));
+  get('confirm-revoke').click(); await until(() => get('statistics-source').value === '');
+  assert.deepEqual(calls.find(c => c.path === '/api/imports/revoke').body, { source: 'Synthetic', hash: 'synthetic-hash', token: 'synthetic-token' });
+  assert.equal(get('compare-toggle').checked, false); assert.equal(get('confirm-revoke').disabled, true);
+});
+test('revoke tokens are cleared by import edits and a 409 requires another preview', async t => {
+  const preview = { source: 'Synthetic', hash: 'hash', token: 'token', canRevoke: true, reason: null, rowCount: 1, deletedRowCount: 1, retainedRowCount: 0,
+    deletedRawBytes: '1', deletedBilledBytes: '1', retainedRawBytes: '0', retainedBilledBytes: '0' };
+  const { w, get, calls } = await fixture(t, {
+    '/api/imports/features': () => Response.json({ trackingAvailable: true, upgradeAvailable: false }),
+    '/api/imports': () => Response.json([{ ...preview, referencesComplete: true, rawBytes: '1', billedBytes: '1' }]),
+    '/api/imports/revoke-preview': () => Response.json(preview),
+    '/api/imports/revoke': () => Response.json({ error: 'Synthetic changed' }, { status: 409 })
+  });
+  w.document.querySelector('.nav-item[data-view=provider]').click(); await until(() => get('import-batches').querySelector('[data-revoke-preview]'));
+  const previewButton = () => get('import-batches').querySelector('[data-revoke-preview]');
+  previewButton().click(); await until(() => !get('confirm-revoke').disabled);
+  get('provider-source').dispatchEvent(new w.Event('input')); assert.equal(get('confirm-revoke').disabled, true);
+  previewButton().click(); await until(() => !get('confirm-revoke').disabled);
+  get('confirm-revoke').click(); await until(() => get('revoke-result').textContent.includes('请重新预览'));
+  get('confirm-revoke').click(); assert.equal(calls.filter(c => c.path === '/api/imports/revoke').length, 1);
+});
+test('original CSV archiving writes the preview-bound Blob bytes and reports saved only after close', async t => {
+  const { w, get, submit, calls } = await fixture(t);
+  const original = new Blob([new Uint8Array([239, 187, 191, 97, 13, 10])], { type: 'text/csv' });
+  Object.defineProperty(original, 'name', { value: 'original.csv' });
+  Object.defineProperty(get('csv-file'), 'files', { value: [original] });
+  get('provider-source').value = 'Synthetic'; get('archive-csv').checked = true;
+  let written, close, pickerCalls = 0;
+  w.showSaveFilePicker = async () => {
+    pickerCalls++;
+    return { createWritable: async () => ({ write: async value => { written = value; }, close: () => new Promise(r => { close = r; }) }) };
+  };
+  submit('import-form'); await until(() => !get('import-preview').hidden); get('commit-import').click();
+  await until(() => !get('archive-original').hidden);
+  assert.ok(get('archive-result').textContent.includes('尚未保存'));
+  get('save-original-csv').click(); await until(() => close);
+  assert.equal(written, original); assert.ok(!get('archive-result').textContent.includes('已保存'));
+  const featuresReads = calls.filter(c => c.path === '/api/imports/features').length;
+  w.document.querySelector('.nav-item[data-view=provider]').click();
+  await until(() => calls.filter(c => c.path === '/api/imports/features').length > featuresReads);
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(get('save-original-csv').disabled, true, 'batch refresh must not unlock a pending native save');
+  get('save-original-csv').dispatchEvent(new w.Event('click'));
+  assert.equal(pickerCalls, 1, 'pending archive also rejects synthetic repeated clicks');
+  close(); await until(() => get('archive-result').textContent.includes('原 CSV 已保存'));
+  assert.deepEqual([...new Uint8Array(await written.arrayBuffer())], [239, 187, 191, 97, 13, 10]);
+  w.showSaveFilePicker = async () => { throw new DOMException('Synthetic cancel', 'AbortError'); };
+  get('save-original-csv').click(); await until(() => get('archive-result').textContent.includes('原 CSV 未保存'));
+  assert.ok(get('archive-result').textContent.includes('账本不受影响'));
+});
+test('recorded zero trend buckets drill through calendar timezone while missing slots and stale charts do not', async t => {
+  const { w, get, change, calls } = await fixture(t, {
+    '/api/settings': () => Response.json({ v2rayNPath: 'C:\\Synthetic', timeZoneId: 'Asia/Shanghai', demo: true }),
+    '/api/status': () => Response.json({ state: 'demo', demo: true, historyBases: ['local_proxy', 'actual_member'] }),
+    '/api/history': url => Response.json({ ...history, series: url.searchParams.get('bucket') === 'month'
+      ? [{ label: '2026-11', upload: '0', download: '0' }]
+      : [{ label: '2026-11-01', upload: '0', download: '0' }] })
+  });
+  change('history-basis', 'actual_member');
+  await until(() => Array.from(get('node-filter').options).some(option => option.value === 'b'));
+  change('node-filter', 'b');
+  assert.equal(get('node-filter').value, 'b');
+  w.document.querySelector('[data-period=year]').click();
+  await until(() => get('chart').querySelector('button[data-bucket-label="2026-11"]'));
+  const old = get('chart').querySelector('button');
+  assert.equal(get('chart').querySelectorAll('button').length, 1);
+  old.click(); await until(() => get('chart').querySelector('button[data-bucket-label="2026-11-01"]'));
+  let q = calls.filter(c => c.path === '/api/history').at(-1).query;
+  assert.equal(q.get('start'), '2026-10-31T16:00:00.000Z'); assert.equal(q.get('bucket'), 'day');
+  assert.equal(q.get('basis'), 'actual_member'); assert.equal(q.get('nodeKey'), 'b'); assert.equal(q.get('page'), '0');
+  const count = calls.filter(c => c.path === '/api/history').length;
+  old.click(); assert.equal(calls.filter(c => c.path === '/api/history').length, count);
+  get('chart').querySelector('button').click(); await until(() => calls.filter(c => c.path === '/api/history').at(-1).query.get('bucket') === 'hour');
+  q = calls.filter(c => c.path === '/api/history').at(-1).query;
+  assert.equal(q.get('end'), '2026-11-01T16:00:00.000Z'); assert.equal(get('chart').getAttribute('role'), 'group');
+});
 test('overlap preview separates new and skipped rows and commit reports its recalculated result', async t => {
   const preview = { hash: 'synthetic-overlap', rowCount: 3, rawBytes: '240', billedBytes: '192.000000000123',
     newRowCount: 1, skippedRowCount: 2, newRawBytes: '40', newBilledBytes: '32.000000000123',

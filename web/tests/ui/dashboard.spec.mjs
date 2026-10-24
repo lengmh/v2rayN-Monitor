@@ -6,7 +6,7 @@ const history = {
   nodes: [{ key: 'a', name: 'Synthetic · Singapore', upload: '536870912', download: '8589934592' }, { key: 'b', name: 'Synthetic · Tokyo', upload: '268435456', download: '4294967296' }, { key: 'c', name: 'Synthetic · Frankfurt', upload: '268435456', download: '2147483648' }],
   records: [{ start: '2026-10-09T11:00:00Z', end: '2026-10-09T11:01:00Z', nodeKey: 'a', nodeName: 'Synthetic · Singapore', upload: '1073741824', download: '15032385536', quality: 'measured' }], recordCount: 51
 };
-async function mock(page, overrides = {}, controlClock = false) {
+async function mock(page, overrides = {}, controlClock = false, waitForHistory = true) {
   const calls = [];
   await page.route('http://127.0.0.1:4173/', async route => { const response = await route.fetch(); await route.fulfill({ response, headers: { ...response.headers(), 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" } }); });
   await page.route('**/api/**', async route => {
@@ -28,9 +28,199 @@ async function mock(page, overrides = {}, controlClock = false) {
   if (controlClock) await page.clock.install({ time: new Date('2026-10-09T19:00:00Z') });
   else await page.clock.setFixedTime(new Date('2026-10-09T19:00:00Z'));
   await page.goto('/#one-time-synthetic-token');
-  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+  if (waitForHistory) await expect(page.locator('#total-value')).toHaveText('16.106 GB');
   return calls;
 }
+test('initial history failure retries before the normal thirty second refresh and then resumes normal polling', async ({ page }) => {
+  let reads = 0;
+  const calls = await mock(page, { '/api/history': route =>
+    route.fulfill(++reads <= 2 ? { status: 503, body: '{}' } : json(history)) }, true, false);
+  await expect(page.locator('#refresh-note')).toContainText('更新失败');
+  expect(reads).toBe(1);
+  await page.clock.fastForward(2000);
+  await expect.poll(() => reads).toBe(2);
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await page.clock.fastForward(5000);
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+  expect(reads).toBe(3);
+  expect(calls.filter(c => c.path === '/api/history').every(c => c.url.searchParams.get('page') === '0')).toBe(true);
+  await page.clock.fastForward(28000);
+  expect(reads).toBe(3);
+  await page.clock.fastForward(2000);
+  await expect.poll(() => reads).toBe(4);
+});
+test('initial empty history is checked promptly while recorded idle remains on normal polling', async ({ page }) => {
+  let reads = 0;
+  const idle = { ...history, upload: '0', download: '0',
+    series: [{ label: '2026-10-09', upload: '0', download: '0' }],
+    nodes: [{ key: 'a', name: 'Synthetic idle', upload: '0', download: '0' }],
+    records: [{ ...history.records[0], upload: '0', download: '0' }], recordCount: 1 };
+  await mock(page, { '/api/history': route =>
+    route.fulfill(json(++reads === 1 ? { ...idle, series: [], nodes: [], records: [], recordCount: 0 } : idle)) }, true, false);
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await page.clock.fastForward(2000);
+  await expect(page.locator('#total-exact')).toHaveText('0 bytes');
+  expect(reads).toBe(2);
+  await page.clock.fastForward(7000);
+  expect(reads).toBe(2);
+  await expect(page.locator('#total-value')).not.toHaveText('—');
+});
+for (const state of ['unavailable', 'empty']) test(`history short retries are bounded when the collector stays ${state}`, async ({ page }) => {
+  let reads = 0;
+  await mock(page, { '/api/history': route => {
+    reads++;
+    return route.fulfill(state === 'unavailable' ? { status: 503, body: '{}' } :
+      json({ ...history, upload: '0', download: '0', series: [], nodes: [], records: [], recordCount: 0 }));
+  } }, true, false);
+  await expect(page.locator('#refresh-note')).toContainText(state === 'unavailable' ? '更新失败' : '暂无本机记录');
+  await page.clock.fastForward(2000);
+  await expect.poll(() => reads).toBe(2);
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await page.clock.fastForward(5000);
+  await expect.poll(() => reads).toBe(3);
+  await expect(page.locator('#summary')).toHaveAttribute('aria-busy', 'false');
+  await page.clock.fastForward(10000);
+  expect(reads).toBe(3);
+  await page.clock.fastForward(20000);
+  await expect.poll(() => reads).toBe(4);
+});
+test('history timeout retries without overlapping an in-flight recovery request', async ({ page }) => {
+  let reads = 0, complete;
+  await mock(page, { '/api/history': async route => {
+    reads++;
+    if (reads === 1) { await route.abort('timedout'); return; }
+    await new Promise(resolve => { complete = resolve; });
+    await route.fulfill(json(history));
+  } }, true, false);
+  await expect(page.locator('#refresh-note')).toContainText('更新失败');
+  await page.clock.fastForward(2000);
+  await expect.poll(() => reads).toBe(2);
+  await page.clock.fastForward(7000);
+  expect(reads).toBe(2);
+  complete();
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+});
+test('invalid history requests do not enter the short retry loop', async ({ page }) => {
+  let reads = 0;
+  await mock(page, { '/api/history': route => { reads++; return route.fulfill({ status: 400, body: '{}' }); } }, true, false);
+  await expect(page.locator('#refresh-note')).toContainText('更新失败');
+  await page.clock.fastForward(7000);
+  expect(reads).toBe(1);
+});
+test('a successful filter change replaces a pending history retry without stale requests', async ({ page }) => {
+  let reads = 0;
+  const calls = await mock(page, { '/api/history': route =>
+    route.fulfill(++reads === 1 ? { status: 503, body: '{}' } : json(history)) }, true, false);
+  await expect(page.locator('#refresh-note')).toContainText('更新失败');
+  await page.click('[data-period=day]');
+  await expect(page.locator('#total-value')).toHaveText('16.106 GB');
+  expect(reads).toBe(2);
+  expect(calls.filter(c => c.path === '/api/history').at(-1).url.searchParams.get('bucket')).toBe('hour');
+  await page.clock.fastForward(7000);
+  expect(reads).toBe(2);
+});
+test('history recovery respects hidden pages and expired sessions', async ({ page }) => {
+  let reads = 0, expired = false;
+  await mock(page, { '/api/history': route => {
+    reads++;
+    return route.fulfill({ status: expired ? 401 : 503, body: '{}' });
+  } }, true, false);
+  await expect(page.locator('#refresh-note')).toContainText('更新失败');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.clock.fastForward(7000);
+  expect(reads).toBe(1);
+  expired = true;
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(page.locator('#session-alert')).toBeVisible();
+  await expect(page.locator('#refresh-note')).toBeDisabled();
+  expect(reads).toBe(2);
+  await page.clock.fastForward(30000);
+  expect(reads).toBe(2);
+});
+test('manual history refresh preserves filters and supports keyboard without overlapping requests', async ({ page }) => {
+  let held = false, complete;
+  const calls = await mock(page, { '/api/history': async route => {
+    if (held) await new Promise(resolve => { complete = resolve; });
+    await route.fulfill(json(history));
+  } }, true);
+  const button = page.locator('#refresh-note');
+  await expect(page.getByRole('button', { name: /已更新.*30 秒/ })).toBeVisible();
+  await page.click('[data-period=day]'); await expect(button).toBeEnabled();
+  await page.selectOption('#node-filter', 'a'); await expect(button).toBeEnabled();
+  await page.selectOption('#unit', 'GiB');
+  const queries = () => calls.filter(c => c.path === '/api/history');
+  const selected = queries().at(-1).url.search, count = queries().length;
+  held = true;
+  await button.click();
+  await expect(button).toHaveText('正在更新…');
+  await expect(button).toBeDisabled();
+  await expect(button).toHaveAttribute('aria-busy', 'true');
+  await expect.poll(() => queries().length).toBe(count + 1);
+  await button.evaluate(button => { button.click(); button.click(); });
+  expect(queries()).toHaveLength(count + 1);
+  held = false; complete();
+  await expect(button).toBeEnabled();
+  await expect(button).toHaveAttribute('aria-busy', 'false');
+  for (const key of ['Enter', 'Space']) {
+    await button.focus(); await button.press(key); await expect(button).toBeEnabled();
+  }
+  expect(queries()).toHaveLength(count + 3);
+  expect(queries().slice(count).every(c => c.url.search === selected)).toBe(true);
+  await expect(page.locator('#node-filter')).toHaveValue('a');
+  await expect(page.locator('#bucket')).toHaveValue('hour');
+  await expect(page.locator('#unit')).toHaveValue('GiB');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(button).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+test('manual history refresh replaces a pending short retry immediately', async ({ page }) => {
+  let reads = 0;
+  await mock(page, { '/api/history': route =>
+    route.fulfill(++reads === 1 ? { status: 503, body: '{}' } : json(history)) }, true, false);
+  const button = page.locator('#refresh-note');
+  await expect(button).toContainText('2 秒后重试');
+  await button.click();
+  await expect(button).toContainText('已更新');
+  expect(reads).toBe(2);
+  await page.clock.fastForward(7000);
+  expect(reads).toBe(2);
+});
+for (const mode of ['provider', 'comparison', 'probe']) test(`manual history refresh queries the current ${mode} view`, async ({ page }) => {
+  const provider = { source: 'Synthetic refresh', rawBytes: '1000', billedBytes: '500.000123',
+    recordCount: 1, nodes: [], series: [], records: [] };
+  const calls = await mock(page, {
+    '/api/provider/sources': route => route.fulfill(json([provider.source])),
+    '/api/provider/nodes': route => route.fulfill(json([])),
+    '/api/provider/history': route => route.fulfill(json(provider)),
+    '/api/status': route => route.fulfill(json({ state: 'demo', demo: true, uploadPerSecond: '0', downloadPerSecond: '0',
+      probes: { historyEnabled: true, state: 'partial' } }))
+  }, true);
+  const button = page.locator('#refresh-note');
+  if (mode === 'probe') await page.click('[data-view=probes]');
+  else {
+    await page.selectOption('#statistics-source', provider.source); await expect(button).toBeEnabled();
+    await page.selectOption('#provider-metric', 'billed'); await expect(button).toBeEnabled();
+    if (mode === 'comparison') await page.check('#compare-toggle');
+  }
+  await expect(button).toBeEnabled();
+  const queries = () => calls.filter(c => ['/api/history', '/api/provider/history'].includes(c.path));
+  const previous = queries().slice(mode === 'comparison' ? -2 : -1).map(c => c.url.pathname + c.url.search).sort();
+  const count = queries().length;
+  await button.click(); await expect(button).toBeEnabled();
+  expect(queries().slice(count).map(c => c.url.pathname + c.url.search).sort()).toEqual(previous);
+  if (mode === 'probe') expect(queries().at(-1).url.searchParams.get('basis')).toBe('probe_urltest_member');
+  else {
+    await expect(page.locator('#statistics-source')).toHaveValue(provider.source);
+    await expect(page.locator('#provider-metric')).toHaveValue('billed');
+  }
+  expect(calls.every(c => c.body === null || c.path === '/api/session')).toBe(true);
+});
 async function settledScreenshot(page, path) {
   await expect(page.locator('.motion-snapshot')).toHaveCount(0);
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -335,6 +525,87 @@ test('raw and billing comparisons switch both sources and disclose missing multi
   await expect(page.locator('#comparison-local-exact')).toHaveText('4,000,000,000 bytes');
   await expect(page.locator('#comparison-nodes .rank-download')).toHaveCount(2);
   await expect(page.locator('#comparison-estimate-note')).toBeHidden();
+});
+test('calendar drilldown supports native keyboard in all four views without changing source or probe semantics', async ({ page }) => {
+  const series = url => url.searchParams.get('bucket') === 'month'
+    ? [{ label: '2026-11', upload: '0', download: '0' }] : [{ label: '2026-11-01', upload: '0', download: '0' }];
+  const calls = await mock(page, {
+    '/api/settings': route => route.fulfill(json({ v2rayNPath: 'C:\\Synthetic', timeZoneId: 'America/New_York', demo: true })),
+    '/api/status': route => route.fulfill(json({ state: 'demo', demo: true, probes: { historyEnabled: true, state: 'partial', message: 'Synthetic' } })),
+    '/api/provider/sources': route => route.fulfill(json(['Synthetic CSV'])),
+    '/api/provider/nodes': route => route.fulfill(json([{ key: 'Synthetic A', name: 'Synthetic A' }])),
+    '/api/history': (route, _request, url) => route.fulfill(json({ ...history, series: series(url) })),
+    '/api/provider/history': (route, _request, url) => route.fulfill(json({ source: 'Synthetic CSV', rawBytes: '0', billedBytes: '0',
+      recordCount: 1, nodes: [{ name: 'Synthetic A', rawBytes: '0', billedBytes: '0' }], records: [],
+      series: series(url).map(p => ({ label: p.label, rawBytes: '0', billedBytes: '0' })) }))
+  });
+  for (const mode of ['local', 'provider', 'comparison', 'probe']) {
+    if (mode === 'provider') { await page.selectOption('#statistics-source', 'Synthetic CSV'); await page.selectOption('#provider-metric', 'billed'); }
+    if (mode === 'comparison') await page.check('#compare-toggle');
+    if (mode === 'probe') await page.click('.nav-item[data-view=probes]');
+    await page.click('[data-period=year]');
+    const chart = page.locator(mode === 'comparison' ? '#comparison-chart' : '#chart');
+    await expect(chart.getByRole('button')).toHaveCount(1);
+    const month = chart.locator('[data-bucket-label="2026-11"]');
+    await month.focus(); await month.press('Enter');
+    const day = chart.locator('[data-bucket-label="2026-11-01"]');
+    await expect(day).toBeVisible(); await day.focus(); await day.press('Space');
+    const path = mode === 'provider' ? '/api/provider/history' : '/api/history';
+    await expect.poll(() => calls.filter(c => c.path === path).at(-1).url.searchParams.get('bucket')).toBe('hour');
+    const q = calls.filter(c => c.path === path).at(-1).url.searchParams;
+    expect(q.get('timeZoneId')).toBe('America/New_York');
+    expect(Date.parse(q.get('end')) - Date.parse(q.get('start'))).toBe(25 * 3600000);
+    expect(q.get('page')).toBe('0');
+    if (mode === 'provider' || mode === 'comparison') {
+      expect(await page.locator('#statistics-source').inputValue()).toBe('Synthetic CSV');
+      expect(await page.locator('#provider-metric').inputValue()).toBe('billed');
+    }
+    if (mode === 'probe') expect(q.get('basis')).toBe('probe_urltest_member');
+    await expect(chart).toHaveAttribute('role', 'group');
+  }
+});
+test('batch revoke is previewed precisely and a changed plan requires a fresh explicit confirmation', async ({ page }) => {
+  const batch = { source: 'Synthetic CSV', hash: 'synthetic-hash', rowCount: 0, rawBytes: '0', billedBytes: '0',
+    referencesComplete: true, fileRowCount: 2, fileRawBytes: '1', fileBilledBytes: '0.000000000001' };
+  const preview = { ...batch, token: 'synthetic-token', canRevoke: true, reason: null, deletedRowCount: 1,
+    retainedRowCount: 1, deletedRawBytes: '1', deletedBilledBytes: '0.000000000001', retainedRawBytes: '0', retainedBilledBytes: '0' };
+  const calls = await mock(page, {
+    '/api/imports': route => route.fulfill(json([batch])),
+    '/api/imports/features': route => route.fulfill(json({ trackingAvailable: true, upgradeAvailable: false })),
+    '/api/imports/revoke-preview': route => route.fulfill(json(preview)),
+    '/api/imports/revoke': route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"error":"Synthetic changed"}' })
+  });
+  await page.click('.nav-item[data-view=provider]');
+  await page.getByRole('button', { name: '预览撤销', exact: true }).click();
+  await expect(page.locator('#revoke-details')).toContainText('synthetic-hash');
+  await expect(page.locator('#revoke-details')).toContainText('0.000000000001 bytes');
+  expect(calls.filter(c => c.path === '/api/imports/revoke')).toHaveLength(0);
+  await page.click('#confirm-revoke'); await expect(page.locator('#revoke-result')).toContainText('请重新预览');
+  await expect(page.locator('#confirm-revoke')).toBeDisabled();
+  expect(calls.find(c => c.path === '/api/imports/revoke').body).toEqual({ source: 'Synthetic CSV', hash: 'synthetic-hash', token: 'synthetic-token' });
+});
+test('optional CSV archive preserves original BOM bytes and reports cancellation without undoing import', async ({ page }) => {
+  const calls = await mock(page);
+  await page.click('.nav-item[data-view=provider]');
+  await expect(page.locator('#archive-csv')).not.toBeChecked();
+  await page.check('#archive-csv'); await page.fill('#provider-source', 'Synthetic CSV');
+  await page.setInputFiles('#csv-file', { name: 'original.csv', mimeType: 'text/csv', buffer: Buffer.from([239, 187, 191, 97, 13, 10]) });
+  await page.evaluate(() => {
+    window.showSaveFilePicker = async () => ({ createWritable: async () => ({
+      write: async file => { window.syntheticArchiveBytes = [...new Uint8Array(await file.arrayBuffer())]; },
+      close: async () => { window.syntheticArchiveClosed = true; }
+    }) });
+  });
+  await page.click('#preview-import'); await page.click('#commit-import');
+  await expect(page.locator('#archive-original')).toBeVisible();
+  await expect(page.locator('#archive-result')).toContainText('尚未保存');
+  await page.click('#save-original-csv');
+  await expect(page.locator('#archive-result')).toContainText('原 CSV 已保存');
+  expect(await page.evaluate(() => window.syntheticArchiveBytes)).toEqual([239, 187, 191, 97, 13, 10]);
+  expect(await page.evaluate(() => window.syntheticArchiveClosed)).toBe(true);
+  await page.evaluate(() => { window.showSaveFilePicker = async () => { throw new DOMException('Synthetic cancel', 'AbortError'); }; });
+  await page.click('#save-original-csv'); await expect(page.locator('#archive-result')).toContainText('原 CSV 未保存');
+  expect(calls.filter(c => c.path === '/api/imports/commit')).toHaveLength(1);
 });
 test('probe view separates dimensions and keeps a readable desktop and mobile layout', async ({ page }) => {
   const calls = await mock(page, {
