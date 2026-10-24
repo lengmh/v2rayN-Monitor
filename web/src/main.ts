@@ -156,8 +156,8 @@ function updateCoreControls(): void {
     el<HTMLButtonElement>(id).disabled = disabled;
   const sidecarDisabled = disabled || el<HTMLSelectElement>('core-action-component').value !== 'sing-box-statistics';
   el<HTMLButtonElement>('prepare-core-sidecar').disabled = sidecarDisabled;
-  for (const id of ['apply-core-sidecar', 'restore-core-sidecar'])
-    el<HTMLButtonElement>(id).disabled = sidecarDisabled || !coreSidecarPlanId;
+  el<HTMLButtonElement>('apply-core-sidecar').disabled = sidecarDisabled || !coreSidecarPlanId;
+  el<HTMLButtonElement>('restore-core-sidecar').disabled = sidecarDisabled;
   for (const id of ['core-action-component', 'core-restore-operation', 'v2rayn-path', 'time-zone'])
     el<HTMLInputElement | HTMLSelectElement>(id).disabled = expired || actionBusy;
   el<HTMLButtonElement>('save-settings').disabled = !ready || expired || savingSettings || actionBusy;
@@ -224,7 +224,7 @@ function coreActionMessage(state: string): { message: string; isError: boolean }
 function renderCoreAction(result: CoreActionResult): void {
   const { message, isError } = coreActionMessage(result.state);
   formResult('core-action-result', message, isError);
-  const record = [result.operationId ? `操作 ID：${result.operationId}` : '', result.backupDirectory ? `备份目录：${result.backupDirectory}` : ''].filter(Boolean).join('\n');
+  const record = [result.operationId ? `操作 ID：${result.operationId}` : '', result.backupDirectory ? `备份目录：${result.backupDirectory}` : '', result.details ?? ''].filter(Boolean).join('\n');
   put('core-action-record', record); show('core-action-record', !!record);
 }
 function renderCoreSidecar(result: CoreActionResult): void {
@@ -268,7 +268,7 @@ async function prepareCoreAction(action: CoreAction): Promise<void> {
   const sidecar = action.endsWith('-sidecar'), runtime = action === 'verify-runtime';
   const resultId = runtime ? 'core-runtime-result' : sidecar ? 'core-sidecar-result' : 'core-action-result';
   if (sidecar && componentId !== 'sing-box-statistics') return;
-  const needsPlan = action === 'apply-sidecar' || action === 'restore-sidecar';
+  const needsPlan = action === 'apply-sidecar';
   if (needsPlan && !coreSidecarPlanId) { formResult(resultId, '请先在目标核心运行时准备统计配置。', true); return; }
   const enteredOperationId = el<HTMLInputElement>('core-restore-operation').value.trim();
   const operationId = enteredOperationId.replaceAll('-', '').toLowerCase();

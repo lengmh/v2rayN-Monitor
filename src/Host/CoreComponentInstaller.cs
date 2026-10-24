@@ -46,6 +46,23 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         return new(binding.Component, capture, checkpoint) { sidecar = binding };
     }
 
+    internal static async Task<CoreComponentInstaller> ForSidecarRestoreAsync(CoreComponent approvedCore,
+        Func<CoreInstallObservation> capture, Guid operationId, CancellationToken token)
+    {
+        if (approvedCore.Id != "sing-box-statistics" || approvedCore.FileName != "sing-box-client.exe")
+            throw new Rejected(CoreInstallState.UnsupportedTarget);
+        var coreTarget = await new CoreComponentInstaller(approvedCore, capture).ReadTargetAsync(token);
+        var path = Path.Combine(Path.GetDirectoryName(coreTarget.Path)!, "monitor-stats.json");
+        var journal = await LoadJournalAsync(path, operationId, token);
+        if (journal is null || journal.OperationId != operationId || journal.ComponentId != "sing-box-sidecar" ||
+            journal.Version != approvedCore.Version || journal.Client != coreTarget.ClientFile ||
+            journal.Installed is not { Bytes: > 0 and <= 4096 } || !ValidIdentity(journal.Installed) ||
+            (journal.Previous is not null && (journal.Previous.Bytes is <= 0 or > 4096 || !ValidIdentity(journal.Previous))))
+            throw new Rejected(CoreInstallState.PlanChanged);
+        var binding = CoreSidecarBinding.ForRestore(approvedCore, journal.Installed);
+        return new(binding.Component, capture) { sidecar = binding };
+    }
+
     [SupportedOSPlatform("windows")]
     internal static CoreComponentInstaller? ForWindows(string componentId, string clientPath, string dataRoot)
     {
@@ -63,6 +80,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
     {
         try
         {
+            if (sidecar?.RestoreOnly == true) throw new Rejected(CoreInstallState.UnsupportedTarget);
             var target = await ReadTargetAsync(token);
             using var previous = OpenExisting(target.Path, FileShare.Read);
             var identity = previous is null ? null : await IdentifyAsync(previous, token);
@@ -91,6 +109,7 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
         var replaced = false;
         try
         {
+            if (sidecar?.RestoreOnly == true) throw new Rejected(CoreInstallState.UnsupportedTarget);
             target = await ReadTargetAsync(token);
             RequirePlan(plan, target);
             using var transaction = LockTarget(target.Path);
@@ -214,17 +233,22 @@ internal sealed class CoreComponentInstaller(CoreComponent component, Func<CoreI
 
     private async Task<CoreInstallJournal> ReadJournalAsync(Target target, Guid operationId, CancellationToken token)
     {
-        var path = Path.Combine(BackupPath(target.Path, operationId), "install.json");
-        PlainPath(path, directory: false);
-        using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (input.Length is <= 0 or > 65536) throw new Rejected(CoreInstallState.UnsafePath);
-        var journal = await JsonSerializer.DeserializeAsync<CoreInstallJournal>(input, cancellationToken: token);
+        var journal = await LoadJournalAsync(target.Path, operationId, token);
         if (journal is null || journal.OperationId != operationId || journal.ComponentId != component.Id ||
             journal.Version != component.Version || journal.Client != target.ClientFile ||
             !MatchesComponent(journal.Installed) || !ValidIdentity(journal.Previous) ||
             (journal.Previous is null && Path.Exists(Path.Combine(BackupPath(target.Path, operationId), Payload("previous")))))
             throw new Rejected(CoreInstallState.PlanChanged);
         return journal;
+    }
+
+    private static async Task<CoreInstallJournal?> LoadJournalAsync(string target, Guid operationId, CancellationToken token)
+    {
+        var path = Path.Combine(BackupPath(target, operationId), "install.json");
+        PlainPath(path, directory: false);
+        using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (input.Length is <= 0 or > 65536) throw new Rejected(CoreInstallState.UnsafePath);
+        return await JsonSerializer.DeserializeAsync<CoreInstallJournal>(input, cancellationToken: token);
     }
 
     internal async Task<CoreInstallResult> RestoreAsync(Guid operationId, CancellationToken token,
