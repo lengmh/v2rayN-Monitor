@@ -31,7 +31,7 @@ internal static class Program
             return;
         }
         // One writer per data directory, including launches with alternate command-line spellings.
-        var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())))[..24];
+        var identity = OfflineLedgerUpgrade.DirectoryIdentity(root);
         using var mutex = new Mutex(true, @"Local\V2rayNMonitor-" + identity, out var created);
         // Every participant keeps both handles alive. Readiness cannot outlive this owner
         // and be mistaken for a later owner of the same data directory.
@@ -65,11 +65,51 @@ internal static class Program
         var probeMode = args.Contains("--probe-ledger", StringComparer.OrdinalIgnoreCase);
         var scopeMode = probeMode || args.Contains("--scope-ledger", StringComparer.OrdinalIgnoreCase);
         ready.Reset();
-        try { Application.Run(new TrayContext(root, demo, scopeMode, probeMode, linkedExecutable, ready)); }
+        OfflineLedgerHandoffRequest? pendingUpgrade = null;
+        try
+        {
+            var context = new TrayContext(root, demo, scopeMode, probeMode, linkedExecutable, ready);
+            Application.Run(context);
+            pendingUpgrade = context.PendingLedgerUpgrade;
+        }
         catch (Exception) { MessageBox.Show(scopeMode
             ? "多范围启动失败。--scope-ledger 使用 v2，--probe-ledger 使用 v3；请选择全新目录或已受控迁移的对应账本，不会自动升级。请检查目录权限、磁盘空间及应用文件。原有历史保留。"
             : "启动失败。请确认数据目录可写、磁盘空间足够且应用文件完整。历史数据库不会被自动删除。", "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { ready.Reset(); mutex.ReleaseMutex(); }
+        if (pendingUpgrade is not null)
+        {
+            // Prepare rejects an existing mutex even after ReleaseMutex: destroy both named handles first.
+            ready.Dispose(); mutex.Dispose();
+            CompleteLedgerHandoff(pendingUpgrade);
+        }
+    }
+
+    private static void CompleteLedgerHandoff(OfflineLedgerHandoffRequest request)
+    {
+        try
+        {
+            var result = OfflineLedgerHandoff.Run(request, plan => NativeCoreConfirmation.Show(
+                new("确认单步离线升级账本",
+                    $"Monitor 已停止采集。\n原目录：{plan.Directory}\n本次仅执行：v{plan.Version} → v{plan.Version + 1}\n\n" +
+                    "确认后重新检查数据与Schema，在原目录创建新备份，再进行迁移与逐值核验。\n" +
+                    "保留原历史、UI元数据、provider和设置。不恢复旧备份、不自动继续下一步，也不修改登录项或快捷方式。\n" +
+                    "取消后账本不升级，Monitor 保持退出；可使用原入口重新启动。"), CancellationToken.None));
+            var message = result.State == OfflineLedgerState.Upgraded
+                ? $"单步升级完成：v{result.ObservedVersion}\n原目录：{request.Directory}\n新备份：{result.BackupPath}\n\n" +
+                  $"下次启动请使用 {(result.ObservedVersion == 2 ? "--scope-ledger" : "--probe-ledger")} 和原 --data-dir。\n" +
+                  "原登录启动项和快捷方式没有修改，请先核对其模式参数。Monitor 未自动重启，代理保持运行。"
+                : $"本次离线操作结果：{result.State}\n原目录：{request.Directory}\n" +
+                  (result.BackupPath is null ? "" : $"保留的新备份：{result.BackupPath}\n") +
+                  (result.ObservedVersion is null ? "" : $"检查到的账本版本：v{result.ObservedVersion}\n") +
+                  "没有自动恢复旧备份或启动 Monitor。请核对账本版本后使用对应模式；VerificationRequired 时先检查结果，不覆盖现有历史。";
+            MessageBox.Show(message, "v2rayN Monitor · 离线账本",
+                MessageBoxButtons.OK, result.State == OfflineLedgerState.Upgraded ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        }
+        catch (Exception)
+        {
+            MessageBox.Show("离线升级未完成，Monitor 已退出。请检查原目录与备份，不要用旧备份覆盖现有历史；代理未被停止。",
+                "v2rayN Monitor", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     internal static void LaunchLinked(string executable, string monitorDirectory)
@@ -104,19 +144,30 @@ internal sealed class TrayContext : ApplicationContext
     private readonly Task collectTask;
     private readonly string directory;
     private readonly EventWaitHandle? readiness;
+    private readonly Control confirmationDispatcher = new();
+    internal OfflineLedgerHandoffRequest? PendingLedgerUpgrade { get; private set; }
     public TrayContext(string dataDir, bool demo, bool scopeMode = false, bool probeMode = false,
         string? linkedExecutable = null, EventWaitHandle? readiness = null)
     {
         directory = dataDir;
         this.readiness = readiness;
+        _ = confirmationDispatcher.Handle;
+        var actions = demo ? null : CoreComponentActions.ForWindows(
+            (prompt, token) => NativeCoreConfirmation.ShowAsync(confirmationDispatcher, prompt, token));
         server = MonitorServer.StartAsync(dataDir, Path.Combine(AppContext.BaseDirectory, "wwwroot"), demo,
-            useScopeLedger: scopeMode, useProbeLedger: probeMode).GetAwaiter().GetResult();
+            useScopeLedger: scopeMode, useProbeLedger: probeMode,
+            inspectCoreCapabilities: demo ? null : CoreCapabilityInspector.InspectWindowsAsync,
+            coreAction: actions is null ? null : actions.ExecuteAsync,
+            invalidateCoreActions: actions is null ? null : actions.Invalidate).GetAwaiter().GetResult();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开统计页面", null, (_, _) => Open());
         menu.Items.Add("选择 v2rayN 数据目录…", null, (_, _) => ChooseDirectory());
         menu.Items.Add("打开 Monitor 数据目录", null, (_, _) => Process.Start(new ProcessStartInfo(directory) { UseShellExecute = true }));
         if (!demo)
         {
+            var upgrade = new ToolStripMenuItem("离线升级账本…") { Enabled = !probeMode };
+            upgrade.Click += (_, _) => RequestLedgerUpgrade();
+            menu.Items.Add(upgrade);
             menu.Items.Add("创建 v2rayN + Monitor 联动启动快捷方式…", null, (_, _) => CreateLinkedShortcut());
             var startup = new ToolStripMenuItem("登录 Windows 时启动") { Checked = IsStartupEnabled(scopeMode, probeMode) };
             startup.Click += (_, _) =>
@@ -189,12 +240,28 @@ internal sealed class TrayContext : ApplicationContext
         try { Process.Start(new ProcessStartInfo(server.IssueLaunchUrl()) { UseShellExecute = true }); }
         catch (Exception) { MessageBox.Show("无法打开系统浏览器，请检查默认浏览器设置。采集仍会继续。", "v2rayN Monitor"); }
     }
+    private void RequestLedgerUpgrade()
+    {
+        var version = server.Scopes is null ? 1 : server.Scopes.SupportsProbes ? 3 : 2;
+        if (version == 3 || PendingLedgerUpgrade is not null) return;
+        var request = new OfflineLedgerHandoffRequest(directory, version,
+            version == 1 ? LedgerUpgradeStep.MultiScope : LedgerUpgradeStep.Probes);
+        if (!NativeCoreConfirmation.Show(new("准备退出 Monitor 并离线升级",
+            $"Monitor 数据目录：{directory}\n拟升级：v{version} → v{version + 1}\n\n" +
+            "此操作先正常停止 Monitor 采集并关闭统计页面服务，不停止 v2rayN 或代理核心。\n" +
+            "释放写入者和目录锁后会重新预检，并再次确认精确的单步升级；本次确认不授权直接迁移。\n" +
+            "不会自动重启 Monitor 或更改启动项。若仅安装核心，无需执行此步骤。"), stop.Token)) return;
+        PendingLedgerUpgrade = request;
+        ExitThread();
+    }
     private void ChooseDirectory()
     {
         using var dialog = new FolderBrowserDialog { Description = "选择包含 guiConfigs 和 binConfigs 的 v2rayN 数据根目录", UseDescriptionForTitle = true };
         if (dialog.ShowDialog() == DialogResult.OK)
         {
-            server.UpdateSettings(server.Settings with { V2rayNPath = dialog.SelectedPath }); Open();
+            try { server.UpdateSettings(server.Settings with { V2rayNPath = dialog.SelectedPath }); Open(); }
+            catch (MonitorServer.CoreActionBusyException)
+            { MessageBox.Show("核心操作尚未结束，请先完成或取消确认，再选择目录。", "v2rayN Monitor"); }
         }
     }
     private async Task CollectAsync()
@@ -313,6 +380,6 @@ internal sealed class TrayContext : ApplicationContext
         readiness?.Reset();
         stop.Cancel(); collectTask.GetAwaiter().GetResult();
         server.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        tray.Visible = false; tray.Dispose(); trayIcon.Dispose(); stop.Dispose(); base.ExitThreadCore();
+        tray.Visible = false; tray.Dispose(); trayIcon.Dispose(); confirmationDispatcher.Dispose(); stop.Dispose(); base.ExitThreadCore();
     }
 }
