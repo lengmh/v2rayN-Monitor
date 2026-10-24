@@ -9,15 +9,36 @@ namespace V2rayNMonitor.Host;
 
 // A retained discovery baseline is rechecked against the actual standard files after the core stops.
 // No synthetic process identity is created for the stopped core, and no page may supply this baseline.
-internal sealed class CoreSidecarBinding(CoreComponent approvedCore, XraySnapshot baseline, SidecarPlan confirmed)
+internal sealed class CoreSidecarBinding
 {
-    internal SidecarPlan Confirmed => confirmed;
-    internal CoreComponent Component { get; } = approvedCore with
+    private readonly CoreComponent approvedCore;
+    private readonly XraySnapshot? baseline;
+    private readonly SidecarPlan? confirmed;
+    internal bool RestoreOnly => confirmed is null;
+    internal SidecarPlan Confirmed => confirmed ??
+        throw new CoreComponentInstaller.Rejected(CoreInstallState.UnsupportedTarget);
+    internal CoreComponent Component { get; }
+
+    private CoreSidecarBinding(CoreComponent core, CoreFileIdentity installed)
     {
-        Id = "sing-box-sidecar", FileName = "monitor-stats.json",
-        Sha256 = XrayParser.Hash(Encoding.UTF8.GetBytes(confirmed.Json)),
-        ExpectedBytes = Encoding.UTF8.GetByteCount(confirmed.Json)
-    };
+        approvedCore = core;
+        Component = core with
+        {
+            Id = "sing-box-sidecar", FileName = "monitor-stats.json",
+            Sha256 = installed.Sha256, ExpectedBytes = installed.Bytes
+        };
+    }
+
+    internal CoreSidecarBinding(CoreComponent core, XraySnapshot baseline, SidecarPlan confirmed)
+        : this(core, new(Encoding.UTF8.GetByteCount(confirmed.Json),
+            XrayParser.Hash(Encoding.UTF8.GetBytes(confirmed.Json))))
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        this.baseline = baseline;
+        this.confirmed = confirmed;
+    }
+
+    internal static CoreSidecarBinding ForRestore(CoreComponent core, CoreFileIdentity installed) => new(core, installed);
 
     internal async Task<IDisposable> AcquireAsync(string sidecarPath, bool exclusiveCore, CancellationToken token)
     {
@@ -28,34 +49,39 @@ internal sealed class CoreSidecarBinding(CoreComponent approvedCore, XraySnapsho
                 throw new CoreComponentInstaller.Rejected(CoreInstallState.UnsupportedTarget);
             var coreDirectory = Path.GetDirectoryName(sidecarPath)!;
             var root = Path.GetDirectoryName(Path.GetDirectoryName(coreDirectory)!)!;
-            if (baseline.InstanceId != XrayParser.Hash(root.ToUpperInvariant()))
-                throw new CoreComponentInstaller.Rejected(CoreInstallState.PlanChanged);
             var corePath = Path.Combine(coreDirectory, approvedCore.FileName);
             var core = lease.Open(corePath);
             if ((await CoreComponents.VerifyStreamAsync(approvedCore, core, token)).State != CoreFileState.IdentityMatched)
                 throw new CoreComponentInstaller.Rejected(CoreInstallState.InvalidCandidate);
-            var config = Read(lease.Open(Path.Combine(root, "binConfigs", "config.json")), 4 * 1024 * 1024);
-            var gui = Read(lease.Open(Path.Combine(root, "guiConfigs", "guiNConfig.json")), 1024 * 1024);
-            var database = Path.Combine(root, "guiConfigs", "guiNDB.db");
-            lease.Open(database); // Refuse an open write handle and deny new writers during replacement.
-            foreach (var suffix in new[] { "-wal", "-shm", "-journal" })
+            // A restore undoes the recorded file operation even when its core cannot reload.
+            // New writes still require the original running-core discovery and configuration.
+            if (baseline is not null && confirmed is not null)
             {
-                CoreComponentInstaller.PlainPath(database + suffix, directory: false, allowMissing: true);
-                if (File.Exists(database + suffix)) lease.Open(database + suffix);
+                if (baseline.InstanceId != XrayParser.Hash(root.ToUpperInvariant()))
+                    throw new CoreComponentInstaller.Rejected(CoreInstallState.PlanChanged);
+                var config = Read(lease.Open(Path.Combine(root, "binConfigs", "config.json")), 4 * 1024 * 1024);
+                var gui = Read(lease.Open(Path.Combine(root, "guiConfigs", "guiNConfig.json")), 1024 * 1024);
+                var database = Path.Combine(root, "guiConfigs", "guiNDB.db");
+                lease.Open(database); // Refuse an open write handle and deny new writers during replacement.
+                foreach (var suffix in new[] { "-wal", "-shm", "-journal" })
+                {
+                    CoreComponentInstaller.PlainPath(database + suffix, directory: false, allowMissing: true);
+                    if (File.Exists(database + suffix)) lease.Open(database + suffix);
+                }
+                if (!XrayParser.TryReadSelection(gui, out var selection) || selection!.EnableTun ||
+                    !selection.StatisticsRequested || selection.IndexId != baseline.NodeId ||
+                    confirmed.InstanceId != baseline.InstanceId || confirmed.NodeId != baseline.NodeId ||
+                    confirmed.ProcessIdentity != baseline.ProcessIdentity || confirmed.Generation != baseline.Generation ||
+                    confirmed.ConfigurationHash != XrayParser.Hash(config))
+                    throw new CoreComponentInstaller.Rejected(CoreInstallState.PlanChanged);
+                using var document = JsonDocument.Parse(confirmed.Json);
+                var listen = document.RootElement.GetProperty("listen").GetString()!;
+                var prepared = CoreCapabilityPreparation.PrepareSidecar(baseline, config, null, listen);
+                if (prepared.Plan?.Json != confirmed.Json)
+                    throw new CoreComponentInstaller.Rejected(CoreInstallState.InvalidConfiguration);
+                WindowsDiscovery.ReadProfile(database, selection.IndexId, gui, config, out _,
+                    Encoding.UTF8.GetBytes(confirmed.Json), allowMemberStatistics: true);
             }
-            if (!XrayParser.TryReadSelection(gui, out var selection) || selection!.EnableTun ||
-                !selection.StatisticsRequested || selection.IndexId != baseline.NodeId ||
-                confirmed.InstanceId != baseline.InstanceId || confirmed.NodeId != baseline.NodeId ||
-                confirmed.ProcessIdentity != baseline.ProcessIdentity || confirmed.Generation != baseline.Generation ||
-                confirmed.ConfigurationHash != XrayParser.Hash(config))
-                throw new CoreComponentInstaller.Rejected(CoreInstallState.PlanChanged);
-            using var document = JsonDocument.Parse(confirmed.Json);
-            var listen = document.RootElement.GetProperty("listen").GetString()!;
-            var prepared = CoreCapabilityPreparation.PrepareSidecar(baseline, config, null, listen);
-            if (prepared.Plan?.Json != confirmed.Json)
-                throw new CoreComponentInstaller.Rejected(CoreInstallState.InvalidConfiguration);
-            WindowsDiscovery.ReadProfile(database, selection.IndexId, gui, config, out _,
-                Encoding.UTF8.GetBytes(confirmed.Json), allowMemberStatistics: true);
             // A held file can still have its parent directory renamed. Recheck every directory entry.
             foreach (var file in lease.Files)
             {

@@ -8,7 +8,7 @@ public sealed record CoreActionRequest(string Action, string ComponentId, string
          ComponentId == "sing-box-statistics" &&
          (Action == "prepare-sidecar" && OperationId is null && PlanId is null ||
           Action == "apply-sidecar" && OperationId is null && ValidId(PlanId) ||
-          Action == "restore-sidecar" && ValidId(OperationId) && ValidId(PlanId)));
+          Action == "restore-sidecar" && ValidId(OperationId) && PlanId is null));
     private static bool ValidId(string? value) => Guid.TryParseExact(value, "N", out var id) && id != Guid.Empty;
 }
 

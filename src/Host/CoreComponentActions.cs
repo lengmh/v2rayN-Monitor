@@ -36,6 +36,13 @@ internal sealed class CoreComponentActions(
         if (!request.IsValid()) return new("InvalidRequest");
         var component = catalog.SingleOrDefault(x => x.Id == request.ComponentId);
         if (component is null) return new("InvalidRequest");
+        CorePreparation? downloaded = null;
+        CoreActionResult Finish(CoreActionResult result)
+        {
+            var remainder = downloaded?.ReleaseStaging();
+            return remainder is null ? result : result with
+            { Details = $"临时组件文件未能完全清理，请保留并核对：{remainder}。安装结果与备份不因此改变。" };
+        }
         try
         {
             token.ThrowIfCancellationRequested();
@@ -65,12 +72,12 @@ internal sealed class CoreComponentActions(
                 return await SidecarAsync(directory, request, component, Recapture, token);
             if (request.Action == "install")
             {
-                var downloaded = await prepare(component, target, observed, token);
+                downloaded = await prepare(component, target, observed, token);
                 if (downloaded.State != CorePreparationState.DownloadVerified || downloaded.FilePath is null)
-                    return new(downloaded.State.ToString(), component.Id);
+                    return Finish(new(downloaded.State.ToString(), component.Id));
                 var proposed = await installer.PrepareAsync(downloaded.FilePath, token);
                 if (proposed.State != CoreInstallState.Ready || proposed.Plan is null)
-                    return new(proposed.State.ToString(), component.Id);
+                    return Finish(new(proposed.State.ToString(), component.Id));
                 var plan = proposed.Plan;
                 var prompt = new CoreActionPrompt("确认替换配套核心",
                     $"组件：{component.Id} · {component.Version}\n目标：{plan.TargetPath}\n" +
@@ -79,10 +86,10 @@ internal sealed class CoreComponentActions(
                     "仅替换此核心文件，不写 sidecar、配置、账本或启动项。目标核心必须已停止；程序不会自动停止或重载代理。\n" +
                     (component.Id == "xray-probes" ? "这是可选实验探测核心，不承诺与原定制核心等价；普通 Xray 统计无需替换。\n" : "") +
                     "确认后将重新核对目标与文件。完成后请在 v2rayN 中手动重载，再核验实际接口。");
-                if (!await confirm(prompt, token)) return new("Cancelled", component.Id);
+                if (!await confirm(prompt, token)) return Finish(new("Cancelled", component.Id));
                 token.ThrowIfCancellationRequested();
                 var result = await installer.InstallAsync(plan, token);
-                return Result(result, component.Id, plan.TargetPath);
+                return Finish(Result(result, component.Id, plan.TargetPath));
             }
             var operation = Guid.ParseExact(request.OperationId!, "N");
             var restored = await installer.PrepareRestoreAsync(operation, token);
@@ -100,12 +107,13 @@ internal sealed class CoreComponentActions(
             token.ThrowIfCancellationRequested();
             return Result(await installer.RestoreAsync(operation, token, journal), component.Id, restored.TargetPath);
         }
-        catch (OperationCanceledException) { return new("Cancelled", component.Id); }
-        catch (CoreComponentInstaller.Rejected rejected) { return new(rejected.State.ToString(), component.Id); }
+        catch (OperationCanceledException) { return Finish(new("Cancelled", component.Id)); }
+        catch (CoreComponentInstaller.Rejected rejected) { return Finish(new(rejected.State.ToString(), component.Id)); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or
             NotSupportedException or System.Management.ManagementException or System.ComponentModel.Win32Exception or
             WindowsDiscovery.DiscoveryException or Microsoft.Data.Sqlite.SqliteException or System.Text.Json.JsonException)
-        { return new(error is UnauthorizedAccessException ? "PermissionDenied" : "UnknownTarget", component.Id); }
+        { return Finish(new(error is UnauthorizedAccessException ? "PermissionDenied" : "UnknownTarget", component.Id)); }
+        finally { downloaded?.ReleaseStaging(); }
     }
 
     private async Task<CoreActionResult> SidecarAsync(string directory, CoreActionRequest request, CoreComponent component,
@@ -123,6 +131,25 @@ internal sealed class CoreComponentActions(
             return new(discovered.Preparation.State == SidecarPreparationState.AlreadyMatched ? "SidecarAlreadyMatched" : "SidecarPrepared",
                 component.Id, PlanId: ticket.Id, Details: "准备仅绑定配置，不代表接口已生效。计划保留 10 分钟；请自行停止目标核心后打开写入确认。");
         }
+        if (request.Action == "restore-sidecar")
+        {
+            Invalidate();
+            var operation = Guid.ParseExact(request.OperationId!, "N");
+            var recovery = await CoreComponentInstaller.ForSidecarRestoreAsync(component, recapture, operation, token);
+            var proposed = await recovery.PrepareRestoreAsync(operation, token);
+            if (proposed.State != CoreInstallState.Ready || proposed.TargetPath is null || proposed.Journal is null)
+                return new(proposed.State.ToString(), component.Id, operation.ToString("N"));
+            var journal = proposed.Journal;
+            if (!await confirm(new("确认恢复统计 sidecar",
+                $"目标：{proposed.TargetPath}\n操作编号：{operation:N}\n备份：{BackupDirectory(proposed.TargetPath, operation)}\n" +
+                $"当前摘要：{journal.Installed.Sha256}\n恢复摘要：{journal.Previous?.Sha256 ?? "恢复为不存在"}\n\n" +
+                "只恢复此操作的 sidecar，不改核心、完整配置、路由、账本或启动项。目标核心必须已停止；请手动重载后核验接口。"), token))
+                return new("Cancelled", component.Id, operation.ToString("N"));
+            token.ThrowIfCancellationRequested();
+            var result = await recovery.RestoreAsync(operation, token, journal);
+            return Result(result, component.Id, proposed.TargetPath) with
+            { State = result.State == CoreInstallState.Restored ? "SidecarRestored" : result.State.ToString() };
+        }
         var pending = Interlocked.Exchange(ref pendingSidecar, null);
         if (pending is null || pending.Id != request.PlanId || pending.Expires <= DateTimeOffset.UtcNow ||
             !ProcessBinding.SamePath(pending.Directory, directory))
@@ -137,23 +164,6 @@ internal sealed class CoreComponentActions(
                 return new(state, component.Id, PlanId: pending.Id);
             }
             return new(state, component.Id);
-        }
-        if (request.Action == "restore-sidecar")
-        {
-            var operation = Guid.ParseExact(request.OperationId!, "N");
-            var proposed = await installer.PrepareRestoreAsync(operation, token);
-            if (proposed.State != CoreInstallState.Ready || proposed.TargetPath is null || proposed.Journal is null)
-                return Retriable(proposed.State.ToString()) with { OperationId = operation.ToString("N") };
-            var journal = proposed.Journal;
-            if (!await confirm(new("确认恢复统计 sidecar",
-                $"目标：{proposed.TargetPath}\n操作编号：{operation:N}\n备份：{BackupDirectory(proposed.TargetPath, operation)}\n" +
-                $"当前摘要：{journal.Installed.Sha256}\n恢复摘要：{journal.Previous?.Sha256 ?? "恢复为不存在"}\n\n" +
-                "只恢复此操作的 sidecar，不改核心、完整配置、路由、账本或启动项。请手动重载后核验接口。"), token))
-                return Retriable("Cancelled");
-            token.ThrowIfCancellationRequested();
-            var result = await installer.RestoreAsync(operation, token, journal);
-            return Result(result, component.Id, proposed.TargetPath) with
-            { State = result.State == CoreInstallState.Restored ? "SidecarRestored" : result.State.ToString() };
         }
         var stage = Directory.CreateTempSubdirectory("v2rayn-monitor-sidecar-").FullName;
         var candidate = Path.Combine(stage, "monitor-stats.json");
