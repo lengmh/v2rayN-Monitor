@@ -15,7 +15,23 @@ internal enum CorePreparationState
 // A verified file is only a preparation result. Installation must recheck it and the target.
 // A failure can retain a staging directory if cleanup was denied; it is never a usable result.
 internal sealed record CorePreparation(CorePreparationState State, string? FilePath = null,
-    string? StagingDirectory = null, CoreFileState? FileState = null);
+    string? StagingDirectory = null, CoreFileState? FileState = null)
+{
+    private Func<string?>? cleanup;
+    private string? remainder;
+
+    internal CorePreparation OwnStaging(Func<string?> release)
+    {
+        cleanup = release;
+        return this;
+    }
+
+    internal string? ReleaseStaging()
+    {
+        if (Interlocked.Exchange(ref cleanup, null) is { } release) remainder = release();
+        return remainder ?? (State == CorePreparationState.DownloadVerified ? null : StagingDirectory);
+    }
+}
 
 internal static class CoreComponentDownloads
 {
@@ -145,7 +161,9 @@ internal static class CoreComponentDownloads
             token.ThrowIfCancellationRequested();
             EnsurePlainDirectory(stage);
             File.Delete(archivePath);
-            return new(CorePreparationState.DownloadVerified, Path.Combine(stage, component.FileName), stage);
+            var ownedStage = stage;
+            return new CorePreparation(CorePreparationState.DownloadVerified, Path.Combine(stage, component.FileName), stage)
+                .OwnStaging(() => CleanAttempt(ownedStage, created) ? null : ownedStage);
         }
         catch (OperationCanceledException)
         {
@@ -266,8 +284,12 @@ internal static class CoreComponentDownloads
             EnsurePlainDirectory(stage);
             foreach (var file in created)
             {
-                if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0) return false;
-                File.Delete(file);
+                try
+                {
+                    if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0) return false;
+                    File.Delete(file);
+                }
+                catch (FileNotFoundException) { } // The verified archive was already removed.
             }
             Directory.Delete(stage); // Never recurse into files not created by this attempt.
             return true;

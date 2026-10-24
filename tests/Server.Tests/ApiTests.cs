@@ -243,7 +243,7 @@ public sealed class ApiTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task CoreActionSidecarAcceptsOnlyOpaquePlanIdsAndSettingsInvalidateHostPlans()
+    public async Task CoreActionSidecarRequiresWritePlansButRestoreUsesOnlyAnOperationId()
     {
         var invalidations = 0;
         var requests = new List<V2rayNMonitor.Core.CoreActionRequest>();
@@ -254,19 +254,26 @@ public sealed class ApiTests : IAsyncLifetime
         }, invalidate: () => invalidations++);
         await Login();
         var plan = Guid.NewGuid().ToString("N");
-        foreach (var action in new[] { "prepare-sidecar", "apply-sidecar", "verify-runtime" })
+        foreach (var action in new[] { "prepare-sidecar", "apply-sidecar", "verify-runtime", "restore-sidecar" })
         {
             var request = new V2rayNMonitor.Core.CoreActionRequest(action, "sing-box-statistics",
+                OperationId: action == "restore-sidecar" ? plan : null,
                 PlanId: action == "apply-sidecar" ? plan : null);
             Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/core-actions", request)).StatusCode);
         }
-        Assert.Equal(3, requests.Count);
+        Assert.Equal(4, requests.Count);
         Assert.Equal(plan, requests[1].PlanId);
+        Assert.Equal(plan, requests[3].OperationId);
+        Assert.Null(requests[3].PlanId);
         foreach (var request in new[]
         {
             new V2rayNMonitor.Core.CoreActionRequest("apply-sidecar", "xray-probes", PlanId: plan),
             new V2rayNMonitor.Core.CoreActionRequest("apply-sidecar", "sing-box-statistics", PlanId: "C:/untrusted"),
             new V2rayNMonitor.Core.CoreActionRequest("prepare-sidecar", "sing-box-statistics", PlanId: plan),
+            new V2rayNMonitor.Core.CoreActionRequest("restore-sidecar", "sing-box-statistics", plan, plan),
+            new V2rayNMonitor.Core.CoreActionRequest("restore-sidecar", "sing-box-statistics"),
+            new V2rayNMonitor.Core.CoreActionRequest("restore-sidecar", "xray-probes", plan),
+            new V2rayNMonitor.Core.CoreActionRequest("restore-sidecar", "sing-box-statistics", "C:/untrusted"),
             new V2rayNMonitor.Core.CoreActionRequest("verify-runtime", "xray-probes", OperationId: plan)
         })
             Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/core-actions", request)).StatusCode);

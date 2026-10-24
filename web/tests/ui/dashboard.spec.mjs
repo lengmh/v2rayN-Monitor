@@ -208,14 +208,14 @@ test('core actions disclose unavailable assets and clear stale records on settin
   await expect(page.locator('#core-action-record')).toHaveText('');
   await expect(page.locator('#core-action-result')).toContainText('托盘');
 });
-test('sidecar prepare apply and restore use fixed plans and explicit native confirmation', async ({ page }) => {
+test('sidecar writes need a plan but failed-reload restore needs only an operation and native confirmation', async ({ page }) => {
   const planId = '11111111222233334444555555555555';
   let attempts = 0;
   const calls = await mock(page, { '/api/core-actions': (route, request) => {
     const { action } = request.postDataJSON();
     return route.fulfill(json(action === 'install' ? { state: 'RecoveryRequired', operationId: planId }
       : action === 'prepare-sidecar' ? { state: 'SidecarPrepared', planId, details: 'Synthetic <img src=x> baseline' }
-      : action === 'apply-sidecar' ? { state: attempts++ ? 'Cancelled' : 'CoreRunning', planId }
+      : action === 'apply-sidecar' ? { state: ['CoreRunning', 'Cancelled', 'SidecarInstalledPendingReload'][attempts++], planId }
       : { state: 'SidecarRestored', operationId: planId }));
   } });
   await page.click('.nav-item[data-view=settings]'); await page.click('#core-actions > summary');
@@ -230,12 +230,14 @@ test('sidecar prepare apply and restore use fixed plans and explicit native conf
   await expect(page.locator('#apply-core-sidecar')).toBeEnabled();
   expect(calls.filter(c => c.path === '/api/core-actions').at(-1).body).toEqual({ action: 'apply-sidecar', componentId: 'sing-box-statistics', planId });
   await page.click('#apply-core-sidecar'); await expect(page.locator('#core-sidecar-result')).toContainText('操作已取消');
+  await page.click('#apply-core-sidecar'); await expect(page.locator('#core-sidecar-result')).toContainText('统计配置已写入');
+  await expect(page.locator('#apply-core-sidecar')).toBeDisabled();
   await expect(page.locator('#restore-core-sidecar')).toBeEnabled();
   await expect(page.locator('#core-action-result')).toContainText('需要恢复处理');
   await page.fill('#core-restore-operation', '11111111-2222-3333-4444-555555555555');
   await page.click('#restore-core-sidecar'); await expect(page.locator('#core-sidecar-result')).toContainText('统计配置已恢复');
   expect(calls.filter(c => c.path === '/api/core-actions').at(-1).body).toEqual({
-    action: 'restore-sidecar', componentId: 'sing-box-statistics', planId, operationId: planId
+    action: 'restore-sidecar', componentId: 'sing-box-statistics', operationId: planId
   });
   await expect(page.locator('#apply-core-sidecar')).toBeDisabled();
   await expect(page.locator('#core-actions')).toContainText('自行停止目标核心');
