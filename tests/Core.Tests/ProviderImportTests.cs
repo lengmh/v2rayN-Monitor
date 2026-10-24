@@ -68,12 +68,12 @@ public sealed class ProviderImportTests : IDisposable
             .Replace(",0.8,10,8.000000000123,", ",0.800,00010,8.0000000001230,").Replace(",display,", ",another display,") + "\r\n" };
         using var reopened = new ProviderImports(Path.Combine(root, "provider.db"));
         var duplicate = reopened.Commit(rewritten);
-        Assert.True(duplicate.Duplicate);
+        Assert.False(duplicate.Duplicate); // A distinct zero-new snapshot still owns its complete references.
         Assert.Equal(0, duplicate.NewRowCount);
         Assert.Equal(3, duplicate.SkippedRowCount);
         Assert.Equal("0", duplicate.NewRawBytes);
         Assert.Equal("0", duplicate.NewBilledBytes);
-        Assert.Equal(2, reopened.List().Count);
+        Assert.Equal(3, reopened.List().Count);
         Assert.Equal(5, reopened.Query(a.Source, query).RecordCount);
         Assert.Equal(4, reopened.Commit(b with { Source = "another-provider" }).NewRowCount);
         Assert.Equal(4, reopened.Query("another-provider", query).RecordCount);
@@ -255,6 +255,163 @@ public sealed class ProviderImportTests : IDisposable
         AssertStored(rowCount, rowCount, rowCount);
     }
 
+    [Fact]
+    public void BatchReferencesRevokeOwnerRetainsOverlappingSnapshotAndSupportsReimport()
+    {
+        Assert.True(imports.TrackingAvailable);
+        var a = imports.Commit(Request(DistinctRows(0, 100)));
+        var b = imports.Commit(Request(DistinctRows(20, 100)));
+        Assert.Equal(20, b.NewRowCount);
+        Assert.Equal(120, imports.Query("synthetic-provider", AllProvider()).RecordCount);
+        var preview = imports.PreviewRevoke("synthetic-provider", a.Hash);
+        Assert.True(preview.CanRevoke);
+        Assert.Equal(100, preview.RowCount);
+        Assert.Equal(20, preview.DeletedRowCount);
+        Assert.Equal(80, preview.RetainedRowCount);
+        Assert.Equal("20", preview.DeletedRawBytes);
+        Assert.Equal("2", preview.DeletedBilledBytes);
+        Assert.Equal("80", preview.RetainedRawBytes);
+        Assert.Equal("8", preview.RetainedBilledBytes);
+        Assert.Equal(preview, imports.Revoke(preview.Source, preview.Hash, preview.Token));
+        var remaining = imports.Query(preview.Source, AllProvider());
+        Assert.Equal(100, remaining.RecordCount);
+        Assert.Equal("100", remaining.RawBytes);
+        Assert.Equal("10", remaining.BilledBytes);
+        Assert.False(imports.PreviewRevoke(preview.Source, a.Hash).CanRevoke);
+
+        // Retained A-owned rows still exist. New A-owned records must use unoccupied IDs.
+        Assert.Equal(20, imports.Commit(Request(DistinctRows(0, 100))).NewRowCount);
+        Assert.Equal(120, imports.Query(preview.Source, AllProvider()).RecordCount);
+        Revoke(b.Hash);
+        Assert.Equal(100, imports.Query(preview.Source, AllProvider()).RecordCount);
+        Revoke(a.Hash);
+        Assert.Empty(imports.List());
+        Assert.Equal(0, imports.Query(preview.Source, AllProvider()).RecordCount);
+        Assert.Equal(100, imports.Commit(Request(DistinctRows(0, 100))).NewRowCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BatchReferencesRespectMultiplicityAndBothRevocationOrders(bool reverse)
+    {
+        const string x = "Synthetic-X,0.8,10,8.000000000123,display,2026-01-01 10:00:00\n";
+        var a = imports.Commit(Request(x + x + "Synthetic-Y,1,20,20,display,2026-01-01 11:00:00\n"));
+        var b = imports.Commit(Request(x + x + x + "Synthetic-Z,0.5,30,15.000000000123,display,2026-01-01 12:00:00\n"));
+        Assert.Equal(5, imports.Query("synthetic-provider", AllProvider()).RecordCount);
+        using var reopened = new ProviderImports(Path.Combine(root, "provider.db"));
+        var first = reopened.PreviewRevoke("synthetic-provider", reverse ? b.Hash : a.Hash);
+        reopened.Revoke(first.Source, first.Hash, first.Token);
+        var remaining = reopened.Query(first.Source, AllProvider());
+        Assert.Equal(reverse ? 3 : 4, remaining.RecordCount);
+        Assert.Equal(reverse ? "40" : "60", remaining.RawBytes);
+        Assert.Equal(reverse ? "36.000000000246" : "39.000000000492", remaining.BilledBytes);
+        var last = reopened.PreviewRevoke(first.Source, reverse ? a.Hash : b.Hash);
+        reopened.Revoke(last.Source, last.Hash, last.Token);
+        Assert.Equal("0", reopened.Query(first.Source, AllProvider()).RawBytes);
+        Assert.Equal("0", reopened.Query(first.Source, AllProvider()).BilledBytes);
+    }
+
+    [Fact]
+    public void BatchReferencesTrackFullyOverlappingZeroNewFileAndRetainOnlyItsMultiplicity()
+    {
+        var a = imports.Commit(Request(SyntheticRow + SyntheticRow));
+        var subset = Request(SyntheticRow.Replace(",1 B,", ",another display,"));
+        var preview = imports.Preview(subset);
+        Assert.False(preview.Duplicate);
+        Assert.Equal(0, preview.NewRowCount);
+        var b = imports.Commit(subset);
+        Assert.False(b.Duplicate);
+        Assert.True(imports.Commit(subset).Duplicate);
+        var batch = imports.List().Single(row => row.Hash == b.Hash);
+        Assert.Equal(0, batch.RowCount);
+        Assert.Equal(1, batch.FileRowCount);
+        Assert.Equal("1", batch.FileRawBytes);
+        Assert.Equal("1", batch.FileBilledBytes);
+        Assert.True(batch.ReferencesComplete);
+        var revoke = imports.PreviewRevoke(subset.Source, a.Hash);
+        Assert.Equal(1, revoke.DeletedRowCount);
+        Assert.Equal(1, revoke.RetainedRowCount);
+        imports.Revoke(revoke.Source, revoke.Hash, revoke.Token);
+        Assert.Equal(1, imports.Query(subset.Source, AllProvider()).RecordCount);
+        Revoke(b.Hash);
+        Assert.Equal(0, imports.Query(subset.Source, AllProvider()).RecordCount);
+    }
+
+    [Fact]
+    public void BatchRevokeRevalidatesPreviewAndDoesNotAffectOtherSources()
+    {
+        var a = imports.Commit(Request(DistinctRows(0, 10)));
+        var pending = imports.PreviewRevoke("synthetic-provider", a.Hash);
+        imports.Commit(Request(DistinctRows(5, 10)));
+        Assert.Throws<InvalidOperationException>(() => imports.Revoke(pending.Source, pending.Hash, pending.Token));
+        Assert.Equal(15, imports.Query(pending.Source, AllProvider()).RecordCount);
+        var current = imports.PreviewRevoke(pending.Source, pending.Hash);
+        imports.Commit(Request(DistinctRows(0, 10)) with { Source = "synthetic-other" });
+        imports.Revoke(current.Source, current.Hash, current.Token);
+        Assert.Equal(10, imports.Query(current.Source, AllProvider()).RecordCount);
+        Assert.Equal(10, imports.Query("synthetic-other", AllProvider()).RecordCount);
+    }
+
+    [Fact]
+    public void BatchRevokeTokenCannotAuthorizeADifferentBatchInTheSameSource()
+    {
+        var a = imports.Commit(Request(DistinctRows(0, 5)));
+        var b = imports.Commit(Request(DistinctRows(10, 5)));
+        var preview = imports.PreviewRevoke("synthetic-provider", a.Hash);
+        Assert.Throws<InvalidOperationException>(() => imports.Revoke(preview.Source, b.Hash, preview.Token));
+        Assert.Equal(2, imports.List().Count);
+        Assert.Equal(10, imports.Query(preview.Source, AllProvider()).RecordCount);
+    }
+
+    [Fact]
+    public void BatchRevokeSqliteFailureRollsBackReferencesRecordsAndBatch()
+    {
+        var a = imports.Commit(Request(DistinctRows(0, 5)));
+        var preview = imports.PreviewRevoke("synthetic-provider", a.Hash);
+        using var db = new SqliteConnection($"Data Source={Path.Combine(root, "provider.db")};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = "CREATE TRIGGER synthetic_revoke_failure BEFORE DELETE ON import_batches BEGIN SELECT RAISE(ABORT,'synthetic'); END;";
+        command.ExecuteNonQuery();
+        Assert.Throws<SqliteException>(() => imports.Revoke(preview.Source, preview.Hash, preview.Token));
+        Assert.Equal(preview, imports.PreviewRevoke(preview.Source, preview.Hash));
+        Assert.Equal(5, imports.Query(preview.Source, AllProvider()).RecordCount);
+        command.CommandText = "DROP TRIGGER synthetic_revoke_failure;";
+        command.ExecuteNonQuery();
+        imports.Revoke(preview.Source, preview.Hash, preview.Token);
+        Assert.Empty(imports.List());
+        Assert.Equal(0, imports.Query(preview.Source, AllProvider()).RecordCount);
+    }
+
+    [Fact]
+    public void ReferenceInsertFailureRollsBackWholeImportAndAllowsRetry()
+    {
+        using var db = new SqliteConnection($"Data Source={Path.Combine(root, "provider.db")};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = "CREATE TRIGGER synthetic_reference_failure BEFORE INSERT ON provider_batch_rows WHEN NEW.row_number=1 BEGIN SELECT RAISE(ABORT,'synthetic'); END;";
+        command.ExecuteNonQuery();
+        Assert.Throws<SqliteException>(() => imports.Commit(Request(SyntheticRow + SyntheticRow)));
+        Assert.Empty(imports.List());
+        command.CommandText = "SELECT COUNT(*) FROM provider_batch_tracking;";
+        Assert.Equal(0L, command.ExecuteScalar());
+        command.CommandText = "SELECT COUNT(*) FROM provider_records;";
+        Assert.Equal(0L, command.ExecuteScalar());
+        command.CommandText = "DROP TRIGGER synthetic_reference_failure;";
+        command.ExecuteNonQuery();
+        Assert.Equal(2, imports.Commit(Request(SyntheticRow + SyntheticRow)).NewRowCount);
+    }
+
+    private void Revoke(string hash)
+    {
+        var preview = imports.PreviewRevoke("synthetic-provider", hash);
+        Assert.True(preview.CanRevoke);
+        imports.Revoke(preview.Source, preview.Hash, preview.Token);
+    }
+    private static string DistinctRows(int start, int count) => string.Concat(Enumerable.Range(start, count)
+        .Select(i => $"Synthetic-{i},1,1,0.1,display,2026-01-01 00:00:00\n"));
+    private static QuerySpec AllProvider() => new(new(2025, 12, 31, 0, 0, 0, TimeSpan.Zero), new(2026, 1, 3, 0, 0, 0, TimeSpan.Zero), "UTC");
     private static ImportRequest RepeatedRows(int count) => Request(string.Concat(Enumerable.Repeat(SyntheticRow, count)));
 
     private void AssertStored(long count, long raw, long billed)

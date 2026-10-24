@@ -12,7 +12,7 @@ import { exactProviderBytes, formatProviderBytes, exactProviderTotal, formatProv
 import type { Unit } from './lib/format.ts';
 import { dateInZone, dateRange, periodRange, shiftAnchor, timestamp } from './lib/ranges.ts';
 import type { Bucket, Period, Range } from './lib/ranges.ts';
-import type { CollectorStatus, CoreActionResult, CoreCapabilities, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings, ProviderHistory, TrafficDisplay } from './types.ts';
+import type { CollectorStatus, CoreActionResult, CoreCapabilities, HistoryResult, ImportBatch, ImportPreview, NodeInfo, Settings, ProviderHistory, ProviderRevokePreview, TrafficDisplay } from './types.ts';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -46,7 +46,7 @@ function discloseGroups(button: HTMLButtonElement, groups: string[], key: string
 class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
 let expired = false;
 let ready = false;
-const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo', 'check-core-capabilities', 'prepare-core-install', 'prepare-core-restore', 'prepare-core-sidecar', 'apply-core-sidecar', 'restore-core-sidecar', 'verify-core-runtime'];
+const writeControls = ['save-settings', 'export-button', 'preview-import', 'commit-import', 'seed-demo', 'check-core-capabilities', 'prepare-core-install', 'prepare-core-restore', 'prepare-core-sidecar', 'apply-core-sidecar', 'restore-core-sidecar', 'verify-core-runtime', 'refresh-note'];
 for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
 let refreshController: AbortController | null = null;
 let statusController: AbortController | null = null;
@@ -56,6 +56,8 @@ let nodesContext = '';
 let nodeCatalog: NodeInfo[] | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let statusTimer: ReturnType<typeof setTimeout> | null = null;
+let historyRetryCount = 0;
+let initialHistoryPending = true;
 let settings: Settings = { v2rayNPath: '', timeZoneId: 'UTC', demo: false };
 let savingSettings = false;
 let coreCapabilitiesRevision = 0;
@@ -106,6 +108,18 @@ const aggregateHistory = (): boolean => !probeView() && !statisticsSource && ['b
 const historyName = (name: string): string => aggregateHistory() && name === historyBasis ? historyBasisLabels[historyBasis]! : name;
 let importRequest: { source: string; timeZoneId: string; csv: string } | null = null;
 let importRevision = 0;
+let importFile: File | null = null;
+let importArchiveRequested = false;
+let archiveFile: File | null = null;
+let archiveRevision = 0;
+let archiveBusy = false;
+let providerBusy = false;
+let trackingFeatures = { trackingAvailable: false, upgradeAvailable: false };
+let revokeRequest: ProviderRevokePreview | null = null;
+let revokeRevision = 0;
+let revokeController: AbortController | null = null;
+let batchesRevision = 0;
+let trendDataContext = '';
 
 function expireSession(): void {
   expired = true; pauseRefresh();
@@ -113,6 +127,9 @@ function expireSession(): void {
   for (const id of writeControls) el<HTMLButtonElement>(id).disabled = true;
   invalidateCoreCapabilities('本机会话已失效，请从托盘重新打开页面。');
   invalidateCoreAction('本机会话已失效，请从托盘重新打开页面，并核对 Host 操作结果。');
+  invalidateImport();
+  put('revoke-result', '会话已失效，旧撤销预览已清除，请从托盘重新打开页面。');
+  updateProviderControls();
 }
 async function api<T>(path: string, options: RequestInit = {}, timeoutMs = 12000): Promise<T> {
   if (expired) throw new ApiError('请从托盘重新打开页面。', 401);
@@ -447,6 +464,28 @@ function renderNodes(nodes: NodeInfo[]): void {
   if (nodeKey && !nodes.some(n => n.key === nodeKey)) { const option = element('option', '已删除 / 历史节点'); option.value = nodeKey; select.append(option); }
   select.value = nodeKey;
 }
+function trendContext(): string {
+  return JSON.stringify([activeView, statisticsSource, comparison, period, bucket, range?.start, range?.end,
+    settings.timeZoneId, nodeKey, historyBasis, probeBasis]);
+}
+function trendColumn(label: string, recorded: boolean, className = 'chart-column'): HTMLDivElement | HTMLButtonElement {
+  const next = period === 'year' && bucket === 'month' && /^\d{4}-(0[1-9]|1[0-2])$/.test(label) ? 'month'
+    : period === 'month' && bucket === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(label) ? 'day' : null;
+  const target = next === 'month' ? `${label}-01` : label;
+  if (!recorded || !next) return element('div', '', className);
+  try { dateRange(target, target, settings.timeZoneId); } catch { return element('div', '', className); }
+  if (target < range.from || target > range.through) return element('div', '', className);
+  const context = trendDataContext, button = element('button', '', `${className} chart-drilldown`);
+  button.type = 'button'; button.dataset.bucketLabel = label;
+  button.setAttribute('aria-label', `查看 ${label} 的${next === 'month' ? '月度' : '当日'}流量`);
+  button.addEventListener('click', () => {
+    if (expired || !ready || refreshController || context !== trendContext() || context !== trendDataContext) return;
+    anchor = target; page = 0; comparisonNodePage = 0; comparisonBucketPage = 0;
+    selectPeriod(next);
+    document.querySelector<HTMLButtonElement>(`[data-period="${next}"]`)?.focus({ preventScroll: true });
+  });
+  return button;
+}
 function renderChart(history: HistoryPointInput, provider = false): void {
   const display = (value: string | bigint): string => provider ? formatProviderTotal(providerUnitsText(BigInt(value)), unit) : formatBytes(value, unit);
   const exact = (value: string | bigint): string => provider ? exactProviderTotal(providerUnitsText(BigInt(value))) : exactBytes(value);
@@ -460,12 +499,12 @@ function renderChart(history: HistoryPointInput, provider = false): void {
   const labelEvery = Math.max(1, Math.ceil(slots.length / Math.max(2, Math.floor((chart.clientWidth || 600) / 65))));
   slots.forEach(({ label: key, point }, index) => {
     const total = point ? bytes(point.upload) + bytes(point.download) : 0n;
-    const column = element('div', '', 'chart-column');
+    const column = trendColumn(key, !!point);
     const label = shortLabel(key, bucket);
     column.title = point ? provider ? `${key}\n${providerMetric === 'raw' ? '服务商原始量' : '服务商计费量'} ${display(total)}（${exact(total)}）` : `${key}\n下载 ${display(point.download)}（${exact(point.download)}）\n上传 ${display(point.upload)}（${exact(point.upload)}）` : `${key}\n无记录，不能视为零流量`;
     const recovered = bytes(point?.recoveredUpload ?? '0') + bytes(point?.recoveredDownload ?? '0');
     if (recovered > 0n) column.title += `\n其中恢复量 ${exactBytes(recovered)}，更细时间分布未知`;
-    const stack = element('div', '', 'chart-stack');
+    const stack = element('span', '', 'chart-stack');
     if (!point) stack.append(element('span', '', 'chart-missing'));
     else if (total === 0n) stack.append(element('span', '', 'chart-zero'));
     else { const download = element('span', '', `bar-part ${provider ? 'bar-provider' : 'bar-download'}`); download.style.height = `${percentage(bytes(point.download), max)}%`; const upload = element('span', '', 'bar-part bar-upload'); upload.style.height = `${percentage(bytes(point.upload), max)}%`; stack.append(download, upload); }
@@ -944,7 +983,7 @@ function renderComparison(local: HistoryResult, provider: ProviderHistory): void
     }, 0n);
     const every = Math.max(1, Math.ceil(slots.length / Math.max(2, Math.floor((chart.clientWidth || 600) / 65))));
     slots.forEach(({ label }, index) => {
-      const row = byLabel.get(label), column = element('div', '', 'chart-column comparison-column'), bars = element('div', '', 'comparison-bars');
+      const row = byLabel.get(label), column = trendColumn(label, !!row, 'chart-column comparison-column'), bars = element('span', '', 'comparison-bars');
       const values = row ? comparisonValues(row) : [null, null];
       column.title = `${label}\n${billed ? '本机估算' : '本机'}：${values[0] == null ? billed && row?.local !== null ? '倍率未知或无记录' : '无记录' : exactProviderTotal(values[0])}\n服务商：${values[1] == null ? '无记录' : exactProviderTotal(values[1])}`;
       if (billed && row?.local !== null && row) column.title += `\n${comparisonCoverage(row)}`;
@@ -1001,6 +1040,7 @@ function renderProviderHistory(history: ProviderHistory): void {
 }
 async function loadSources(): Promise<void> {
   const sources = await api<string[]>('/api/provider/sources');
+  if (statisticsSource && !sources.includes(statisticsSource)) chooseSource('');
   const select = el<HTMLSelectElement>('statistics-source');
   select.replaceChildren(element('option', '本机采集'));
   select.options[0].value = '';
@@ -1017,14 +1057,36 @@ function renderNodeCatalog(): void {
   } else renderNodes(nodeCatalog);
   updateFilterDisclosure();
 }
+function setHistoryBusy(busy: boolean): void {
+  const button = el<HTMLButtonElement>('refresh-note');
+  button.disabled = busy || expired || !ready;
+  button.setAttribute('aria-busy', String(busy));
+}
 function pauseRefresh(): void {
   refreshController?.abort(); refreshController = null;
+  setHistoryBusy(false);
   statusController?.abort(); statusController = null; statusRequest = null;
   nodesController?.abort(); nodesController = null;
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = null;
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = null;
+}
+function scheduleHistoryRefresh(delay = 30000): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+  if (!ready || expired || document.hidden) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    scheduleHistoryRefresh();
+    void refresh(false, true);
+  }, delay);
+}
+function scheduleHistoryRetry(): number | null {
+  if (statisticsSource || historyRetryCount >= 2) return null;
+  const delay = historyRetryCount++ === 0 ? 2000 : 5000;
+  scheduleHistoryRefresh(delay);
+  return delay;
 }
 function scheduleRefresh(): void {
   if (refreshTimer) clearTimeout(refreshTimer);
@@ -1037,13 +1099,8 @@ function scheduleRefresh(): void {
     statusTimer = setTimeout(statusTick, 2000);
     void refreshStatus();
   };
-  const historyTick = (): void => {
-    if (!ready || expired || document.hidden) return;
-    refreshTimer = setTimeout(historyTick, 30000);
-    void refresh(false, true);
-  };
   statusTimer = setTimeout(statusTick, 2000);
-  refreshTimer = setTimeout(historyTick, 30000);
+  scheduleHistoryRefresh();
 }
 function refreshStatus(): Promise<CollectorStatus | undefined> {
   if (statusRequest) return statusRequest;
@@ -1092,7 +1149,8 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
   if (refreshController && !force) return;
   refreshController?.abort();
   const controller = new AbortController(); refreshController = controller;
-  if (force) { detailPopover.close(); show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
+  setHistoryBusy(true);
+  if (force) { historyRetryCount = 0; detailPopover.close(); show('global-error', false); el('summary').setAttribute('aria-busy', 'true'); put('refresh-note', '正在更新…'); }
   try {
     if (probeView()) {
       const probeStatus = await status;
@@ -1128,6 +1186,7 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
         api<ProviderHistory>(`/api/provider/history?${query()}`, { signal: controller.signal })
       ]);
       if (controller.signal.aborted || refreshController !== controller) return;
+      trendDataContext = trendContext();
       renderComparison(local, provider);
       renderNodeCatalog();
       put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)} · 对照按操作刷新`);
@@ -1135,14 +1194,29 @@ async function refresh(force = false, auxiliary = false): Promise<void> {
     }
     const history = await api<HistoryResult | ProviderHistory>(`${statisticsSource ? '/api/provider/history' : '/api/history'}?${query(false, !statisticsSource)}`, { signal: controller.signal });
     if (controller.signal.aborted || refreshController !== controller) return;
+    const local = history as HistoryResult;
+    const initialEmpty = !statisticsSource && initialHistoryPending && history.recordCount === 0 &&
+      !history.series.length && !history.nodes.length && local.upload === '0' && local.download === '0' &&
+      local.unallocatedUpload === '0' && local.unallocatedDownload === '0';
+    trendDataContext = trendContext();
     if (statisticsSource) renderProviderHistory(history as ProviderHistory); else renderHistory(history as HistoryResult);
     show('global-error', false);
+    if (!statisticsSource && !initialEmpty) initialHistoryPending = false;
+    if (!initialEmpty) historyRetryCount = 0;
+    scheduleHistoryRefresh();
+    const retryDelay = initialEmpty ? scheduleHistoryRetry() : null;
     put('refresh-note', `已更新 ${timestamp(new Date().toISOString(), settings.timeZoneId).split(' ').at(-1)}${statisticsSource ? ' · 导入或筛选后刷新' : ' · 30 秒'}`);
+    if (retryDelay !== null) put('refresh-note', `暂无本机记录 · ${retryDelay / 1000} 秒后重新检查`);
   } catch (error) {
-    if (!controller.signal.aborted && !expired) { controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`); put('refresh-note', '更新失败 · 请重试'); }
+    if (!controller.signal.aborted && !expired) {
+      controller.abort(); fail(`暂时无法刷新。${errorText(error)} 已显示的数据可能不是最新。`);
+      scheduleHistoryRefresh();
+      const retryDelay = error instanceof ApiError && error.status < 500 ? null : scheduleHistoryRetry();
+      put('refresh-note', retryDelay === null ? '更新失败 · 请重试' : `更新失败 · ${retryDelay / 1000} 秒后重试`);
+    }
   } finally {
     updateFilterDisclosure();
-    if (refreshController === controller) { refreshController = null; el('summary').setAttribute('aria-busy', 'false'); }
+    if (refreshController === controller) { refreshController = null; setHistoryBusy(false); el('summary').setAttribute('aria-busy', 'false'); }
   }
 }
 function navigate(view: string): void {
@@ -1161,16 +1235,26 @@ function navigate(view: string): void {
     chooseSource(probeView() ? '' : statisticsSource);
     el<HTMLButtonElement>('export-button').disabled = expired || !ready;
   }
-  if (!statisticsVisible()) { refreshController?.abort(); refreshController = null; nodesController?.abort(); nodesController = null; }
+  if (!statisticsVisible()) { refreshController?.abort(); refreshController = null; setHistoryBusy(false); nodesController?.abort(); nodesController = null; }
   if (ready) void refresh(true, true);
   if (view === 'provider' && ready) void loadBatches();
 }
 async function loadBatches(): Promise<void> {
-  try { lastBatchList = await api<ImportBatch[]>('/api/imports'); renderBatches(); } catch (error) { if (!expired) put('import-result', errorText(error)); }
+  const revision = ++batchesRevision;
+  try {
+    const [batches, features] = await Promise.all([api<ImportBatch[]>('/api/imports'),
+      api<{ trackingAvailable: boolean; upgradeAvailable: boolean }>('/api/imports/features')]);
+    if (expired || revision !== batchesRevision) return;
+    lastBatchList = batches;
+    trackingFeatures = { trackingAvailable: features.trackingAvailable === true, upgradeAvailable: features.upgradeAvailable === true };
+    put('import-tracking-status', trackingFeatures.trackingAvailable ? '批次引用已启用。旧批次的未知引用不补造，仍不可撤销。'
+      : '批次引用尚未启用或不可用。升级需 Host 原生最终确认，先备份旧库；不会自动升级。');
+    renderBatches(); updateProviderControls();
+  } catch (error) { if (!expired && revision === batchesRevision) put('import-result', errorText(error)); }
 }
 function renderBatches(): void {
   const body = el('import-batches'); body.replaceChildren();
-  if (!lastBatchList.length) { const row = element('tr'), cell = element('td', '尚未导入服务商账单。本机自动采集无需导入 CSV。', 'empty-state'); cell.colSpan = 5; row.append(cell); body.append(row); }
+  if (!lastBatchList.length) { const row = element('tr'), cell = element('td', '尚未导入服务商账单。本机自动采集无需导入 CSV。', 'empty-state'); cell.colSpan = 7; row.append(cell); body.append(row); }
   for (const batch of lastBatchList) {
     const row = element('tr'), billed = element('td', undefined, 'numeric');
     const amount = element('button', formatProviderBytes(batch.billedBytes, unit), 'traffic-amount');
@@ -1186,7 +1270,14 @@ function renderBatches(): void {
       } catch (error) { formResult('import-result', errorText(error), true); }
     });
     group.append(element('span', batch.source), view); source.append(group);
-    row.append(source, element('td', String(batch.rowCount)), element('td', formatBytes(batch.rawBytes, unit), 'numeric'), billed, element('td', timestamp(batch.importedAt || null, settings.timeZoneId))); body.append(row);
+    const file = element('td', `记录：${batch.fileRowCount == null ? '未知' : batch.fileRowCount.toLocaleString('zh-CN')}\n原始量：${batch.fileRawBytes == null ? '未知' : exactBytes(batch.fileRawBytes)}\n计费量：${batch.fileBilledBytes == null ? '未知' : exactProviderBytes(batch.fileBilledBytes)}`, 'batch-file-meta');
+    const action = element('td');
+    if (batch.referencesComplete && trackingFeatures.trackingAvailable) {
+      const preview = element('button', '预览撤销', 'button small secondary');
+      preview.type = 'button'; preview.dataset.revokePreview = 'true'; preview.disabled = expired || providerBusy;
+      preview.addEventListener('click', () => { void previewRevoke(batch); }); action.append(preview);
+    } else action.append(element('span', '引用未知，不可撤销', 'muted'));
+    row.append(source, element('td', String(batch.rowCount)), element('td', formatBytes(batch.rawBytes, unit), 'numeric'), billed, element('td', timestamp(batch.importedAt || null, settings.timeZoneId)), file, action); body.append(row);
   }
 }
 function chooseSource(source: string): void {
@@ -1245,12 +1336,63 @@ function renderImportPreview(preview: ImportPreview, source: string, zone: strin
   target.append(counts, meta);
   show('import-preview-placeholder', false);
 }
-function invalidateImport(): void { importRevision++; importRequest = null; show('import-preview', false); show('import-preview-placeholder', true); put('import-result', ''); }
+function invalidateRevoke(): void {
+  revokeRevision++; revokeController?.abort(); revokeController = null; revokeRequest = null;
+  show('revoke-preview', false); el('revoke-details').replaceChildren();
+  el<HTMLButtonElement>('confirm-revoke').disabled = true;
+}
+function invalidateImport(): void {
+  importRevision++; importRequest = null; importFile = null; importArchiveRequested = false;
+  archiveRevision++; archiveFile = null; show('archive-original', false); put('archive-result', '');
+  show('import-preview', false); show('import-preview-placeholder', true); put('import-result', '');
+  invalidateRevoke();
+}
+function updateProviderControls(): void {
+  el<HTMLButtonElement>('enable-import-tracking').disabled = !ready || expired || providerBusy || !trackingFeatures.upgradeAvailable || trackingFeatures.trackingAvailable;
+  el<HTMLButtonElement>('preview-import').disabled = !ready || expired || providerBusy;
+  el<HTMLButtonElement>('commit-import').disabled = !ready || expired || providerBusy || !importRequest;
+  el<HTMLButtonElement>('confirm-revoke').disabled = !ready || expired || providerBusy || !revokeRequest?.canRevoke;
+  el<HTMLButtonElement>('cancel-revoke').disabled = expired || providerBusy;
+  el<HTMLButtonElement>('save-original-csv').disabled = expired || archiveBusy || !archiveFile;
+  for (const id of ['provider-source', 'import-zone', 'csv-file', 'archive-csv'])
+    el<HTMLInputElement | HTMLSelectElement>(id).disabled = expired || providerBusy;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-revoke-preview]')) button.disabled = expired || providerBusy;
+}
+async function refreshProviderData(): Promise<void> {
+  await loadBatches(); await loadSources();
+  nodesContext = ''; nodeCatalog = null; latestProvider = null; latestComparison = null;
+  await refresh(true, true);
+}
+async function previewRevoke(batch: ImportBatch): Promise<void> {
+  if (expired || providerBusy || !batch.referencesComplete || !trackingFeatures.trackingAvailable) return;
+  invalidateImport(); const revision = revokeRevision, controller = new AbortController(); revokeController = controller;
+  formResult('revoke-result', '正在只读预览撤销影响…');
+  try {
+    const result = await api<ProviderRevokePreview>('/api/imports/revoke-preview', {
+      method: 'POST', body: JSON.stringify({ source: batch.source, hash: batch.hash }), signal: controller.signal
+    });
+    if (expired || revision !== revokeRevision) return;
+    const complete = [result.rowCount, result.deletedRowCount, result.retainedRowCount, result.deletedRawBytes,
+      result.deletedBilledBytes, result.retainedRawBytes, result.retainedBilledBytes].every(value => value != null);
+    revokeRequest = result.canRevoke && complete && result.token ? result : null;
+    const details = el('revoke-details'); details.replaceChildren();
+    const count = (value: number | null): string => value == null ? '未知' : value.toLocaleString('zh-CN');
+    for (const text of [`来源：${result.source}`, `文件摘要：${result.hash}`, `本批引用 ${count(result.rowCount)} 条；将删除 ${count(result.deletedRowCount)} 条，保留共享记录 ${count(result.retainedRowCount)} 条。`,
+      `将删除原始量：${result.deletedRawBytes == null ? '未知' : exactBytes(result.deletedRawBytes)}；计费量：${result.deletedBilledBytes == null ? '未知' : exactProviderBytes(result.deletedBilledBytes)}`,
+      `保留原始量：${result.retainedRawBytes == null ? '未知' : exactBytes(result.retainedRawBytes)}；计费量：${result.retainedBilledBytes == null ? '未知' : exactProviderBytes(result.retainedBilledBytes)}`])
+      details.append(element('p', text));
+    show('revoke-preview', true);
+    formResult('revoke-result', revokeRequest ? '仅预览，尚未撤销。核对后再确认；已归档的原 CSV 不会删除。' : result.reason || '引用不完整或影响未知，不能撤销。', !revokeRequest);
+    updateProviderControls();
+  } catch (error) { if (revision === revokeRevision && !expired) formResult('revoke-result', `${errorText(error)} 请重新预览。`, true); }
+  finally { if (revokeController === controller) revokeController = null; }
+}
 function formResult(id: string, value: string, isError = false): void { put(id, value); el(id).classList.toggle('error', isError); }
 
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) button.addEventListener('click', () => navigate(button.dataset.view!));
 document.querySelector('.brand')?.addEventListener('click', event => { event.preventDefault(); navigate('overview'); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-period]')) button.addEventListener('click', () => selectPeriod(button.dataset.period as Period));
+el('refresh-note').addEventListener('click', () => { if (!refreshController) void refresh(true, true); });
 el('custom-range').addEventListener('submit', event => { event.preventDefault(); selectRange(); });
 el('gap-details').addEventListener('toggle', renderGapDetails);
 el('previous-period').addEventListener('click', () => { if (period !== 'custom') { anchor = shiftAnchor(period, anchor, -1); selectRange(); } });
@@ -1408,10 +1550,11 @@ el('export-button').addEventListener('click', async () => {
     link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (error) { fail(errorText(error)); } finally { button.disabled = expired; }
 });
-for (const id of ['provider-source', 'import-zone', 'csv-file']) el(id).addEventListener('change', invalidateImport);
+for (const id of ['provider-source', 'import-zone', 'csv-file', 'archive-csv']) el(id).addEventListener('change', invalidateImport);
 el('provider-source').addEventListener('input', invalidateImport);
 el('import-form').addEventListener('submit', async event => {
-  event.preventDefault(); invalidateImport(); const revision = importRevision; const button = el<HTMLButtonElement>('preview-import'); button.disabled = true; formResult('import-result', '正在校验文件…');
+  event.preventDefault(); if (expired || providerBusy) return;
+  invalidateImport(); const revision = importRevision; const button = el<HTMLButtonElement>('preview-import'); button.disabled = true; formResult('import-result', '正在校验文件…');
   try {
     const file = el<HTMLInputElement>('csv-file').files?.[0]; if (!file) throw new Error('请先选择 CSV 文件。');
     if (file.size > 4_000_000) throw new Error('CSV 文件超过 4 MB，请使用较小的导出文件。');
@@ -1419,25 +1562,82 @@ el('import-form').addEventListener('submit', async event => {
     if (!request.source) throw new Error('请填写来源名称。');
     const preview = await post<ImportPreview>('/api/imports/preview', request);
     if (revision !== importRevision) return;
-    importRequest = request;
+    importRequest = preview.duplicate || preview.warnings.length ? null : request;
+    importFile = file; importArchiveRequested = el<HTMLInputElement>('archive-csv').checked;
     renderImportPreview(preview, request.source, request.timeZoneId);
     el('import-warnings').replaceChildren(...(preview.warnings || []).map(warning => element('li', warning)));
     show('import-preview', true); el<HTMLButtonElement>('commit-import').disabled = preview.duplicate || preview.warnings.length > 0;
     formResult('import-result', preview.duplicate ? '全部记录已存在，不会重复记账。' : preview.warnings.length ?
-      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : '预览完成。请核对来源、时区和新增记录后确认导入。');
+      '发现计费记录冲突，请核对后重新预览；本批不会导入。' : preview.newRowCount === 0
+        ? '预览完成。文件记录已被覆盖，但可新增本批引用，不重复记账；请核对后确认导入。' : '预览完成。请核对来源、时区和新增记录后确认导入。');
   } catch (error) { if (revision === importRevision) formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
 });
 el('commit-import').addEventListener('click', async () => {
-  if (!importRequest) return;
-  const request = importRequest, button = el<HTMLButtonElement>('commit-import'); button.disabled = true;
+  if (!importRequest || providerBusy || expired) return;
+  invalidateRevoke();
+  const request = importRequest, file = importFile, archive = importArchiveRequested;
+  const revision = importRevision;
+  providerBusy = true; updateProviderControls();
     try {
-      const result = await post<ImportPreview>('/api/imports/commit', request); invalidateImport();
+      const result = await post<ImportPreview>('/api/imports/commit', request);
+      if (expired || revision !== importRevision) return;
+      invalidateImport();
       formResult('import-result', `导入完成：新增 ${result.newRowCount.toLocaleString('zh-CN')} 条，跳过 ${result.skippedRowCount.toLocaleString('zh-CN')} 条。${result.duplicate ?
-        '全部记录已存在，未新增批次。' : `新增原始量 ${exactBytes(result.newRawBytes)}，新增计费量 ${exactProviderBytes(result.newBilledBytes)}。已保存到独立服务商账本。`}可在统计来源中选择查看节点历史。`);
-      await loadBatches(); await loadSources();
-      if (statisticsSource === request.source.trim()) { nodesContext = ''; await refresh(true, true); }
+        '全部记录已存在，未新增批次。' : `新增原始量 ${exactBytes(result.newRawBytes)}，新增计费量 ${exactProviderBytes(result.newBilledBytes)}。${result.newRowCount === 0 ? '已保存批次引用，未新增流量记录。' : '已保存到独立服务商账本。'}`}可在统计来源中选择查看节点历史。`);
+      if (archive && file) { archiveFile = file; show('archive-original', true); put('archive-result', '原 CSV 尚未保存，请点击另存。'); }
+      await refreshProviderData();
     }
-  catch (error) { formResult('import-result', errorText(error), true); } finally { button.disabled = expired; }
+  catch (error) { if (!expired) formResult('import-result', errorText(error), true); }
+  finally { providerBusy = false; updateProviderControls(); }
+});
+el('cancel-revoke').addEventListener('click', () => { invalidateRevoke(); put('revoke-result', '已取消预览，未撤销批次。'); });
+el('confirm-revoke').addEventListener('click', async () => {
+  if (expired || providerBusy || !revokeRequest) return;
+  const request = revokeRequest; invalidateImport(); const revision = revokeRevision;
+  providerBusy = true; updateProviderControls(); formResult('revoke-result', '正在撤销已确认的批次引用…');
+  try {
+    await post('/api/imports/revoke', { source: request.source, hash: request.hash, token: request.token });
+    if (expired || revision !== revokeRevision) return;
+    formResult('revoke-result', '批次已撤销，共享记录按预览保留。已归档的原 CSV 未删除。');
+    await refreshProviderData();
+  } catch (error) {
+    if (!expired && revision === revokeRevision) formResult('revoke-result', `${errorText(error)} 请重新预览后再确认。`, true);
+  } finally { providerBusy = false; updateProviderControls(); }
+});
+el('enable-import-tracking').addEventListener('click', async () => {
+  if (expired || providerBusy || !trackingFeatures.upgradeAvailable || trackingFeatures.trackingAvailable) return;
+  invalidateImport(); providerBusy = true; updateProviderControls();
+  formResult('tracking-result', '等待 Host 原生确认：先备份旧服务商账本，再启用批次引用…');
+  try {
+    const result = await api<{ state: string; backupPath?: string; preservedBatches?: number; preservedRecords?: number }>('/api/imports/enable-tracking', { method: 'POST', body: '{}' }, 390000);
+    if (expired) return;
+    const labels: Record<string, string> = { Enabled: '批次引用已启用。', AlreadyEnabled: '批次引用已启用，无需重复升级。', Cancelled: '已取消升级。', Unavailable: '当前环境不提供升级入口。', Busy: '账本正在使用，请稍后明确重试。', Failed: '升级失败，请核对 Host 提示。' };
+    formResult('tracking-result', (labels[result.state] ?? '升级结果未知，请核对 Host。') +
+      (result.backupPath ? `\n备份：${result.backupPath}` : '') +
+      (result.preservedBatches == null ? '' : `\n保留批次：${result.preservedBatches.toLocaleString('zh-CN')}`) +
+      (result.preservedRecords == null ? '' : `；保留记录：${result.preservedRecords.toLocaleString('zh-CN')}`));
+    await loadBatches();
+  } catch (error) { if (!expired) formResult('tracking-result', errorText(error), true); }
+  finally { providerBusy = false; updateProviderControls(); }
+});
+type CsvWritable = { write(data: Blob): Promise<void>; close(): Promise<void>; abort?(): Promise<void> };
+type CsvSaveWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<{ createWritable(): Promise<CsvWritable> }> };
+el('save-original-csv').addEventListener('click', async () => {
+  const file = archiveFile, revision = archiveRevision;
+  if (!file || expired || archiveBusy) return;
+  const picker = (window as CsvSaveWindow).showSaveFilePicker;
+  if (!picker) { formResult('archive-result', '此浏览器不支持原位归档，原 CSV 未保存；已导入账本不受影响。', true); return; }
+  archiveBusy = true;
+  const button = el<HTMLButtonElement>('save-original-csv'); button.disabled = true;
+  let writable: CsvWritable | undefined;
+  try {
+    const handle = await picker.call(window, { suggestedName: file.name || 'original.csv', types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }] });
+    writable = await handle.createWritable(); await writable.write(file); await writable.close();
+    if (!expired && revision === archiveRevision) formResult('archive-result', '原 CSV 已保存，保留原始字节及 BOM。');
+  } catch (error) {
+    try { await writable?.abort?.(); } catch { /* Preserve the original write/cancel outcome. */ }
+    if (!expired && revision === archiveRevision) formResult('archive-result', `原 CSV 未保存；已导入账本不受影响。${errorText(error)}`, true);
+  } finally { archiveBusy = false; updateProviderControls(); }
 });
 el('seed-demo').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('seed-demo'); button.disabled = true;
@@ -1478,6 +1678,7 @@ async function start(): Promise<void> {
     }
     ready = true; for (const id of writeControls) el<HTMLButtonElement>(id).disabled = false;
     updateCoreControls();
+    updateProviderControls();
     anchor = dateInZone(new Date(), settings.timeZoneId); updateRange(); show('demo-notice', settings.demo); show('demo-controls', settings.demo);
     scheduleRefresh(); await refresh(true, true);
     await loadSources();
