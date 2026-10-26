@@ -262,6 +262,21 @@ internal sealed class TrafficDisplayStore(SqliteConnection db)
         private bool seen, hasEstimate, mixedName, mixedRate;
         private string? name, rate;
         private readonly HashSet<string> groups = new(StringComparer.Ordinal);
+        // Final display values lose mixed/zero-observation state; derived summaries retain it.
+        internal sealed record State(string Covered, string Unknown, string Units, bool Seen,
+            bool HasEstimate, bool MixedName, bool MixedRate, string? Name, string? Rate, string[] Groups);
+        internal State Save() => new(covered.ToString(CultureInfo.InvariantCulture), unknown.ToString(CultureInfo.InvariantCulture),
+            units.ToString(CultureInfo.InvariantCulture), seen, hasEstimate, mixedName, mixedRate, name, rate,
+            groups.Order(StringComparer.Ordinal).ToArray());
+        internal void Merge(State state)
+        {
+            covered += BigInteger.Parse(state.Covered, CultureInfo.InvariantCulture);
+            unknown += BigInteger.Parse(state.Unknown, CultureInfo.InvariantCulture);
+            units += BigInteger.Parse(state.Units, CultureInfo.InvariantCulture);
+            hasEstimate |= state.HasEstimate;
+            if (state.Seen) { Observe(state.Name, state.Rate); mixedName |= state.MixedName; mixedRate |= state.MixedRate; }
+            foreach (var group in state.Groups) groups.Add(group);
+        }
         internal static (BigInteger Covered, BigInteger Unknown, BigInteger? Units) Amounts(TrafficDisplay value) =>
             (BigInteger.Parse(value.EstimateCoveredBytes, CultureInfo.InvariantCulture),
                 BigInteger.Parse(value.EstimateUnknownBytes, CultureInfo.InvariantCulture),
