@@ -2703,21 +2703,249 @@ public sealed class LedgerTests : IDisposable
             apply.Invoke(null, [source, snapshot, reader.ReadToEnd() + "\n" + injectedSql]));
     }
 
-    // Logical values retain SQLite types and ordering; only the directory DDL/version should change on upgrade.
-    private static string HistorySnapshot(string path, bool includeSchema = true)
+    private static readonly DateTimeOffset SummaryEpoch = DateTimeOffset.Parse("2026-10-02T04:00:00Z", CultureInfo.InvariantCulture);
+    private sealed class SummaryClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+    private static ScopeQuery SummaryMonth => new("local_proxy",
+        DateTimeOffset.Parse("2026-09-30T16:00:00Z", CultureInfo.InvariantCulture),
+        DateTimeOffset.Parse("2026-10-31T16:00:00Z", CultureInfo.InvariantCulture), "Asia/Shanghai", "day")
+        { NonZeroRecords = true };
+    private void SeedSummaryHistory()
+    {
+        using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
+        for (var day = 0; day < 3; day++)
+        foreach (var second in new[] { 0, 1, 2 })
+            ledger.Accept(new("instance", "process", "generation", SummaryEpoch.AddDays(day).AddSeconds(second),
+                [new(Member("a", "Synthetic 1.25x") with { CapturedName = new("Synthetic 1.25x", "Synthetic group") },
+                    day * 100 + second * 11, day * 200 + second * 23),
+                 new(Member("b", "Synthetic 2x") with { CapturedName = new("Synthetic 2x", "Other group") },
+                    day * 50 + second * 7, day * 70 + second * 13)], []));
+    }
+    private ScopeLedger OpenSummaryLedger() => new(Database, new SummaryClock(SummaryEpoch.AddDays(4)));
+    private long SummaryScalar(string sql)
+    {
+        using var db = new SqliteConnection($"Data Source={Database};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand(); command.CommandText = sql;
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+    private static Task SummaryWorker(ScopeLedger ledger)
+    {
+        var extension = typeof(ScopeLedger).GetField("historySummaries",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(ledger)!;
+        return (Task)extension.GetType().GetField("worker",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(extension)!;
+    }
+    private static string RawSummaryResult(ScopeLedger ledger, ScopeQuery query) =>
+        System.Text.Json.JsonSerializer.Serialize((ScopeHistory)typeof(ScopeLedger).GetMethod("QueryRaw",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(ledger, [query, CancellationToken.None, null])!);
+    private static string SummaryResult(ScopeLedger ledger, ScopeQuery query, Action<ScopeQueryMetrics>? observer = null) =>
+        System.Text.Json.JsonSerializer.Serialize(ledger.Query(query, observer: observer));
+
+    [Fact]
+    public void HistoricalSummaryOpeningNeverInitializesOrStartsBackgroundWork()
+    {
+        SeedSummaryHistory();
+        var before = HistorySnapshot(Database);
+        using (var ledger = OpenSummaryLedger())
+        {
+            Assert.False(ledger.SupportsHistorySummaries);
+            Assert.Equal(RawSummaryResult(ledger, SummaryMonth), SummaryResult(ledger, SummaryMonth));
+        }
+        Assert.Equal(before, HistorySnapshot(Database));
+        Assert.Equal(0, SummaryScalar("SELECT count(*) FROM sqlite_schema WHERE name GLOB 'history_summary_*';"));
+    }
+
+    [Fact]
+    public async Task HistoricalSummaryInitializationPreservesFactsAndBuildsOnlyOnDemand()
+    {
+        SeedSummaryHistory();
+        var before = HistorySnapshot(Database);
+        var backup = Path.Combine(directory, "before-summaries.db");
+        var result = ScopeLedgerMigration.InitializeHistorySummaries(Database, backup);
+        Assert.Equal(3, result.HistoryVersion);
+        Assert.Equal(before, HistorySnapshot(backup));
+        Assert.Equal(HistorySnapshot(backup, includeHistoricalSummaries: false),
+            HistorySnapshot(Database, includeHistoricalSummaries: false));
+        Assert.Equal(0, SummaryScalar("SELECT count(*) FROM history_summary_cache;"));
+        using var ledger = OpenSummaryLedger();
+        Assert.True(ledger.SupportsHistorySummaries);
+        Assert.True(SummaryWorker(ledger).IsCompleted);
+        var expected = RawSummaryResult(ledger, SummaryMonth);
+        ScopeQueryMetrics? first = null;
+        Assert.Equal(expected, SummaryResult(ledger, SummaryMonth, value => first = value));
+        Assert.Equal(0, first!.HistoricalSummaryDays);
+        await SummaryWorker(ledger).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(3, SummaryScalar("SELECT count(*) FROM history_summary_cache;"));
+        var year = SummaryMonth with
+        {
+            Start = DateTimeOffset.Parse("2025-12-31T16:00:00Z", CultureInfo.InvariantCulture),
+            End = DateTimeOffset.Parse("2026-12-31T16:00:00Z", CultureInfo.InvariantCulture), Bucket = "month"
+        };
+        foreach (var query in new[] { SummaryMonth, year })
+        {
+            ScopeQueryMetrics? metrics = null;
+            Assert.Equal(RawSummaryResult(ledger, query), SummaryResult(ledger, query, value => metrics = value));
+            Assert.Equal(3, metrics!.HistoricalSummaryDays);
+            Assert.Equal(0, metrics.RawSummaryDays);
+            Assert.Equal(TimeSpan.Zero, metrics.LockHeld);
+        }
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var collectorGate = typeof(ScopeLedger).GetField("gate",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(ledger)!;
+        var holder = Task.Factory.StartNew(() =>
+        {
+            lock (collectorGate) { entered.Set(); release.Wait(TimeSpan.FromSeconds(10)); }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        try
+        {
+            var concurrent = await Task.Run(() => SummaryResult(ledger, SummaryMonth)).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(expected, concurrent);
+        }
+        finally { release.Set(); await holder; }
+        var revisions = SummaryScalar("SELECT sum(revision) FROM history_summary_days;");
+        RunSql("UPDATE scope_minutes SET upload=upload; UPDATE ui_display_records SET download=download;");
+        Assert.Equal(revisions, SummaryScalar("SELECT sum(revision) FROM history_summary_days;"));
+        Assert.True(SummaryWorker(ledger).IsCompleted);
+    }
+
+    [Fact]
+    public async Task HistoricalSummaryDirtyDayAndCorruptPayloadFallbackWithoutChangingOtherDays()
+    {
+        SeedSummaryHistory();
+        ScopeLedgerMigration.InitializeHistorySummaries(Database, Path.Combine(directory, "before-summaries.db"));
+        using var ledger = OpenSummaryLedger();
+        ledger.Query(SummaryMonth);
+        await SummaryWorker(ledger).WaitAsync(TimeSpan.FromSeconds(15));
+        Dictionary<long, string> Hashes()
+        {
+            using var db = new SqliteConnection($"Data Source={Database};Pooling=False");
+            db.Open(); using var c = db.CreateCommand(); c.CommandText = "SELECT day,sha256 FROM history_summary_cache;";
+            using var reader = c.ExecuteReader(); var hashes = new Dictionary<long, string>();
+            while (reader.Read()) hashes.Add(reader.GetInt64(0), reader.GetString(1));
+            return hashes;
+        }
+        var before = Hashes();
+        var day = before.Keys.Min();
+        RunSql($"UPDATE scope_minutes SET upload=upload+17 WHERE start_ticks={SummaryEpoch.UtcTicks} AND scope_id=(SELECT min(scope_id) FROM measurement_scopes);");
+        ScopeQueryMetrics? dirty = null;
+        Assert.Equal(RawSummaryResult(ledger, SummaryMonth), SummaryResult(ledger, SummaryMonth, value => dirty = value));
+        Assert.Equal(2, dirty!.HistoricalSummaryDays);
+        Assert.Equal(1, dirty.RawSummaryDays);
+        await SummaryWorker(ledger).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.All(Hashes().Where(x => x.Key != day), pair => Assert.Equal(before[pair.Key], pair.Value));
+        Assert.NotEqual(before[day], Hashes()[day]);
+        RunSql($"UPDATE history_summary_cache SET payload='invalid-json' WHERE day={day};");
+        ScopeQueryMetrics? broken = null;
+        Assert.Equal(RawSummaryResult(ledger, SummaryMonth), SummaryResult(ledger, SummaryMonth, value => broken = value));
+        Assert.Equal(2, broken!.HistoricalSummaryDays);
+        Assert.Equal(1, broken.RawSummaryDays);
+        await SummaryWorker(ledger).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(RawSummaryResult(ledger, SummaryMonth), SummaryResult(ledger, SummaryMonth));
+    }
+
+    [Fact]
+    public async Task HistoricalSummaryReopenReusesDataAndUnsupportedOrCancelledQueriesDoNotBuild()
+    {
+        SeedSummaryHistory();
+        ScopeLedgerMigration.InitializeHistorySummaries(Database, Path.Combine(directory, "before-summaries.db"));
+        using (var first = OpenSummaryLedger())
+        {
+            first.Query(SummaryMonth);
+            await SummaryWorker(first).WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        using var reopened = OpenSummaryLedger();
+        Assert.True(SummaryWorker(reopened).IsCompleted);
+        ScopeQueryMetrics? reused = null;
+        Assert.Equal(RawSummaryResult(reopened, SummaryMonth), SummaryResult(reopened, SummaryMonth, value => reused = value));
+        Assert.Equal(3, reused!.HistoricalSummaryDays);
+        RunSql("DELETE FROM history_summary_cache;");
+        foreach (var query in new[] { SummaryMonth with { TimeZoneId = "UTC" }, SummaryMonth with { Page = 1 },
+            SummaryMonth with { NonZeroRecords = false }, SummaryMonth with { ScopeName = "Synthetic 2x" } })
+            Assert.Equal(RawSummaryResult(reopened, query), SummaryResult(reopened, query));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        Assert.Throws<OperationCanceledException>(() => reopened.Query(SummaryMonth, cancelled.Token));
+        Assert.True(SummaryWorker(reopened).IsCompleted);
+        Assert.Equal(0, SummaryScalar("SELECT count(*) FROM history_summary_cache;"));
+    }
+
+    [Fact]
+    public async Task HistoricalSummaryBuildFailureKeepsExactReadsAndCollectorWritable()
+    {
+        SeedSummaryHistory();
+        ScopeLedgerMigration.InitializeHistorySummaries(Database, Path.Combine(directory, "before-summaries.db"));
+        RunSql("CREATE TRIGGER synthetic_summary_failure BEFORE INSERT ON history_summary_cache BEGIN SELECT RAISE(ABORT,'synthetic cache failure'); END;");
+        using var ledger = OpenSummaryLedger();
+        var expected = RawSummaryResult(ledger, SummaryMonth);
+        Assert.Equal(expected, SummaryResult(ledger, SummaryMonth));
+        await SummaryWorker(ledger).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(0, SummaryScalar("SELECT count(*) FROM history_summary_cache;"));
+        var commit = ledger.Accept(new("instance", "process", "generation", SummaryEpoch.AddDays(2).AddSeconds(3),
+            [new(Member("a", "Synthetic 1.25x"), 233, 469), new(Member("b", "Synthetic 2x"), 121, 179)], []));
+        Assert.Equal("committed", commit.Status);
+        Assert.Equal(RawSummaryResult(ledger, SummaryMonth), SummaryResult(ledger, SummaryMonth));
+        await SummaryWorker(ledger).WaitAsync(TimeSpan.FromSeconds(15));
+    }
+
+    [Fact]
+    public async Task HistoricalSummaryDisposalJoinsPendingWorkAndRemainingDaysCanResume()
+    {
+        SeedSummaryHistory();
+        ScopeLedgerMigration.InitializeHistorySummaries(Database, Path.Combine(directory, "before-summaries.db"));
+        var ledger = OpenSummaryLedger();
+        var expected = RawSummaryResult(ledger, SummaryMonth);
+        ledger.Query(SummaryMonth);
+        var worker = SummaryWorker(ledger);
+        ledger.Dispose();
+        Assert.True(worker.IsCompleted);
+        ledger.Dispose();
+        using var reopened = OpenSummaryLedger();
+        Assert.Equal(expected, SummaryResult(reopened, SummaryMonth));
+        await SummaryWorker(reopened).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(3, SummaryScalar("SELECT count(*) FROM history_summary_cache;"));
+        Assert.Equal(expected, SummaryResult(reopened, SummaryMonth));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HistoricalSummaryInitializationRejectsUnsupportedOrAlreadyExtendedBeforeBackup(bool alreadyExtended)
+    {
+        if (alreadyExtended)
+        {
+            SeedSummaryHistory();
+            ScopeLedgerMigration.InitializeHistorySummaries(Database, Path.Combine(directory, "first.db"));
+        }
+        else { using var old = ScopeLedger.CreateNew(Database, includeDisplayMetadata: true); }
+        var before = HistorySnapshot(Database);
+        var rejected = Path.Combine(directory, "rejected.db");
+        Assert.Throws<InvalidOperationException>(() => ScopeLedgerMigration.InitializeHistorySummaries(Database, rejected));
+        Assert.False(File.Exists(rejected));
+        Assert.Equal(before, HistorySnapshot(Database));
+    }
+
+    // Logical values retain SQLite types and ordering; only the requested extension changes on upgrade.
+    private static string HistorySnapshot(string path, bool includeSchema = true, bool includeHistoricalSummaries = true)
     {
         using var db = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
         db.Open();
         var queries = new List<string>();
         using (var command = db.CreateCommand())
         {
-            command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
+            command.CommandText = "SELECT name FROM sqlite_master WHERE type='table'" +
+                (includeHistoricalSummaries ? "" : " AND name NOT GLOB 'history_summary_*'") + " ORDER BY name;";
             using var reader = command.ExecuteReader();
             while (reader.Read()) queries.Add($"SELECT * FROM \"{reader.GetString(0)}\" ORDER BY rowid;");
         }
         if (includeSchema)
         {
-            queries.Add("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name;");
+            queries.Add("SELECT type,name,tbl_name,sql FROM sqlite_master" +
+                (includeHistoricalSummaries ? "" : " WHERE name NOT GLOB 'history_summary_*'") + " ORDER BY type,name;");
             queries.Add("PRAGMA user_version;");
         }
         var result = new List<object?[]>();

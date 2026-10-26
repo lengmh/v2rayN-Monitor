@@ -8,13 +8,16 @@
   },
   "plan_date": "2026-10-09",
   "active_checkpoint": {
-    "issue": 34,
+    "issue": null,
+    "task_ids": [
+      "S4.3"
+    ],
     "status": "in_progress",
     "branch": "main",
-    "scope": "G5：PR35/PR38按顺序普通合并main、精确CI、PR说明及主线状态记录",
-    "implementation_status": "verified",
-    "remaining": "G5两项PR代码整合已完成，不再等待PR35/38合并授权；正式三档包准备/发布及部署未执行。G1真实联合边界、G2睡眠/启动项、G3当前关闭页面资源、G4确有目标时真实安装链仍独立保留，S5.9只剩G4，不重开已验项目",
-    "resume_requirement": "先读docs/acceptance-reconciliation.md的G5推进记录和STATUS最新条目；PR35已以44883de、PR38已以9bb2f6b普通合并main，分支和Issue状态保留，PR33不合并。742bd20只同步历史且整树等于已审688b7e6，两次main合并树均与各自已审源码相同，精确CI/最终主线状态以v2rayn-monitor-g5-merge-20261024回执及远端回读为准，不复用旧base的PR检查。38项原状态和验收条件保持；普通统计/策略组UI/恢复/CSV/S3.3/E1不重验。真实核心/账本/配置未操作，#19冻结，不为验收重复安装匹配核心；后续只处理G1-G4具体缺口，发布/部署另按授权"
+    "scope": "G3/S4.3：日级历史汇总主线最小接入、按需分批构建、显式离线初始化准备及隔离验证",
+    "implementation_status": "verified_local",
+    "remaining": "工作区源码和本地隔离验证已完成，本轮已授权14文件批次提交/推送与精确CI，结果待核对。真实目录初始化与新包接入另按具体授权，之后只补对应版本的常驻/首屏观察。G1/G2/G4、三档正式发布及S5.9的G4边界保持，S4.3仍in_progress，不重开已验普通采集/UI/CSV",
+    "resume_requirement": "先读STATUS的2026-10-26条目和docs/proposals/history-summaries.md，核实当前工作区及v2rayn-monitor-g3-history-integration-20261026证据。起点0f302000；现有v3须显式离线初始化，普通启动不加表，真实库和0650ac6运行包未改。原始查询/采样/持久化与恢复/倍率/身份语义保留。本轮提交推送与精确CI已授权；新包启用及真实初始化仍另行授权，不重复普通统计/策略组UI/CSV/S3.3/E1。G5两PR已合并，不再重开合并窗口，PR33不合并，#19冻结"
   },
   "capability_levels": [
     {
@@ -448,7 +451,7 @@
       ],
       "acceptance": "提出的目标为：测试硬件上年度首屏查询约 1 秒内、关闭页面后宿主空闲平均 CPU 约 1% 以下、工作集约 150 MiB 以下；这些是验收目标而非已测结果。失败先查重复查询/写放大，不先造缓存框架。",
       "stop_rule": "只保留与常驻工具体验直接相关的基准，不上长期压测平台。",
-      "implementation_note": "2026-10-24当前审计：E09原62秒资源观察BrowserClosedForMeasurement=false且版本旧，不能满足关闭页面目标。G3保留当前包/数据规模的年度首屏及关闭页面CPU/内存/库增长同口径记录。 证据编号/剩余组与层级见docs/acceptance-reconciliation.md。\n历史记录（不作为当前待验排期）：\n2026-10-22状态复核：查询执行路径/逐条计算等优化已合并且用户有体感改善；尚无统一实机年首屏、关闭页面后CPU/工作集及库增长验收结果，不以隔离查询基准替代常驻指标。"
+      "implementation_note": "2026-10-26：日级汇总已从隔离原型接入主线工作区，仅显式初始化的v3展示账本在local_proxy/无筛选/上海/月年非零首屏条件下启用；普通启动不加表。按需单任务分日构建、修订号失效、精确回退、退出取消等待及跨进程复用已实现。本地账本相关197项/Server72项/Host Release通过；同一10月25日冻结副本每场景/算法10次热测，全量输出一致，历史全命中约39ms、保留一天原始尾部约0.26s。本轮已授权14文件批次提交/推送和精确CI，结果待核对；未实际初始化/启用，不以此替代新包对应的Windows常驻/页面首屏结果，状态仍in_progress。详见docs/proposals/history-summaries.md和STATUS。\n历史记录（不作为当前待验排期）：\n2026-10-24当前审计：E09原62秒资源观察BrowserClosedForMeasurement=false且版本旧，不能满足关闭页面目标。G3保留版本与数据规模匹配的年度首屏及关闭页面CPU/内存/库增长记录；已验采集/UI不重开。"
     },
     {
       "id": "S4.4",

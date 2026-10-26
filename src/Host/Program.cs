@@ -20,10 +20,12 @@ internal static class Program
         var index = Array.IndexOf(args, "--data-dir");
         if (index >= 0 && index + 1 < args.Length) root = Path.GetFullPath(args[index + 1]);
         var initializeDisplay = args.Contains("--initialize-display-metadata", StringComparer.Ordinal);
+        var initializeSummaries = args.Contains("--initialize-history-summaries", StringComparer.Ordinal);
+        var offlineInitialization = initializeDisplay || initializeSummaries;
         // Parse only here; when this instance owns the data directory, open the ledger and
         // start the collector *before* launching v2rayN. The first sample is still a baseline.
         string? linkedExecutable;
-        try { linkedExecutable = demo || initializeDisplay ? null : LinkedLaunch.RequestedExecutable(args); }
+        try { linkedExecutable = demo || offlineInitialization ? null : LinkedLaunch.RequestedExecutable(args); }
         catch (ArgumentException)
         {
             MessageBox.Show("联动快捷方式的启动参数不完整，请从 Monitor 托盘重新创建。",
@@ -48,17 +50,21 @@ internal static class Program
                     "v2rayN Monitor · 联动启动未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        if (initializeDisplay)
+        if (offlineInitialization)
         {
             try
             {
                 var backup = Array.IndexOf(args, "--backup");
+                if (demo || initializeDisplay && initializeSummaries)
+                    throw new ArgumentException("Select one offline initialization on an explicit real-ledger directory.");
                 if (index < 0 || index + 1 >= args.Length) throw new ArgumentException("An explicit --data-dir is required.");
                 if (backup < 0 || backup + 1 >= args.Length) throw new ArgumentException("A fresh --backup path is required.");
-                var result = ScopeLedgerMigration.InitializeDisplay(Path.Combine(root, "history.db"), args[backup + 1]);
+                object result = initializeSummaries
+                    ? ScopeLedgerMigration.InitializeHistorySummaries(Path.Combine(root, "history.db"), args[backup + 1])
+                    : ScopeLedgerMigration.InitializeDisplay(Path.Combine(root, "history.db"), args[backup + 1]);
                 Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
             }
-            catch (Exception) { Environment.ExitCode = 1; Console.Error.WriteLine("UI metadata initialization failed; history was not promoted. Check the offline ledger and new backup path."); }
+            catch (Exception) { Environment.ExitCode = 1; Console.Error.WriteLine("Offline metadata initialization failed. Check the unchanged ledger version and new backup path before restarting."); }
             finally { mutex.ReleaseMutex(); }
             return;
         }
