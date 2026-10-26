@@ -6,6 +6,7 @@ namespace V2rayNMonitor.Core;
 public sealed record ScopeMigrationResult(string HistoryPath, string BackupPath, long LegacyScopes);
 public sealed record ProbeMigrationResult(string HistoryPath, string BackupPath, long PreservedScopes);
 public sealed record DisplayMigrationResult(string HistoryPath, string BackupPath, long HistoryVersion);
+public sealed record HistorySummaryMigrationResult(string HistoryPath, string BackupPath, int HistoryVersion);
 public sealed record OfflineMigrationResult(string HistoryPath, string BackupPath, int HistoryVersion);
 
 /// <summary>Explicit offline migration. The caller must stop all writers and obtain authorization first.</summary>
@@ -166,6 +167,54 @@ public static class ScopeLedgerMigration
         CheckIntegrity(target, transaction);
         transaction.Commit();
         return new(history, backup, version);
+    }
+
+    /// <summary>Explicit offline, additive v3 extension. No totals are built and no raw rows are changed.</summary>
+    public static HistorySummaryMigrationResult InitializeHistorySummaries(string historyPath, string backupPath)
+    {
+        static void PreflightSummaries(SqliteConnection db, SqliteTransaction? transaction)
+        {
+            Require(Scalar(db, transaction, "PRAGMA user_version;") == 3,
+                "Historical summaries require a v3 ledger.");
+            ScopeLedger.ValidateSchema(db, transaction, 3);
+            Require(TrafficDisplayStore.Open(db, transaction) is not null,
+                "Historical summaries require existing display metadata.");
+            Require(!ScopeLedger.HistoricalSummaries.IsInitialized(db, transaction),
+                "Historical summaries are already initialized.");
+        }
+        var history = CheckedPath(historyPath);
+        using var target = Open(history, SqliteOpenMode.ReadWrite);
+        target.DefaultTimeout = 1;
+        Execute(target, null, "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
+        PreflightSummaries(target, null);
+        var backup = BackupFrom(target, history, backupPath);
+        using var snapshot = Open(backup, SqliteOpenMode.ReadOnly);
+        Execute(target, null, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;");
+        using var transaction = target.BeginTransaction();
+        PreflightSummaries(target, transaction);
+        void CompareFacts()
+        {
+            CompareOriginal(target, transaction, snapshot);
+            foreach (var (table, order) in ScopeOrdering)
+                Compare(target, transaction, $"SELECT * FROM {table} ORDER BY {order};",
+                    snapshot, $"SELECT * FROM {table} ORDER BY {order};");
+            foreach (var (table, order) in DisplayOrdering)
+                Compare(target, transaction, $"SELECT * FROM {table} ORDER BY {order};",
+                    snapshot, $"SELECT * FROM {table} ORDER BY {order};");
+            Compare(target, transaction,
+                "SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'history_summary_*' AND sql IS NOT NULL ORDER BY type,name;",
+                snapshot, "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name;");
+            Require(Scalar(target, transaction, "PRAGMA user_version;") == 3,
+                "Historical summaries must not change the ledger version.");
+        }
+        CompareFacts();
+        Execute(target, transaction, ScopeLedger.HistoricalSummaries.SchemaSql);
+        CompareFacts();
+        Require(ScopeLedger.HistoricalSummaries.IsInitialized(target, transaction),
+            "Historical summary initialization is incomplete.");
+        CheckIntegrity(target, transaction);
+        transaction.Commit();
+        return new(history, backup, 3);
     }
 
     private static (string History, string Backup) Backup(string historyPath, string backupPath,

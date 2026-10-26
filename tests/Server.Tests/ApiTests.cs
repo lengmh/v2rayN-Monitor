@@ -39,6 +39,44 @@ public sealed class ApiTests : IAsyncLifetime
         [new("sing-box-statistics", "Synthetic component", "Synthetic version", "identity_matched", "asset_unavailable", "Synthetic license")]);
 
     [Fact]
+    public async Task HistoricalSummariesPreserveBothHistoryApiResponses()
+    {
+        await server.DisposeAsync(); client.Dispose();
+        var data = Path.Combine(root, "synthetic-summaries");
+        Directory.CreateDirectory(data);
+        var database = Path.Combine(data, "history.db");
+        var at = DateTimeOffset.Parse("2024-02-15T04:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+        using (var ledger = V2rayNMonitor.Core.ScopeLedger.CreateNew(database, includeProbes: true, includeDisplayMetadata: true))
+        {
+            var scope = new V2rayNMonitor.Core.MeasurementScope("actual_member", "index_id", "synthetic-node",
+                "Synthetic API 1.25x", "synthetic-node", "synthetic-tag");
+            ledger.Accept(new("synthetic-api", "process", "generation", at, [new(scope, 0, 0)], []));
+            ledger.Accept(new("synthetic-api", "process", "generation", at.AddSeconds(1), [new(scope, 11, 23)], []));
+        }
+        V2rayNMonitor.Core.ScopeLedgerMigration.InitializeHistorySummaries(database, Path.Combine(data, "before-summaries.db"));
+        server = await MonitorServer.StartAsync(data, Path.Combine(root, "web"), useProbeLedger: true);
+        client = new(new HttpClientHandler { UseCookies = true, UseProxy = false }) { BaseAddress = new(server.Address) };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/history")).StatusCode);
+        await Login();
+        const string query = "?start=2024-01-31T16:00:00Z&end=2024-02-29T16:00:00Z&timeZoneId=Asia%2FShanghai&bucket=day&nonZeroRecords=true&basis=local_proxy";
+        var before = await client.GetStringAsync("/api/history" + query);
+        var extension = typeof(V2rayNMonitor.Core.ScopeLedger).GetField("historySummaries",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(server.Scopes)!;
+        var task = (Task)extension.GetType().GetField("worker",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(extension)!;
+        await task.WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(before, await client.GetStringAsync("/api/history" + query));
+        var scopeBefore = await client.GetStringAsync("/api/scope-history" + query);
+        Assert.Equal(scopeBefore, await client.GetStringAsync("/api/scope-history" + query));
+        V2rayNMonitor.Core.ScopeQueryMetrics? metrics = null;
+        server.Scopes!.Query(new("local_proxy",
+            DateTimeOffset.Parse("2024-01-31T16:00:00Z", System.Globalization.CultureInfo.InvariantCulture),
+            DateTimeOffset.Parse("2024-02-29T16:00:00Z", System.Globalization.CultureInfo.InvariantCulture),
+            "Asia/Shanghai") { NonZeroRecords = true }, observer: value => metrics = value);
+        Assert.Equal(1, metrics!.HistoricalSummaryDays);
+    }
+
+    [Fact]
     public async Task CapabilityEndpointUsesExistingAuthenticationAndAcceptsNoPathsOrWrites()
     {
         var calls = 0;

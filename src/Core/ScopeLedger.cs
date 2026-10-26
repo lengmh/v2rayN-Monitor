@@ -8,15 +8,17 @@ using Microsoft.Data.Sqlite;
 namespace V2rayNMonitor.Core;
 
 /// <summary>Opt-in, single-writer v2/v3 ledger. Existing files are never initialized or migrated here.</summary>
-public sealed class ScopeLedger : IDisposable
+public sealed partial class ScopeLedger : IDisposable
 {
     private const long Minute = TimeSpan.TicksPerMinute;
     internal const long ShortInterval = 10 * TimeSpan.TicksPerSecond;
     private readonly object gate = new();
     private readonly SqliteConnection connection;
     private readonly TrafficDisplayStore? display;
+    private readonly HistoricalSummaries? historySummaries;
     public bool SupportsDisplayMetadata => display is not null;
-    private bool disposed;
+    public bool SupportsHistorySummaries => historySummaries is not null;
+    private volatile bool disposed;
     internal static readonly string SchemaSql = ReadSchema("ScopeLedgerV2.sql");
     internal static readonly string ProbeUpgradeSql = ReadSchema("ScopeLedgerV3.sql");
     private static readonly string[] BusinessBases = ["legacy_proxy", "actual_member", "business", "excluded", "unknown", "routed_outbound"];
@@ -24,9 +26,12 @@ public sealed class ScopeLedger : IDisposable
     public bool SupportsProbes { get; }
     public IReadOnlyList<string> Bases => Array.AsReadOnly(SupportsProbes ? [.. BusinessBases, .. ProbeBases] : BusinessBases);
 
-    public ScopeLedger(string dbPath)
+    public ScopeLedger(string dbPath) : this(dbPath, TimeProvider.System) { }
+
+    public ScopeLedger(string dbPath, TimeProvider timeProvider)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
+        ArgumentNullException.ThrowIfNull(timeProvider);
         connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = dbPath, Mode = SqliteOpenMode.ReadWrite, Pooling = false, Cache = SqliteCacheMode.Private
@@ -42,6 +47,12 @@ public sealed class ScopeLedger : IDisposable
             ValidateSchema(connection, null, version);
             display = TrafficDisplayStore.Open(connection);
             Execute(null, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;");
+            if (HistoricalSummaries.IsInitialized(connection, null))
+            {
+                if (!SupportsProbes || display is null)
+                    throw new InvalidOperationException("Historical summaries require an explicitly initialized v3 display ledger.");
+                historySummaries = new(Path.GetFullPath(dbPath), timeProvider);
+            }
         }
         catch { connection.Dispose(); throw; }
     }
@@ -313,6 +324,19 @@ public sealed class ScopeLedger : IDisposable
     }
 
     public ScopeHistory Query(ScopeQuery query, CancellationToken cancellationToken = default,
+        Action<ScopeQueryMetrics>? observer = null)
+    {
+        if (historySummaries is null || query is null || cancellationToken.IsCancellationRequested)
+            return QueryRaw(query!, cancellationToken, observer);
+        ThrowIfDisposed();
+        var result = historySummaries.TryQuery(query, cancellationToken, observer, out var request)
+            ?? QueryRaw(query, cancellationToken, observer);
+        cancellationToken.ThrowIfCancellationRequested();
+        historySummaries.Request(request);
+        return result;
+    }
+
+    private ScopeHistory QueryRaw(ScopeQuery query, CancellationToken cancellationToken = default,
         Action<ScopeQueryMetrics>? observer = null)
     {
         if (cancellationToken.IsCancellationRequested)
@@ -882,6 +906,8 @@ public sealed class ScopeLedger : IDisposable
     }
     public void Dispose()
     {
+        // The worker owns separate connections; join it before closing the collector connection.
+        historySummaries?.Dispose();
         lock (gate) { if (disposed) return; connection.Dispose(); disposed = true; }
     }
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(disposed, this);
