@@ -13,10 +13,10 @@
     "operation_id": "post_release_d_install_data_consolidation",
     "status": "done",
     "branch": "main",
-    "scope": "D盘v0.2.0覆盖、最新完整并集、实际采集核对及用户新页历史/既有CSV可见性确认均完成，本机交付收口",
-    "implementation_status": "d_formal_installed_latest_union_live_and_user_page_accepted",
-    "remaining": "无本轮剩余必做验收。2026-10-27 页面人工使用确认通过：旧历史与CSV导入可见；证据为用户实际页面确认，不是浏览器自动化。复用已归档技术回执：最新预览范围分钟+旧分钟经生产迁移/ID映射成为范围分钟/范围，provider既有批次条及精确值、设置原字节、两边原件保持；D full包451文件摘要匹配，唯一D正式0.2.0+aaf5bf1以probe-ledger使用新data-v3，范围恢复及12秒实际窗口分别按上下行对账一致。两个快捷方式绑定及原打开行为保留，核心/配置/启动偏好未变，无删除。本轮仅补页面确认和文档收口，不再启停程序、合库或写真实数据；38项仍done34/in_progress0/planned1/deferred3，G1至G5/S5.8不重开。",
-    "resume_requirement": "本机交付checkpoint已完成；参见STATUS最新用户确认收口条目。正式运行目录D:/v2rayn-monitor/data-v3，程序D:/v2rayn-monitor/V2rayN-Monitor.exe，版本0.2.0+aaf5bf1/探测账本v3；不沿用F预览为当前入口，不再要求退出、合库、重启、切核心或重复页面验收。新数据目录是正式运行目录不得按临时产物清理；两原目录、旧程序/快捷方式及私有备份均保留，回退先保留D新历史，不直接恢复旧备份。发布标签仍固定aaf5bf1，文档提交不重打包；精确CI按本轮最终SHA核对。当前无必要用户操作或下一必做验收；真实数据/节点资料/ID映射不提交，远端Issue/PR不自动关闭，PR33不合并，#19冻结，插件deferred。"
+    "scope": "D盘v0.2.0本机交付及GitHub验收结项完成；#15/#16/#18/#34以completed关闭，PR33关闭未合并，#19保留冻结",
+    "implementation_status": "d_formal_delivery_accepted_and_authorized_github_closeout_complete",
+    "remaining": "无本轮剩余必做验收。2026-10-27 页面人工使用确认通过：旧历史与CSV导入可见，本机交付已收口。随后明确授权GitHub结项：#15/#16/#18/#34已发布最终验收与v0.2.0/精确CI依据并以completed关闭；PR33关闭，merged=false/merged_at=null，两条冻结审查分支摘要保持。其迁移兼容P2已由PR36修复并进入正式源码，旧冻结head评审状态保留，不称为新一次重审。官方API回读为1个open Issue(#19)、0个open PR；#19标题/正文/标签/评论数/更新时间均未改，继续冻结。本机最新并集、provider精确值、设置、451正式文件及两次范围对账证据继续复用；本轮只操作授权的GitHub状态并同步文档，不启停程序或写真实数据。38项仍done34/in_progress0/planned1/deferred3，G1至G5/S5.8不重开。",
+    "resume_requirement": "本轮本机交付和GitHub结项已完成；先读STATUS最新远端收口条目及本机v2rayn-monitor-s54-release-20261027-191955/github-closeout-20261027-232741/remote-closeout-verification.json。#15/#16/#18/#34已completed关闭，PR33已关闭未合并、审查分支保留，不再重复关闭、合并或重开验收；#19仍open/冻结，插件deferred。正式目录D:/v2rayn-monitor/data-v3，程序D:/v2rayn-monitor/V2rayN-Monitor.exe，版本0.2.0+aaf5bf1/探测账本v3，不沿用F预览入口。不得按临时产物清理正式数据；两原目录、旧程序/快捷方式及私有备份保留，回退先保留D新历史。发布标签固定aaf5bf1，文档提交不重打包；精确CI按本轮最终SHA核对。当前无必要用户操作或下一必做验收；真实数据/节点资料/ID映射不提交，新功能、重新启用或发布另按具体授权。"
   },
   "capability_levels": [
     {
