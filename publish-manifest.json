@@ -15,10 +15,12 @@
     "docs/backlog.json",
     "docs/compatibility.md",
     "docs/development-plan.md",
+    "docs/release-v0.2.0.md",
     "docs/sources.md",
     "publish-manifest.json",
     "scripts/bootstrap_github.py",
     "scripts/check_plan.py",
+    "scripts/prepare_release.py",
     "tests/fixtures/README.md",
     "tests/fixtures/provider-synthetic.csv"
   ]
