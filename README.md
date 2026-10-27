@@ -26,9 +26,11 @@
 
 > **v0.1.1 修复版。** 在 `v0.1.0` 基础上整合日期默认分桶和重叠 CSV 增量导入，下载资产与实际发布状态以 GitHub Releases 为准。目标环境是 Windows x64、v2rayN **7.25.1 + Xray 普通单节点**。2026-10-13 用户确认相关修复已处理并授权发布，属于基于此前预览使用的整体确认，不代表所有协议、设备与切换时序逐项经过实测。统一图标已有构建和资源检查，Windows 实机目视记录仍未补充。源码核对、合成测试和实机证据分开记录，不能当作计费凭证。
 
+**v0.2.0 正式版正在准备。** 新功能、三档独立候选包、升级模式和两目录数据合并的安排见 [发布准备与升级说明](docs/release-v0.2.0.md)。候选包不自动覆盖程序、替换核心或合并账本；正式发行仍以 Release 为准。
+
 ## 能力分级
 
-正式 Release 按以下三档提供独立下载包，包名标明版本号与档位；当前尚未发布这组三档新包。开发预览及实机验收进度见 [支持矩阵](docs/compatibility.md) 和 [当前状态](docs/STATUS.md)。
+正式 Release 按以下三档提供独立下载包，包名标明版本号与档位；当前尚未发布 v0.2.0 正式三档包。开发预览及实机验收进度见 [支持矩阵](docs/compatibility.md) 和 [当前状态](docs/STATUS.md)。
 
 | 分级 | 普通流量统计 | 所需核心 | 独立探测计量 |
 |---|---|---|---|
@@ -40,7 +42,7 @@
 
 当前 sing-box `test.5` 已将普通统计和探测扩展放在同一包中，能力分级不要求重新替换核心。完整版可以保留原生 Xray；只有需要 Xray 的独立探测字节时，才另行接入修改后的 Xray。已有探测能力和历史保留；分级不改变账本版本、启动模式或现有安装。
 
-三档共用 Monitor 源码和软件版本号，发布资产分别为 `v2rayn-monitor-<version>-basic-windows-x64.zip`、`v2rayn-monitor-<version>-full-windows-x64.zip`、`v2rayn-monitor-<version>-extended-windows-x64.zip`。基础包提供 Monitor；完整版另提供配套 sing-box 核心；扩展版再提供探测能力及配套 Xray 实验核心。每包分别列明内容、核心版本、SHA256、许可与源码／补丁依据；配套核心由用户按说明安装，不自动覆盖正在运行的核心。分级与发包约定不等于本轮已经构建或发布三档资产。
+三档共用 Monitor 源码和软件版本号，发布资产分别为 `v2rayn-monitor-<version>-basic-windows-x64.zip`、`v2rayn-monitor-<version>-full-windows-x64.zip`、`v2rayn-monitor-<version>-extended-windows-x64.zip`。基础包提供 Monitor；完整版另提供配套 sing-box 核心；扩展版再提供探测能力及配套 Xray 实验核心。每包分别列明内容、核心版本、SHA256、许可与源码／补丁依据；配套核心由用户按说明安装，不自动覆盖正在运行的核心。本地候选的构建与核对见发布准备说明，生成候选不等于正式发布或启用。
 
 ## 已实现的主流程
 
