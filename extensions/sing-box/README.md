@@ -36,9 +36,7 @@ go build -mod=readonly -tags $tags -trimpath -ldflags ($flags + ' -s -w -X githu
 
 ## 安装与回退边界
 
-2026-10-14 用户已批准安装 test.2，并手动重载实际客户端，回环 RPC 可读。旧 Monitor preview.1 因其他出站整体拒绝，真实记账尚未通过。后续新扩展安装前确认空闲端口、文件摘要和实际客户端版本，再经具体授权更新运行文件并择时让 v2rayN 正常重载；此前安装授权不自动涵盖新部署。
-文件示例为 `{"listen":"127.0.0.1:待选端口"}`，必须将端口替换为核实后的数字。
-不会写订阅、节点数据库、路由或 guiNConfig.json。
+test.2 的真实客户端接入、回环 RPC 及 preview.2 部分覆盖记账已有历史证据。新的安装须核实客户端、固定摘要、端口与占用，再按具体目标执行；既有部署不授权后续替换或重载。
 
 回退需先正常退出扩展核心，移开本次新增的两个文件，再由客户端加载原 sing-box.exe。
 不要在核心运行时覆盖文件。真实客户端选择/升级/退出和真实 AnyTLS 节点仍待验收。
@@ -81,7 +79,7 @@ test.3 本机候选 SHA256 为 `547ede7cdc822fbe967392bdd26589ba60e947d5d7380d48
 
 新模式必须使用新建 v2 验证目录或经授权离线迁移的 v2 文件。已有 v1 正常启动明确拒绝，不自动迁移；实际核心文件替换、sidecar 更新、重载、预览启动和真实迁移仍需具体授权。候选文件和过程证据仅 TempFiles；CI 构建可能有不同的 Go build ID/二进制摘要，不自动把 CI 产物加入白名单。
 
-2026-10-15 经具体授权备份后，用户已离线安装上述摘要的 test.4 与已核实名单 sidecar，并重开客户端。启用前提醒、退出旧 Monitor 后，新预览以 `--scope-ledger` 在独立新 v2 目录运行；真实 Windows 发现、成员/三种独立汇总、首次无回填与 采样批次的逐范围被动守恒通过。旧历史未迁移，受控切换/重开与完整实机验收仍待后续；详见 [STATUS](../../docs/STATUS.md)，不把本次部署授权用于新的重载或迁移。
+test.4 与 `6393629` 的 Windows 实际接入已验证成员／独立汇总、首接不回填及持续逐范围守恒。旧历史未在该窗口迁移，不将被动场景写成完整实机矩阵；后续状态与边界见 [STATUS](../../docs/STATUS.md)。
 
 ## test.5：URLTest 独立探测计数（未部署）
 
@@ -93,7 +91,7 @@ test.4 后叠加 [probe-stats.patch](probe-stats.patch)，候选为 `1.14.1-moni
 
 ## 独立扩展 CI
 
-2026-10-14 新增 [扩展工作流](../../.github/workflows/sing-box-extension.yml)，不改现有Monitor CI。第七批构建脚本扩展为按序应用 monitor/member-stats/member-sidecar 三层补丁，核实五个必需顶级测试后构建 test.4；工作流配置不变。Windows runner 仍固定 Go 1.26.8、公开源码提交及归档 SHA256 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`，保留原 Windows 标签/依赖版本/`-mod=readonly` 和 go.mod/go.sum 摘要核对，不自动切换工具链。`.gitattributes` 固定补丁 LF。
+[扩展工作流](../../.github/workflows/sing-box-extension.yml) 独立验证核心，不改现有 Monitor CI。第七批构建脚本扩展为按序应用 monitor/member-stats/member-sidecar 三层补丁，核实五个必需顶级测试后构建 test.4；工作流配置不变。Windows runner 仍固定 Go 1.26.8、公开源码提交及归档 SHA256 `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537`，保留原 Windows 标签/依赖版本/`-mod=readonly` 和 go.mod/go.sum 摘要核对，不自动切换工具链。`.gitattributes` 固定补丁 LF。
 
 复用同一 [构建脚本](build-ci.ps1) 的本地命令如下；需已有固定 Go 环境，输出目录必须尚不存在。可通过 `-SourceArchive` 指定本地已下载归档，仍执行同一摘要校验。
 

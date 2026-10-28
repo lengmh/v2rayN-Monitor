@@ -71,7 +71,7 @@ S7 才增加一个由宿主原子替换的本地 `summary.json`。插件只读�
 
 ## 初版已实现的收紧与偏差
 
-2026-10-09：用户要求直接完成初版实现，允许先完成代码与合成验证；S0/S2/S4 的 Windows 实机门槛仍保持 blocked，不能据此发布正式版。
+以下记录初版架构决策；后续 v0.2.0 交付与已完成的分层验收以 [STATUS](STATUS.md) 和 [验收清单](acceptance-reconciliation.md) 为准，不把历史阶段缺口重新排为当前待办。
 
 - `Core` 包含整数采样模型、纯解析/代次保护、SQLite 账本和独立服务商导入；`Server` 是同进程 ASP.NET Core 模块，供 Windows 托盘和独立合成 Demo 复用。
 - 初版长期保存分钟汇总，不永久保存秒样本，也不维护不可重建的第二套日总计。显式启用的日级派生层按修订号验证并回退原始数据，其他查询继续在统一账本按时区分桶。记录质量包含 measured/approximate/synthetic/recovered-unallocated。
