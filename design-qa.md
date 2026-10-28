@@ -1,5 +1,7 @@
 # Product Design 验证记录
 
+本文保存 #23 的历史设计与验收检查点；其中当时的「待确认／待启用」不作为当前待办，当前交付与验收状态以 [STATUS](docs/STATUS.md) 为准。
+
 ## 2026-10-18 反馈修正复核
 
 本轮从 `b9f166b` 开始，仅调整占比区和策略组外框的布局。视觉依据为原深浅主题及用户本轮反馈；修改前实测外框使文字右移 6 px、单行高度增加 2 px。[修改前截图](docs/ui-preview/feedback-shares-before.jpg)与[修改后截图](docs/ui-preview/feedback-shares-light.jpg)来自同一 1363 × 936、密度 1 的云浏览器。
