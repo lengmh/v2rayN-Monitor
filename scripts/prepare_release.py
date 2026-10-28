@@ -76,10 +76,12 @@ def allowed_source_name(name: str) -> bool:
         "web/tsconfig.json", "web/index.html", "web/playwright.config.mjs", "web/README.md",
         "web/public/icon.ico", "web/public/icon.svg", "web/public/icon-256.png",
         "tests/fixtures/README.md", "tests/fixtures/provider-synthetic.csv",
+        "tests/test_prepare_release.py",
         "scripts/prepare_release.py", "scripts/prepare_core_component.py",
         "scripts/generate_icons.py", "scripts/smoke_demo.py",
         "docs/architecture.md", "docs/compatibility.md", "docs/QUICKSTART.md",
         "docs/release-v0.2.0.md", "docs/singbox-extension-scope.md",
+        "docs/proposals/scope-ledger-v2.sql", "docs/proposals/scope-ledger-v3.sql",
     }
     source_patterns = ("src/*/*.cs", "src/*/*.csproj", "tests/*.Tests/*.cs", "tests/*.Tests/*.csproj",
                        "web/src/*.ts", "web/src/*.css", "web/tests/*.mjs",
@@ -109,7 +111,8 @@ def read_source(path: Path) -> None:
                     "Source entry is outside the rebuild file list")
             files.add(name)
         require({"Directory.Build.props", "V2rayNMonitor.sln", "src/Host/Host.csproj", "LICENSE",
-                 "web/package.json", "web/package-lock.json"} <= files,
+                 "web/package.json", "web/package-lock.json", "docs/proposals/scope-ledger-v2.sql",
+                 "docs/proposals/scope-ledger-v3.sql"} <= files,
                 "Incomplete rebuild source archive")
         require(archive.testzip() is None, "Invalid Monitor source archive")
 
