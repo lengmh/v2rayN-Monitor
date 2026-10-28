@@ -3,6 +3,11 @@
 
 Offline only. Does not build, run, install, merge data, commit or publish.
 Component archives must match the fixed production download catalog.
+
+Before building and sealing the runtime receipt, prepare its rebuild source:
+    python scripts/prepare_release.py --prepare-source-archive <new-source.zip> --source-ref <commit>
+Build from that source and retain the emitted commit and archive SHA256 in the
+build receipt. Never rewrite an already sealed source archive.
 """
 from __future__ import annotations
 
@@ -12,8 +17,11 @@ import json
 import re
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 import zipfile
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +61,86 @@ def safe_name(name: str) -> None:
             "Unsafe payload name")
 
 
+def private_name(name: str) -> bool:
+    parts = PurePosixPath(name.casefold()).parts
+    return any(p in {".private", ".ai-toolbox", ".git", ".codex", ".vscode", "logs",
+                     "agents.md", "context.md", "status.md", "backlog.json",
+                     "findings.md", "progress.md", "task_plan.md"}
+               or p.startswith(".env") for p in parts) or name.lower().endswith((".log", ".tmp", ".user"))
+
+
+def allowed_source_name(name: str) -> bool:
+    root_files = {
+        "Directory.Build.props", "global.json", "V2rayNMonitor.sln", "LICENSE", "README.md", "SECURITY.md",
+        "THIRD-PARTY-NOTICES.md", "web/package.json", "web/package-lock.json",
+        "web/tsconfig.json", "web/index.html", "web/playwright.config.mjs", "web/README.md",
+        "web/public/icon.ico", "web/public/icon.svg", "web/public/icon-256.png",
+        "tests/fixtures/README.md", "tests/fixtures/provider-synthetic.csv",
+        "tests/test_prepare_release.py",
+        "scripts/prepare_release.py", "scripts/prepare_core_component.py",
+        "scripts/generate_icons.py", "scripts/smoke_demo.py",
+        "docs/architecture.md", "docs/compatibility.md", "docs/QUICKSTART.md",
+        "docs/release-v0.2.0.md", "docs/singbox-extension-scope.md",
+        "docs/proposals/scope-ledger-v2.sql", "docs/proposals/scope-ledger-v3.sql",
+    }
+    source_patterns = ("src/*/*.cs", "src/*/*.csproj", "tests/*.Tests/*.cs", "tests/*.Tests/*.csproj",
+                       "web/src/*.ts", "web/src/*.css", "web/tests/*.mjs",
+                       "extensions/*/*.patch", "extensions/*/*.go", "extensions/*/build-ci.ps1",
+                       "extensions/*/README.md", "extensions/*/LICENSE", "extensions/*/COPYING",
+                       "licenses/*.txt")
+    return not private_name(name) and (name in root_files or any(
+        fnmatchcase(name, pattern) for pattern in source_patterns))
+
+
+def read_source(path: Path) -> None:
+    """Reject a dirty sealed source ZIP; never rewrite its build identity."""
+    with zipfile.ZipFile(path) as archive:
+        seen = set()
+        files = set()
+        for member in archive.infolist():
+            name = member.filename.rstrip("/") if member.is_dir() else member.filename
+            safe_name(name)
+            require(name.casefold() not in seen and not private_name(name),
+                    "Private, development or duplicate source entry")
+            seen.add(name.casefold())
+            require(not stat.S_ISLNK(member.external_attr >> 16) and not member.flag_bits & 1,
+                    "Linked or encrypted source entry")
+            if member.is_dir():
+                continue
+            require(allowed_source_name(name),
+                    "Source entry is outside the rebuild file list")
+            files.add(name)
+        require({"Directory.Build.props", "global.json", "V2rayNMonitor.sln", "src/Host/Host.csproj", "LICENSE",
+                 "web/package.json", "web/package-lock.json", "docs/proposals/scope-ledger-v2.sql",
+                 "docs/proposals/scope-ledger-v3.sql"} <= files,
+                "Incomplete rebuild source archive")
+        require(archive.testzip() is None, "Invalid Monitor source archive")
+
+
+def prepare_source_archive(output: Path, source_ref: str) -> dict:
+    """Select rebuild inputs from one Git commit before building/sealing."""
+    plain_path(output)
+    require(not output.exists() and output.suffix.lower() == ".zip", "Source output must be a new ZIP")
+    require(bool(source_ref) and not source_ref.startswith("-"), "Invalid source ref")
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(["git", "-C", str(ROOT), "--literal-pathspecs", *args],
+                                       stderr=subprocess.PIPE)
+    commit = git("rev-parse", "--verify", source_ref + "^{commit}").decode().strip()
+    require(re.fullmatch(r"[0-9a-f]{40}", commit) is not None, "Invalid source commit")
+    tracked = git("ls-tree", "-r", "--name-only", "-z", commit).decode("utf-8").split("\0")
+    files = [name for name in tracked if name and allowed_source_name(name)]
+    require(bool(files), "No rebuild inputs at the source commit")
+    for name in files:
+        safe_name(name)
+    with tempfile.TemporaryDirectory(prefix="monitor-source-") as staging:
+        candidate = Path(staging) / "source.zip"
+        candidate.write_bytes(git("archive", "--format=zip", commit, "--", *files))
+        read_source(candidate)
+        with output.open("xb") as target, candidate.open("rb") as source:
+            shutil.copyfileobj(source, target)
+    return {"sourceCommit": commit, "sourceArchiveSha256": sha256(output), "fileCount": len(files)}
+
+
 def read_runtime(directory: Path, receipt: Path) -> tuple[dict, dict[str, Path]]:
     plain_path(directory)
     plain_path(receipt)
@@ -71,6 +159,7 @@ def read_runtime(directory: Path, receipt: Path) -> tuple[dict, dict[str, Path]]
     for item in info["files"]:
         name = item["name"]
         safe_name(name)
+        require(not private_name(name), "Private or development runtime entry")
         key = name.casefold()
         require(key not in identities, "Duplicate runtime filename")
         require(PurePosixPath(name).suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".csv", ".lnk", ".key", ".pem"}
@@ -161,9 +250,7 @@ def prepare(publish: Path, receipt: Path, source_archive: Path,
     plain_path(source_archive)
     require(info.get("sourceArchiveSha256") == sha256(source_archive),
             "Monitor source archive differs from the sealed build receipt")
-    with zipfile.ZipFile(source_archive) as source:
-        require("src/Host/Host.csproj" in source.namelist() and source.testzip() is None,
-                "Invalid Monitor source archive")
+    read_source(source_archive)
     components = {}
     for component, spec in component_catalog().items():
         metadata, files = read_component(component_directory / spec["assetName"], spec, component)
@@ -173,9 +260,11 @@ def prepare(publish: Path, receipt: Path, source_archive: Path,
         path = ROOT / name
         plain_path(path)
         common[name] = path
-    for path in (ROOT / "licenses").iterdir():
+    for name in ("DOTNET-MIT.txt", "DOTNET-THIRD-PARTY.txt", "SQLITE-PUBLIC-DOMAIN.txt",
+                 "SQLITEPCLRAW-APACHE-2.0.txt"):
+        path = ROOT / "licenses" / name
         plain_path(path)
-        require(path.is_file(), "Unexpected runtime license entry")
+        require(path.is_file(), "Missing runtime license entry")
         common["licenses/" + path.name] = path
     common["source/monitor-source.zip"] = source_archive
     common_hashes = {n: sha256(p) for n, p in common.items()}
@@ -238,15 +327,27 @@ def prepare(publish: Path, receipt: Path, source_archive: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--publish-dir", required=True, type=Path)
-    parser.add_argument("--runtime-input", required=True, type=Path, help="Sealed native build receipt with file identities")
-    parser.add_argument("--source-archive", required=True, type=Path, help="Fixed Monitor source ZIP for the build")
-    parser.add_argument("--component-dir", required=True, type=Path, help="Existing fixed independent component ZIPs")
-    parser.add_argument("--output", required=True, type=Path, help="New local candidate directory")
+    parser.add_argument("--prepare-source-archive", type=Path, help="Prepare a new rebuild-source ZIP before building/sealing")
+    parser.add_argument("--source-ref", help="Exact Git commit/ref for --prepare-source-archive")
+    parser.add_argument("--publish-dir", type=Path)
+    parser.add_argument("--runtime-input", type=Path, help="Sealed native build receipt with file identities")
+    parser.add_argument("--source-archive", type=Path,
+                        help="Sealed rebuild-source ZIP; omit private data and development records before building/sealing")
+    parser.add_argument("--component-dir", type=Path, help="Existing fixed independent component ZIPs")
+    parser.add_argument("--output", type=Path, help="New local candidate directory")
     args = parser.parse_args()
+    release_inputs = (args.publish_dir, args.runtime_input, args.source_archive, args.component_dir, args.output)
+    if args.prepare_source_archive:
+        if not args.source_ref or any(release_inputs):
+            parser.error("Source preparation requires --source-ref and cannot be mixed with release inputs")
+    elif args.source_ref or not all(release_inputs):
+        parser.error("Provide all five release inputs, or --prepare-source-archive with --source-ref")
     try:
-        prepare(args.publish_dir, args.runtime_input, args.source_archive, args.component_dir, args.output)
-    except (ValueError, OSError, zipfile.BadZipFile, KeyError) as error:
+        if args.prepare_source_archive:
+            print(json.dumps(prepare_source_archive(args.prepare_source_archive, args.source_ref)))
+        else:
+            prepare(args.publish_dir, args.runtime_input, args.source_archive, args.component_dir, args.output)
+    except (ValueError, OSError, subprocess.CalledProcessError, zipfile.BadZipFile, KeyError) as error:
         print(f"Release preparation failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
