@@ -71,7 +71,7 @@ def private_name(name: str) -> bool:
 
 def allowed_source_name(name: str) -> bool:
     root_files = {
-        "Directory.Build.props", "V2rayNMonitor.sln", "LICENSE", "README.md", "SECURITY.md",
+        "Directory.Build.props", "global.json", "V2rayNMonitor.sln", "LICENSE", "README.md", "SECURITY.md",
         "THIRD-PARTY-NOTICES.md", "web/package.json", "web/package-lock.json",
         "web/tsconfig.json", "web/index.html", "web/playwright.config.mjs", "web/README.md",
         "web/public/icon.ico", "web/public/icon.svg", "web/public/icon-256.png",
@@ -110,7 +110,7 @@ def read_source(path: Path) -> None:
             require(allowed_source_name(name),
                     "Source entry is outside the rebuild file list")
             files.add(name)
-        require({"Directory.Build.props", "V2rayNMonitor.sln", "src/Host/Host.csproj", "LICENSE",
+        require({"Directory.Build.props", "global.json", "V2rayNMonitor.sln", "src/Host/Host.csproj", "LICENSE",
                  "web/package.json", "web/package-lock.json", "docs/proposals/scope-ledger-v2.sql",
                  "docs/proposals/scope-ledger-v3.sql"} <= files,
                 "Incomplete rebuild source archive")
