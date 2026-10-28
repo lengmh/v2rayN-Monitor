@@ -22,14 +22,9 @@ P2 修正：环图随列宽放大并居中；色点从节点按钮内移到独�
 
 ## 视觉目标
 
-用户选择 Graphite Console，随后确认浅色配色。最新文字要求优先于早期概念图：排行及同名对照只显示合计，上下行进入悬浮窗；恢复量用合计左侧灰点提示；策略组用节点名细描边，具体组名悬浮显示。
+设计采用 Graphite Console 及已确认的浅色配色，最终展示规则为：排行及同名对照只显示合计，上下行进入悬浮窗；恢复量用合计左侧灰点提示；策略组用节点名细描边，具体组名悬浮显示。
 
-原始视觉目标位于本轮工作目录 `/workspace/scratch/c22955d9672a/generated_images/`：
-
-- 浅色概览：`exec-e968d9d2-13e4-479a-a318-abfc2b4fba44.png`。
-- 深色概览：`exec-6027478b-b2d9-4390-804c-665bce34b3fc.png`。
-- 恢复量组件：`exec-4604e61b-9c9a-41e6-9c83-ab222a4bb3ad.png`。
-- 探测、服务商、同名对照、导入、设置：分别为 `exec-8369f86c`、`exec-43732751`、`exec-1ba61fa3`、`exec-4bd37da1`、`exec-eb6f4879` 开头的原始 PNG。同名对照使用修正后的两柱版本。
+视觉目标为 Graphite Console 的深浅概览、恢复量组件、探测、服务商、同名对照、导入和设置；同名对照采用修正后的两柱版本。
 
 仓库中的并置对照包含实际源图，方便独立复核：[浅色](docs/ui-preview/comparison-light.jpg)、[深色](docs/ui-preview/comparison-dark.jpg)、[其余页面](docs/ui-preview/comparison-pages.jpg)、[流量弹窗细节](docs/ui-preview/comparison-popover.jpg)。对照图不是将不同时间的独立观察当作比较。
 
