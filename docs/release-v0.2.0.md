@@ -1,6 +1,6 @@
-# v0.2.0 发布准备与升级说明
+# v0.2.0 发布与升级说明
 
-本文用于 v0.2.0 的发包与升级。正式版本、下载地址和最终摘要以经确认后发布的 Release 为准；本地候选、远端 CI、正式发布和本机启用分别记录，不互相替代。
+v0.2.0 已发布，源码固定 `aaf5bf199a4e11ebf49898804f9356f4f57e2a5b`，主 CI `40495830773` 的 Windows／Ubuntu 成功，最终 Windows 产物为 artifact `12730498889`、运行时 .NET 10.0.14。三档包、外部摘要及 manifest 的远端／重新下载核验通过。下载与最终摘要见 [正式 Release](https://github.com/lengmh/v2rayN-Monitor/releases/tag/v0.2.0)；发布后交付及页面确认已收口，本文升级步骤是通用操作要求。
 
 ## 三档独立下载包
 
@@ -26,7 +26,7 @@ sing-box test.5 已含普通统计和探测能力，不为档位重新安装。�
 - 可选联动快捷方式、配套核心下载／安装／恢复、原生确认、单步离线账本交接和运行能力核验。
 - 可重建的日级历史汇总：历史结果复用，源变更只使受影响日期失效；当天和不适用查询回退原始路径。
 
-普通采集、页面、CSV、恢复、资源与安装器沿用已确认的分层证据，见在线 [支持矩阵](https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/compatibility.md) 及 [验收清单](https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/acceptance-reconciliation.md)。G4 依据用户确认的隔离范围收口，不能写成已经执行真实客户端安装／重载。S5.8 按已交付范围验收，不再单独安排。
+普通采集、页面、CSV、恢复、资源与安装器沿用已确认的分层证据，见在线 [支持矩阵](https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/compatibility.md) 及 [验收清单](https://github.com/lengmh/v2rayN-Monitor/blob/main/docs/acceptance-reconciliation.md)。G4 依据已确认的隔离范围收口，不能写成已经执行真实客户端安装／重载。S5.8 按已交付范围验收，不再单独安排。
 
 ## 支持与计量边界
 
@@ -49,9 +49,9 @@ sing-box test.5 已含普通统计和探测能力，不为档位重新安装。�
 
 旧 provider 的原导入记录继续可读。批次引用未启用时，旧批次不可撤销；不能为了显示新按钮回填不存在的引用。默认不保存原 CSV 文件，数据库中的导入记录不等同于原文件字节。
 
-### 本机两目录合并的交付顺序
+### 多数据目录的合并要求
 
-S5.4完成后计划覆盖旧程序并合并旧版与预览包的全部数据，包含服务商CSV导入。该具体数据操作在发布后安排，不由本打包脚本执行。
+数据目录合并不由打包脚本自动执行。已有交付已完成并验收；后续有独立合并需求时，以下要求仍适用。
 
 1. 保留两个原始数据目录，分别建立一致性副本和摘要清单。
 2. 按版本迁移旧历史副本，再按可靠身份核对分钟、未分时、缺口、展示证据和持久状态。重复记录不叠加，冲突不静默覆盖；历史游标不能代替当前有效采集游标。
@@ -75,4 +75,4 @@ python scripts/prepare_release.py --publish-dir <sealed-win-x64-publish> --runti
 
 Monitor 原创代码采用 MIT；运行时许可位于 `licenses/`。full／extended 随附的 sing-box 为独立 GPL-3.0-or-later 程序，包含完整 COPYING、固定上游归档、四层补丁及构建记录；extended 的 Xray 实验组件采用 MPL-2.0，同样保留固定上游、补丁、回归源文件和构建记录。组件各自的元数据保留原构建版本，不冒充由本次 Monitor 构建重新生成。
 
-候选不包含真实历史库、服务商 CSV、节点资料、完整核心配置、订阅或凭据。新增数据合并的本机回执只留专用过程目录，不进入发布包或公开仓库。
+候选不包含真实历史库、服务商 CSV、节点资料、完整核心配置、订阅或凭据。数据操作的原始材料仅留本机，不进入发布包或公开仓库。
