@@ -123,6 +123,14 @@ public sealed class LedgerTests : IDisposable
     [InlineData("Synthetic 0.5x", "0.5")]
     [InlineData("Synthetic 0.5倍", "0.5")]
     [InlineData("Synthetic 2倍", "2")]
+    [InlineData("Synthetic 2倍率", "2")]
+    [InlineData("Synthetic [2倍率]", "2")]
+    [InlineData("Synthetic 0.5倍率", "0.5")]
+    [InlineData("Synthetic 0倍率", "0")]
+    [InlineData("Synthetic 2x 2.00倍率", "2")]
+    [InlineData("Synthetic 0.5x 2倍率", null)]
+    [InlineData("Synthetic VIP88倍率", "1")]
+    [InlineData("Synthetic 2倍率VIP", "1")]
     public void MultiplierUsesNodeMarkerOrDefaultsToOne(string name, string? expected)
     {
         using var ledger = new Ledger(Database, includeDisplayMetadata: true);
@@ -155,12 +163,42 @@ public sealed class LedgerTests : IDisposable
     }
 
     [Fact]
-    public void ScopeDisplayUsesCapturedGroupNameWithoutGuessingIndexIdOrCountingProbeTwice()
+    public void MultiplierSuffixFixPreservesStoredOneAndLeavesTransitionUnestimated()
+    {
+        const string name = "Synthetic 2倍率";
+        using (var ledger = new Ledger(Database, includeDisplayMetadata: true))
+        {
+            ledger.Accept(Sample(0, 0, name: name));
+            ledger.Accept(Sample(1, 10, name: name));
+        }
+        // Synthetic pre-fix snapshots: the full Chinese suffix was captured as the default rate.
+        RunSql("""
+            UPDATE ui_display_cursors SET snapshot=json_set(snapshot,'$.Rate','1');
+            UPDATE ui_display_records SET snapshot=json_set(snapshot,'$.Rate','1');
+            """);
+        using var reopened = new Ledger(Database);
+        Assert.Equal("10", reopened.Query(All()).Display!.EstimatedBilledBytes);
+        Assert.Equal("1", Assert.Single(reopened.Export(All())).Display!.Rate);
+        reopened.Accept(Sample(2, 20, name: name));
+        reopened.Accept(Sample(3, 30, name: name));
+        var result = reopened.Query(All());
+        Assert.Equal("30", result.Upload);
+        Assert.Equal("30", result.Display!.EstimatedBilledBytes);
+        Assert.Equal("20", result.Display.EstimateCoveredBytes);
+        Assert.Equal("10", result.Display.EstimateUnknownBytes);
+        Assert.Equal("10", Assert.Single(reopened.Export(All()), row => row.Display!.Rate == "1").Display!.EstimatedBilledBytes);
+        Assert.Equal("20", Assert.Single(reopened.Export(All()), row => row.Display!.Rate == "2").Display!.EstimatedBilledBytes);
+    }
+
+    [Theory]
+    [InlineData("Synthetic raw VIP88a 0.5x")]
+    [InlineData("Synthetic raw VIP88a 0.5倍率")]
+    public void ScopeDisplayUsesCapturedGroupNameWithoutGuessingIndexIdOrCountingProbeTwice(string originalName)
     {
         using var ledger = ScopeLedger.CreateNew(Database, includeProbes: true, includeDisplayMetadata: true);
         var member = new MeasurementScope("actual_member", "outbound",
             System.Text.Json.JsonSerializer.Serialize(new[] { new string('A', 64), "synthetic-out" }), "Legacy friendly label",
-            OutboundTag: "synthetic-out") { CapturedName = new("Synthetic raw VIP88a 0.5x", "US-1x") };
+            OutboundTag: "synthetic-out") { CapturedName = new(originalName, "US-1x") };
         var probe = member with { Basis = "probe_urltest_member" };
         var aggregate = new MeasurementScope("business", "aggregate", "business", "Synthetic total 2x");
         var at = Epoch;
@@ -171,13 +209,13 @@ public sealed class LedgerTests : IDisposable
         Assert.Equal("4503599627370496.5", result.Display!.EstimatedBilledBytes);
         Assert.Equal(large.ToString(CultureInfo.InvariantCulture), result.Upload);
         Assert.Null(Assert.Single(result.Scopes).Display!.MergeKey);
-        Assert.Equal("Synthetic raw VIP88a 0.5x", Assert.Single(result.ComparisonNodes).Name);
+        Assert.Equal(originalName, Assert.Single(result.ComparisonNodes).Name);
         Assert.Equal("4503599627370496.5", Assert.Single(result.ComparisonNodes).Display!.EstimatedBilledBytes);
         Assert.Equal("4503599627370496.5", Assert.Single(result.Series).Display!.EstimatedBilledBytes);
         Assert.Equal("US-1x", Assert.Single(Assert.Single(result.Records).Display!.Groups));
         Assert.Equal("1", ledger.Query(new("probe_urltest_member", at, at.AddMinutes(1), "UTC")).Display!.EstimatedBilledBytes);
         Assert.Null(ledger.Query(new("business", at, at.AddMinutes(1), "UTC")).Display!.EstimatedBilledBytes);
-        var filtered = ledger.Query(new("local_proxy", at, at.AddMinutes(1), "UTC") { ScopeName = "Synthetic raw VIP88a 0.5x" });
+        var filtered = ledger.Query(new("local_proxy", at, at.AddMinutes(1), "UTC") { ScopeName = originalName });
         Assert.Equal(result.Upload, filtered.Upload);
     }
 
