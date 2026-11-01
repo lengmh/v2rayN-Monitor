@@ -1,4 +1,16 @@
-# v0.2.0 发布与升级说明
+# v0.2.x 发布与升级说明
+
+## v0.2.1 倍率识别补丁
+
+v0.2.1 包含 [PR #41](https://github.com/lengmh/v2rayN-Monitor/pull/41) 的完整中文 `倍率` 后缀修复：例如 `Synthetic 2倍率` 按 2 倍、`Synthetic 0.5倍率` 按 0.5 倍保存；相互冲突的标记保持未知。原有标记边界、精确小数、零倍率和策略组标签规则不变，不扩展中文紧邻写法或 `倍率=2` 等前置语法。
+
+修复仅影响后续采集快照。已保存的倍率（包括此前默认保存的 1 倍）不在查询、导出或重开账本时重新解释；新旧快照交界仍遵循连续性保护。本补丁不修改 Schema、不回填历史、不重算服务商 CSV 计费值。
+
+补丁沿用 basic／full／extended 三档，文件名中的版本号为 `0.2.1`；配套 sing-box test.5 和 Xray monitor-test.1 不变。发布提交、程序产品版本、构建来源及校验值以 [v0.2.1 Release](https://github.com/lengmh/v2rayN-Monitor/releases/tag/v0.2.1) 附件中的清单为准。未发布时该链接可能尚不存在；候选包不冒称正式发行。
+
+升级继续按下文“已有数据升级”执行：只退出 Monitor，备份数据后替换程序，并保留原 `--data-dir` 和账本模式。已经使用包含 `fad2291` 修复的程序时，后续倍率识别行为相同；补丁版本号不意味着历史数据已经修正。
+
+## v0.2.0 基线发布
 
 v0.2.0 已发布，源码固定 `aaf5bf199a4e11ebf49898804f9356f4f57e2a5b`，主 CI `40495830773` 的 Windows／Ubuntu 成功，最终 Windows 产物为 artifact `12730498889`、运行时 .NET 10.0.14。三档包、外部摘要及 manifest 的远端／重新下载核验通过。下载与最终摘要见 [正式 Release](https://github.com/lengmh/v2rayN-Monitor/releases/tag/v0.2.0)；发布后交付及页面确认已收口，本文升级步骤是通用操作要求。
 

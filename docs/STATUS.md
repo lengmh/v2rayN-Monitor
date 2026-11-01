@@ -4,6 +4,7 @@
 
 ## 当前交付
 
+- 倍率识别补丁：PR #41 已合并为 `fad2291`，该提交的主 CI `40850422060` 已通过 Windows／Ubuntu；v0.2.1 使用相同修复并设置独立补丁版本。后续快照支持完整 `倍率` 后缀，旧快照保持原值。三档下载、最终发布提交、构建来源及发行状态以 [v0.2.1 Release](https://github.com/lengmh/v2rayN-Monitor/releases/tag/v0.2.1) 清单为准。
 - v0.2.0 已正式发布，源码固定为 `aaf5bf199a4e11ebf49898804f9356f4f57e2a5b`。basic／full／extended 三档共用 Monitor，组件随包提供，不自动安装或重载核心。
 - 38 项任务为 **done 34／in_progress 0／planned 1／deferred 3**。G1–G5、S5.8 和发布后交付均已收口，当前无剩余必做验收。#19／S5.7 保持冻结，TrafficMonitor 插件继续 deferred。
 - #15、#16、#18、#34 已以 completed 关闭；PR35／PR38 已合并。审查快照 PR33 已关闭、未合并，两条审查分支保留；其迁移兼容问题已由 PR36／`07ecb6e` 修复并进入正式源码。旧冻结 head 的评审记录不代表新一次重审。
