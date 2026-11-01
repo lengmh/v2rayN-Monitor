@@ -28,6 +28,8 @@
 
 **下载与升级：** [v0.2.0 Release](https://github.com/lengmh/v2rayN-Monitor/releases/tag/v0.2.0) 提供三档 ZIP、发布清单和 SHA256。正式包绑定 `aaf5bf1` 及精确 CI；数据目录／账本模式、组件安装和两目录受控合并见 [发布与升级说明](docs/release-v0.2.0.md)。下载或解压不自动覆盖核心、升级或合并数据库。
 
+**v0.2.1 倍率补丁：** 后续快照支持完整 `倍率` 后缀，例如 `2倍率`；已保存的历史倍率保持原值。版本、下载及最终发行状态见 [v0.2.1 Release](https://github.com/lengmh/v2rayN-Monitor/releases/tag/v0.2.1)，升级边界见 [补丁说明](docs/release-v0.2.0.md#v021-倍率识别补丁)。
+
 ## 能力分级
 
 v0.2.0 已按以下三档提供独立下载包，包名标明版本号与档位。三个包的 Monitor 程序文件相同，差异仅为随附组件；实际能力以已安装组件、运行核心和账本模式分别核验。
